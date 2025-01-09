@@ -9,7 +9,8 @@ from presto import Presto
 FULL_RES     = False
 WIDTH        = 80
 HEIGHT       = 80
-DEBUG        = False
+DEBUG        = True
+MAX_CYCLES   = 6
 
 
 ### Presto display handling
@@ -51,7 +52,7 @@ def change_cell(display, x, y, state):
 ### Life grid setup
 def initialise_everything(width, height, kind):
     if kind == 'soup':
-        grid = initialize_soup(width, height, border=20)
+        grid = initialize_soup(width, height, chance=0.15, border=20)
     if kind == 'spaceship':
         with open('spaceship.rle') as f:
             lines = f.readlines()
@@ -63,9 +64,12 @@ def initialise_everything(width, height, kind):
     neighbours = initialize_neighbours(grid)
     return (grid, neighbours)
 
+def empty_grid(width, height):
+    return [[False for _ in range(width)] for _ in range(height)]
+
 def initialize_soup(width, height, chance=0.2, border=0):
     if border:
-        grid = [[False for _ in range(width)] for _ in range(height)]
+        grid = empty_grid(width, height)
         for x in range(border, width-border):
             for y in range(border, height-border):
                 grid[x][y] = bool(random() < chance)
@@ -119,7 +123,7 @@ def parse_rle(lines):
     return width, height, born, survive, line_data
 
 def build_grid(width, height, line_data, x_offset=0, y_offset=0):
-    grid = [[False for _ in range(width)] for _ in range(height)]
+    grid = empty_grid(width, height)
     x = x_offset; y = y_offset
 
     for entry in line_data:
@@ -165,7 +169,7 @@ def count_neighbours(grid, x, y):
     return cnt
 
 def update_grid(display, grid, neighbours):
-    new_grid = [[False for _ in range(WIDTH)] for _ in range(HEIGHT)]
+    new_grid = empty_grid(WIDTH, HEIGHT)
     new_neighbours = [[neighbours[x][y] for y in range(HEIGHT)] for x in range(WIDTH)]
 
     for y in range(HEIGHT):
@@ -191,9 +195,7 @@ def update_grid(display, grid, neighbours):
     return new_grid, new_neighbours
 
 ### Main loop
-def main():
-    presto = Presto(full_res=FULL_RES)
-
+def main(presto):
     display = presto.display
     wipe(presto, display)
 
@@ -205,27 +207,37 @@ def main():
 
     presto.update()
 
-    # FIXME detect n cycles up to arbitrary max n
-    two_ago = []
-    one_ago = []
+    # capture up to MAX_CYCLES previous grids for comparison
+    cycles = [empty_grid(WIDTH, HEIGHT) for _ in range(MAX_CYCLES)]
+    generation = 0
+    cycle_index = 0
 
     while True:
         t = time.ticks_ms()
 
-        two_ago = one_ago
-        one_ago = grid
-
         grid, neighbours = update_grid(display, grid, neighbours)
         presto.update()
         g = time.ticks_ms() - t
-        if DEBUG:  print(str(1000/g)+" fps")
-        if one_ago == grid or two_ago == grid:
-            print("Reached steady state; reset in 5s")
-            time.sleep(5)
-            one_ago = two_ago = []
-            grid, neighbours = initialise_everything(WIDTH, HEIGHT, 'soup')
-            draw_grid(display, grid)
-            presto.update()
+        if DEBUG: print(str(1000/g)+" fps, generation "+str(generation))
+        cycles[cycle_index] = grid
+
+        cycle = False
+        for i in range(0, MAX_CYCLES):
+            if i == cycle_index:
+                continue
+            if cycles[cycle_index] == cycles[i]:
+                print("Reached steady state: "+str(cycle_index)+" matched existing "+str(i)+"; reset in 5s")
+                print("Generation "+str(generation))
+                time.sleep(2)
+                return
+
+        generation += 1
+        cycle_index += 1
+        if cycle_index >= MAX_CYCLES:
+            cycle_index = 0
 
 if __name__ == "__main__":
-    main()
+    presto = Presto(full_res=FULL_RES)
+
+    while True:
+        main(presto)
