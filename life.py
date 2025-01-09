@@ -195,11 +195,8 @@ def update_grid(display, grid, neighbours):
     return new_grid, new_neighbours
 
 ### Main loop
-def main(presto):
-    display = presto.display
-    wipe(presto, display)
-
-    if DEBUG: print(str(time.ticks_ms())+" - display wiped")
+def main(presto, display):
+    if DEBUG: print(str(time.ticks_ms())+" - started")
 
     grid, neighbours = initialise_everything(WIDTH, HEIGHT, 'soup')
     draw_grid(display, grid)
@@ -238,6 +235,8 @@ def main(presto):
 
 if __name__ == "__main__":
     presto = Presto(full_res=FULL_RES)
+    display = presto.display
 
     while True:
-        main(presto)
+        wipe(presto, display)
+        main(presto, display)
