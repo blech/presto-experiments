@@ -12,7 +12,8 @@ FULL_RES     = False
 WIDTH        = 80
 HEIGHT       = 80
 DEBUG        = True
-MAX_CYCLES   = 0 # disable cycle detection
+MAX_CYCLES   = 2 # disable cycle detection
+FILENAME     = 'tarantula'
 
 
 ### Presto display handling
@@ -207,10 +208,12 @@ async def update_grid(display, grid, neighbours):
     return new_grid, new_neighbours
 
 ### New grid setup
-def setup(presto, display):
+def setup(presto, display, kind="rle", filename=None):
     if DEBUG: print(str(time.ticks_ms())+" - started")
 
-    grid, neighbours = initialise_everything(WIDTH, HEIGHT, 'rle', 'tarantula')
+    if kind == 'rle' and not filename:
+        filename = FILENAME
+    grid, neighbours = initialise_everything(WIDTH, HEIGHT, kind, filename)
 
     draw_grid(display, grid)
     if DEBUG: print(str(time.ticks_ms())+" - initialized grid, neighbours")
@@ -242,7 +245,7 @@ async def _app_loop(presto, display, grid, neighbours, cycles, generation=0, cyc
                 if cycles[cycle_index] == cycles[i]:
                     print("Reached steady state: "+str(cycle_index)+" matched existing "+str(i)+"; reset in 5s")
                     print("Generation "+str(generation))
-                    grid, neighbours, cycles = setup(presto, display)
+                    grid, neighbours, cycles = setup(presto, display, "soup")
                     # this isn't very neat
                     cycle_index = -1
                     generation = -1
