@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import sys
@@ -6,11 +7,12 @@ from random import random
 
 from presto import Presto
 
+
 FULL_RES     = False
 WIDTH        = 80
 HEIGHT       = 80
 DEBUG        = True
-MAX_CYCLES   = 6
+MAX_CYCLES   = 0 # disable cycle detection
 
 
 ### Presto display handling
@@ -50,16 +52,23 @@ def change_cell(display, x, y, state):
 
 
 ### Life grid setup
-def initialise_everything(width, height, kind):
+def initialise_everything(width, height, kind, filename='spaceship'):
     if kind == 'soup':
         grid = initialize_soup(width, height, chance=0.15, border=20)
-    if kind == 'spaceship':
-        with open('spaceship.rle') as f:
-            lines = f.readlines()
-        width, height, born, survive, line_data = parse_rle(lines)
-        x_offset = int((WIDTH - width)/2)
-        y_offset = int((HEIGHT - height)/2)
-        grid = build_grid(WIDTH, HEIGHT, line_data, x_offset=x_offset, y_offset=y_offset)
+    if kind == 'rle':
+        try:
+            with open(f'{filename}.rle') as f:
+                lines = f.readlines()
+            width, height, born, survive, line_data = parse_rle(lines)
+            x_offset = 0
+            y_offset = int((HEIGHT - height)/2)
+            grid = build_grid(WIDTH, HEIGHT, line_data, x_offset=x_offset, y_offset=y_offset)
+        except Exception as e:
+            print(f"Specified filename {filename}.rle which didn't work: {e}")
+            raise
+
+    if not grid:
+        raise Exception(f"Didn't understand kind {kind}")
 
     neighbours = initialize_neighbours(grid)
     return (grid, neighbours)
@@ -78,17 +87,18 @@ def initialize_soup(width, height, chance=0.2, border=0):
 
 def initialize_neighbours(grid):
     neighbours = [[0 for _ in range(WIDTH)] for _ in range(HEIGHT)]
-    for y, row in enumerate(grid):
-        for x, state in enumerate(row):
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
             neighbours[x][y] = count_neighbours(grid, x, y)
     return neighbours
 
-### RLE file parsing (possibly broken?)
+### RLE file parsing
 def parse_rle_line(line):
     pattern = re.compile(r'(\d*)([bo$!])')
     result = []
     pos = 0
 
+    # FIXME: not handling \d$ case
     while pos < len(line):
         match = pattern.search(line[pos:])
         if not match:
@@ -96,9 +106,9 @@ def parse_rle_line(line):
 
         count_str = match.group(1)
         char = match.group(2)
-        count = int(count_str) if count_str else 1
+        num = int(count_str) if count_str else 1
 
-        result.append((count, char))
+        result.append((num, char))
         pos += len(match.group(0))
 
     return result
@@ -106,12 +116,13 @@ def parse_rle_line(line):
 def parse_rle(lines):
     header = lines[0]
     lines = lines[1:]
-    lines = ''.join(lines).strip('\n')
+    lines = ''.join(lines).replace('\n', '')
     header_pattern = re.compile(r'x\s?=\s?(\d+).*?y\s?=\s?(\d+).*?B(\d+).*?S(\d+.)')
     header_matches = header_pattern.search(header)
     try:
         born = header_matches.group(3)
         survive = header_matches.group(4)
+    # FIXME MicroPython throws a different index matching error here
     except IndexError:
         print("No or improper rule in file; defaulting to B3/S23.")
         born = "3"
@@ -124,15 +135,16 @@ def parse_rle(lines):
 
 def build_grid(width, height, line_data, x_offset=0, y_offset=0):
     grid = empty_grid(width, height)
-    x = x_offset; y = y_offset
+    x = x_offset
+    y = y_offset
 
     for entry in line_data:
-        count, kind = entry
+        num, kind = entry
         if kind == 'b':
-            x += count
+            x += num
         if kind == 'o':
-            for _ in range(count):
-                grid[y][x] = True
+            for _ in range(num):
+                grid[x][y] = True
                 x += 1
         if kind == '$':
             x = x_offset
@@ -168,7 +180,7 @@ def count_neighbours(grid, x, y):
                 cnt += 1
     return cnt
 
-def update_grid(display, grid, neighbours):
+async def update_grid(display, grid, neighbours):
     new_grid = empty_grid(WIDTH, HEIGHT)
     new_neighbours = [[neighbours[x][y] for y in range(HEIGHT)] for x in range(WIDTH)]
 
@@ -194,11 +206,12 @@ def update_grid(display, grid, neighbours):
 
     return new_grid, new_neighbours
 
-### Main loop
-def main(presto, display):
+### New grid setup
+def setup(presto, display):
     if DEBUG: print(str(time.ticks_ms())+" - started")
 
-    grid, neighbours = initialise_everything(WIDTH, HEIGHT, 'soup')
+    grid, neighbours = initialise_everything(WIDTH, HEIGHT, 'rle', 'tarantula')
+
     draw_grid(display, grid)
     if DEBUG: print(str(time.ticks_ms())+" - initialized grid, neighbours")
 
@@ -206,37 +219,49 @@ def main(presto, display):
 
     # capture up to MAX_CYCLES previous grids for comparison
     cycles = [empty_grid(WIDTH, HEIGHT) for _ in range(MAX_CYCLES)]
-    generation = 0
-    cycle_index = 0
+
+    return grid, neighbours, cycles
+
+async def _app_loop(presto, display, grid, neighbours, cycles, generation=0, cycle_index=0):
+    loop = asyncio.get_event_loop()
 
     while True:
         t = time.ticks_ms()
-
-        grid, neighbours = update_grid(display, grid, neighbours)
+        grid, neighbours = await update_grid(display, grid, neighbours)
         presto.update()
-        g = time.ticks_ms() - t
-        if DEBUG: print(str(1000/g)+" fps, generation "+str(generation))
-        cycles[cycle_index] = grid
-
-        cycle = False
-        for i in range(0, MAX_CYCLES):
-            if i == cycle_index:
-                continue
-            if cycles[cycle_index] == cycles[i]:
-                print("Reached steady state: "+str(cycle_index)+" matched existing "+str(i)+"; reset in 5s")
-                print("Generation "+str(generation))
-                time.sleep(2)
-                return
 
         generation += 1
-        cycle_index += 1
-        if cycle_index >= MAX_CYCLES:
-            cycle_index = 0
 
+        if MAX_CYCLES:
+            cycles[cycle_index] = grid
+
+            cycle = False
+            for i in range(0, MAX_CYCLES):
+                if i == cycle_index:
+                    continue
+                if cycles[cycle_index] == cycles[i]:
+                    print("Reached steady state: "+str(cycle_index)+" matched existing "+str(i)+"; reset in 5s")
+                    print("Generation "+str(generation))
+                    grid, neighbours, cycles = setup(presto, display)
+                    # this isn't very neat
+                    cycle_index = -1
+                    generation = -1
+
+            cycle_index += 1
+            if cycle_index >= MAX_CYCLES:
+                cycle_index = 0
+
+        g = time.ticks_ms() - t
+        if DEBUG: print(str(1000/g)+" fps, generation "+str(generation))
+        await asyncio.sleep(0)
+
+### Go!
 if __name__ == "__main__":
     presto = Presto(full_res=FULL_RES)
     display = presto.display
 
-    while True:
-        wipe(presto, display)
-        main(presto, display)
+    wipe(presto, display)
+
+    grid, neighbours, cycles = setup(presto, display)
+
+    asyncio.run(_app_loop(presto, display, grid, neighbours, cycles))
