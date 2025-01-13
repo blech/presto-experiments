@@ -94,9 +94,9 @@ def initialize_kaleidosoup(width, height, chance=0.2, border=0):
         for y in range(border, height/2):
             state = bool(random() < chance)
             grid[x][y] = state
-            grid[width-x][y] = state
-            grid[x][height-y] = state
-            grid[width-x][height-y] = state
+            grid[width-x-1][y] = state
+            grid[x][height-y-1] = state
+            grid[width-x-1][height-y-1] = state
     return grid
 
 def initialize_neighbours(grid):
@@ -186,13 +186,13 @@ def count_neighbours(grid, x, y):
         (1, -1),   (1, 0), (1, 1)
     ]
 
-    cnt = 0
+    neighbours = 0
     for dx, dy in cells:
         nx, ny = x + dx, y + dy
         if 0 <= nx < HEIGHT and 0 <= ny < WIDTH:
             if grid[nx][ny]:
-                cnt += 1
-    return cnt
+                neighbours += 1
+    return neighbours
 
 async def update_grid(display, grid, neighbours):
     new_grid = empty_grid(WIDTH, HEIGHT)
