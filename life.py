@@ -12,8 +12,8 @@ FULL_RES     = False
 WIDTH        = 80
 HEIGHT       = 80
 DEBUG        = True
-MAX_CYCLES   = 2 # disable cycle detection
-FILENAME     = 'tarantula'
+MAX_CYCLES   = 3 # set 0 to disable cycle detection
+FILENAME     = 'xs108_derived_test'
 
 
 ### Presto display handling
@@ -56,12 +56,14 @@ def change_cell(display, x, y, state):
 def initialise_everything(width, height, kind, filename='spaceship'):
     if kind == 'soup':
         grid = initialize_soup(width, height, chance=0.15, border=20)
+    if kind == 'kaleidosoup':
+        grid = initialize_kaleidosoup(width, height, chance=0.15, border=5)
     if kind == 'rle':
         try:
             with open(f'{filename}.rle') as f:
                 lines = f.readlines()
             width, height, born, survive, line_data = parse_rle(lines)
-            x_offset = 0
+            x_offset = int((WIDTH - width)/2)
             y_offset = int((HEIGHT - height)/2)
             grid = build_grid(WIDTH, HEIGHT, line_data, x_offset=x_offset, y_offset=y_offset)
         except Exception as e:
@@ -78,13 +80,24 @@ def empty_grid(width, height):
     return [[False for _ in range(width)] for _ in range(height)]
 
 def initialize_soup(width, height, chance=0.2, border=0):
-    if border:
-        grid = empty_grid(width, height)
-        for x in range(border, width-border):
-            for y in range(border, height-border):
-                grid[x][y] = bool(random() < chance)
-        return grid
-    return [[bool(random() < chance) for _ in range(width)] for _ in range(height)]
+    # random starting point ('soup') with an optional border to give it room to grow
+    grid = empty_grid(width, height)
+    for x in range(border, width-border):
+        for y in range(border, height-border):
+            grid[x][y] = bool(random() < chance)
+    return grid
+
+def initialize_kaleidosoup(width, height, chance=0.2, border=0):
+    # soup, but four-fold symmetry
+    grid = empty_grid(width, height)
+    for x in range(border, width/2):
+        for y in range(border, height/2):
+            state = bool(random() < chance)
+            grid[x][y] = state
+            grid[width-x][y] = state
+            grid[x][height-y] = state
+            grid[width-x][height-y] = state
+    return grid
 
 def initialize_neighbours(grid):
     neighbours = [[0 for _ in range(WIDTH)] for _ in range(HEIGHT)]
@@ -149,7 +162,7 @@ def build_grid(width, height, line_data, x_offset=0, y_offset=0):
                 x += 1
         if kind == '$':
             x = x_offset
-            y += 1
+            y += num
 
     return grid
 
@@ -245,7 +258,7 @@ async def _app_loop(presto, display, grid, neighbours, cycles, generation=0, cyc
                 if cycles[cycle_index] == cycles[i]:
                     print("Reached steady state: "+str(cycle_index)+" matched existing "+str(i)+"; reset in 5s")
                     print("Generation "+str(generation))
-                    grid, neighbours, cycles = setup(presto, display, "soup")
+                    grid, neighbours, cycles = setup(presto, display, "kaleidosoup")
                     # this isn't very neat
                     cycle_index = -1
                     generation = -1
@@ -265,6 +278,6 @@ if __name__ == "__main__":
 
     wipe(presto, display)
 
-    grid, neighbours, cycles = setup(presto, display)
+    grid, neighbours, cycles = setup(presto, display, kind="kaleidosoup")
 
     asyncio.run(_app_loop(presto, display, grid, neighbours, cycles))
