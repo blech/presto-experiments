@@ -22,8 +22,13 @@ class Life:
         self.presto = Presto(full_res=FULL_RES)
         self.display = self.presto.display
 
+        # canvas
         self.width = WIDTH
         self.height = HEIGHT
+
+        # rules
+        self.born = [3]
+        self.survive = [2, 3]
 
 
     ### New grid setup
@@ -243,12 +248,12 @@ class Life:
                 if not current_cell and not neighbour_count:
                     continue
 
-                if not current_cell and neighbour_count == 3:
+                if not current_cell and neighbour_count in self.born:
                     new_grid[x][y] = True
                     self.change_cell(x, y, True)
                     new_neighbours = self.set_neighbours(new_neighbours, x, y, +1)
 
-                elif current_cell and neighbour_count not in [2, 3]:
+                elif current_cell and neighbour_count not in self.survive:
                     new_grid[x][y] = False
                     self.change_cell(x, y, False)
                     new_neighbours = self.set_neighbours(new_neighbours, x, y, -1)
