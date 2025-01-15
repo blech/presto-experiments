@@ -22,9 +22,23 @@ class Life:
         self.presto = Presto(full_res=FULL_RES)
         self.display = self.presto.display
 
+
+    ### New grid setup
+    def setup(self, kind="rle", filename=None):
+        if DEBUG: print(str(time.ticks_ms())+" - started")
         self.wipe()
 
-        self.grid, self.neighbours, self.cycles = self.setup(kind="kaleidosoup")
+        if kind == 'rle' and not filename:
+            filename = FILENAME
+        self.grid, self.neighbours = self.initialise_everything(WIDTH, HEIGHT, kind, filename)
+
+        self.draw_grid()
+        if DEBUG: print(str(time.ticks_ms())+" - initialized grid, neighbours")
+
+        self.presto.update()
+
+        # capture up to MAX_CYCLES previous grids for comparison
+        self.cycles = [self.empty_grid(WIDTH, HEIGHT) for _ in range(MAX_CYCLES)]
 
 
     ### Presto display handling
@@ -33,13 +47,13 @@ class Life:
         self.display.clear()
         self.presto.update()
 
-    def draw_block(self, display, x, y):
+    def draw_block(self, x, y):
         self.display.pixel(x*3, y*3)
         self.display.pixel(x*3+1, y*3)
         self.display.pixel(x*3+1, y*3+1)
         self.display.pixel(x*3, y*3+1)
 
-    def draw_grid(self, display, grid):
+    def draw_grid(self):
         BLACK = self.display.create_pen(0, 0, 0)
         WHITE = self.display.create_pen(255, 255, 255)
 
@@ -50,9 +64,9 @@ class Life:
         for x in range(WIDTH):
             for y in range(HEIGHT):
                 if self.grid[x][y]:
-                    self.draw_block(self.display, x, y)
+                    self.draw_block(x, y)
 
-    def change_cell(self, display, x, y, state):
+    def change_cell(self, x, y, state):
         WHITE = self.display.create_pen(255, 255, 255)
         GREY = self.display.create_pen(51, 51, 51)
 
@@ -60,7 +74,7 @@ class Life:
             self.display.set_pen(WHITE)
         else:
             self.display.set_pen(GREY)
-        self.draw_block(self.display, x, y)
+        self.draw_block(x, y)
 
 
     ### Noises
@@ -70,6 +84,7 @@ class Life:
         buzzer.duty_u16(32000)
         await asyncio.sleep(duration)
         buzzer.duty_u16(0)
+
 
     ### Life grid setup
     def initialise_everything(self, width, height, kind, filename='spaceship'):
@@ -92,7 +107,7 @@ class Life:
         if not self.grid:
             raise Exception(f"Didn't understand kind {kind}")
 
-        neighbours = self.initialize_neighbours(self.grid)
+        neighbours = self.initialize_neighbours()
         return (self.grid, neighbours)
 
     def empty_grid(self, width, height):
@@ -118,12 +133,13 @@ class Life:
                 grid[width-x-1][height-y-1] = state
         return grid
 
-    def initialize_neighbours(self, grid):
+    def initialize_neighbours(self):
         neighbours = [[0 for _ in range(WIDTH)] for _ in range(HEIGHT)]
         for y in range(HEIGHT):
             for x in range(WIDTH):
-                neighbours[x][y] = self.count_neighbours(grid, x, y)
+                neighbours[x][y] = self.count_neighbours(self.grid, x, y)
         return neighbours
+
 
     ### RLE file parsing
     def parse_rle_line(self, line):
@@ -226,18 +242,20 @@ class Life:
 
                 if not current_cell and neighbour_count == 3:
                     new_grid[x][y] = True
-                    self.change_cell(self.display, x, y, True)
+                    self.change_cell(x, y, True)
                     new_neighbours = self.set_neighbours(new_neighbours, x, y, +1)
 
                 elif current_cell and neighbour_count not in [2, 3]:
                     new_grid[x][y] = False
-                    self.change_cell(self.display, x, y, False)
+                    self.change_cell(x, y, False)
                     new_neighbours = self.set_neighbours(new_neighbours, x, y, -1)
 
                 elif current_cell:
                     new_grid[x][y] = True
 
-        return new_grid, new_neighbours
+        self.grid = new_grid
+        self.neighbours = new_neighbours
+
 
     ### New grid setup
     def setup(self, kind="rle", filename=None):
@@ -247,7 +265,7 @@ class Life:
             filename = FILENAME
         self.grid, self.neighbours = self.initialise_everything(WIDTH, HEIGHT, kind, filename)
 
-        self.draw_grid(self.display, self.grid)
+        self.draw_grid()
         if DEBUG: print(str(time.ticks_ms())+" - initialized grid, neighbours")
 
         self.presto.update()
@@ -255,14 +273,12 @@ class Life:
         # capture up to MAX_CYCLES previous grids for comparison
         self.cycles = [self.empty_grid(WIDTH, HEIGHT) for _ in range(MAX_CYCLES)]
 
-        return self.grid, self.neighbours, self.cycles
-
     async def _app_loop(self, generation=0, cycle_index=0):
         loop = asyncio.get_event_loop()
 
         while True:
             t = time.ticks_ms()
-            self.grid, self.neighbours = await self.update_grid(self.display, self.grid, self.neighbours)
+            await self.update_grid(self.display, self.grid, self.neighbours)
             self.presto.update()
 
             generation += 1
@@ -278,7 +294,7 @@ class Life:
                         print("Reached steady state: "+str(cycle_index)+" matched existing "+str(i)+"; reset in 5s")
                         print("Generation "+str(generation))
                         # await self.make_sound(440, 0.4)
-                        self.grid, self.neighbours, self.cycles = self.setup(self.display, "kaleidosoup")
+                        self.setup(kind="kaleidosoup")
                         # this isn't very neat
                         cycle_index = -1
                         generation = -1
@@ -292,8 +308,10 @@ class Life:
             if DEBUG: print(str(1000/g)+" fps, generation "+str(generation))
             await asyncio.sleep(0)
 
+
 ### Go!
 if __name__ == "__main__":
     life = Life()
+    life.setup(kind='kaleidosoup')
 
     asyncio.run(life._app_loop())
