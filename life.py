@@ -22,6 +22,9 @@ class Life:
         self.presto = Presto(full_res=FULL_RES)
         self.display = self.presto.display
 
+        self.width = WIDTH
+        self.height = HEIGHT
+
 
     ### New grid setup
     def setup(self, kind="rle", filename=None):
@@ -30,7 +33,7 @@ class Life:
 
         if kind == 'rle' and not filename:
             filename = FILENAME
-        self.grid, self.neighbours = self.initialise_everything(WIDTH, HEIGHT, kind, filename)
+        self.grid, self.neighbours = self.initialise_everything(kind, filename)
 
         self.draw_grid()
         if DEBUG: print(str(time.ticks_ms())+" - initialized grid, neighbours")
@@ -38,7 +41,7 @@ class Life:
         self.presto.update()
 
         # capture up to MAX_CYCLES previous grids for comparison
-        self.cycles = [self.empty_grid(WIDTH, HEIGHT) for _ in range(MAX_CYCLES)]
+        self.cycles = [self.empty_grid() for _ in range(MAX_CYCLES)]
 
 
     ### Presto display handling
@@ -61,8 +64,8 @@ class Life:
         self.display.clear()
         self.display.set_pen(WHITE)
 
-        for x in range(WIDTH):
-            for y in range(HEIGHT):
+        for x in range(self.width):
+            for y in range(self.height):
                 if self.grid[x][y]:
                     self.draw_block(x, y)
 
@@ -87,19 +90,19 @@ class Life:
 
 
     ### Life grid setup
-    def initialise_everything(self, width, height, kind, filename='spaceship'):
+    def initialise_everything(self, kind, filename='spaceship'):
         if kind == 'soup':
-            self.grid = self.initialize_soup(width, height, chance=0.15, border=20)
+            self.grid = self.initialize_soup(chance=0.15, border=20)
         if kind == 'kaleidosoup':
-            self.grid = self.initialize_kaleidosoup(width, height, chance=0.15, border=5)
+            self.grid = self.initialize_kaleidosoup(chance=0.15, border=5)
         if kind == 'rle':
             try:
                 with open(f'{filename}.rle') as f:
                     lines = f.readlines()
                 width, height, born, survive, line_data = self.parse_rle(lines)
-                x_offset = int((WIDTH - width)/2)
-                y_offset = int((HEIGHT - height)/2)
-                self.grid = self.build_grid(WIDTH, HEIGHT, line_data, x_offset=x_offset, y_offset=y_offset)
+                x_offset = int((self.width - width)/2)
+                y_offset = int((self.height - height)/2)
+                self.grid = self.build_grid(line_data, x_offset=x_offset, y_offset=y_offset)
             except Exception as e:
                 print(f"Specified filename {filename}.rle which didn't work: {e}")
                 raise
@@ -110,33 +113,33 @@ class Life:
         neighbours = self.initialize_neighbours()
         return (self.grid, neighbours)
 
-    def empty_grid(self, width, height):
-        return [[False for _ in range(width)] for _ in range(height)]
+    def empty_grid(self):
+        return [[False for _ in range(self.width)] for _ in range(self.height)]
 
-    def initialize_soup(self, width, height, chance=0.2, border=0):
+    def initialize_soup(self, chance=0.2, border=0):
         # random starting point ('soup') with an optional border to give it room to grow
-        grid = self.empty_grid(width, height)
-        for x in range(border, width-border):
-            for y in range(border, height-border):
+        grid = self.empty_grid()
+        for x in range(border, self.width-border):
+            for y in range(border, self.height-border):
                 grid[x][y] = bool(random() < chance)
         return grid
 
-    def initialize_kaleidosoup(self, width, height, chance=0.2, border=0):
+    def initialize_kaleidosoup(self, chance=0.2, border=0):
         # soup, but four-fold symmetry
-        grid = self.empty_grid(width, height)
-        for x in range(border, width/2):
-            for y in range(border, height/2):
+        grid = self.empty_grid()
+        for x in range(border, self.width/2):
+            for y in range(border, self.height/2):
                 state = bool(random() < chance)
                 grid[x][y] = state
-                grid[width-x-1][y] = state
-                grid[x][height-y-1] = state
-                grid[width-x-1][height-y-1] = state
+                grid[self.width-x-1][y] = state
+                grid[x][self.height-y-1] = state
+                grid[self.width-x-1][self.height-y-1] = state
         return grid
 
     def initialize_neighbours(self):
-        neighbours = [[0 for _ in range(WIDTH)] for _ in range(HEIGHT)]
-        for y in range(HEIGHT):
-            for x in range(WIDTH):
+        neighbours = [[0 for _ in range(self.width)] for _ in range(self.height)]
+        for y in range(self.height):
+            for x in range(self.width):
                 neighbours[x][y] = self.count_neighbours(self.grid, x, y)
         return neighbours
 
@@ -182,8 +185,8 @@ class Life:
         line_data = [(1, match[1]) if match[0] == '' else (int(match[0]), match[1]) for match in line_data]
         return width, height, born, survive, line_data
 
-    def build_grid(self, width, height, line_data, x_offset=0, y_offset=0):
-        grid = self.empty_grid(width, height)
+    def build_grid(self, line_data, x_offset=0, y_offset=0):
+        grid = self.empty_grid()
         x = x_offset
         y = y_offset
 
@@ -210,7 +213,7 @@ class Life:
             (1, -1),   (1, 0), (1, 1)
         ]
         for dx, dy in cells:
-            if 0 <= x+dx < WIDTH and 0 <= y+dy < HEIGHT:
+            if 0 <= x+dx < self.width and 0 <= y+dy < self.height:
                 neighbours[x+dx][y+dy] += change
         return neighbours
 
@@ -224,17 +227,17 @@ class Life:
         neighbours = 0
         for dx, dy in cells:
             nx, ny = x + dx, y + dy
-            if 0 <= nx < HEIGHT and 0 <= ny < WIDTH:
+            if 0 <= nx < self.height and 0 <= ny < self.width:
                 if self.grid[nx][ny]:
                     neighbours += 1
         return neighbours
 
     async def update_grid(self, display, grid, neighbours):
-        new_grid = self.empty_grid(WIDTH, HEIGHT)
-        new_neighbours = [[neighbours[x][y] for y in range(HEIGHT)] for x in range(WIDTH)]
+        new_grid = self.empty_grid()
+        new_neighbours = [[neighbours[x][y] for y in range(self.height)] for x in range(self.width)]
 
-        for y in range(HEIGHT):
-            for x in range(WIDTH):
+        for y in range(self.height):
+            for x in range(self.width):
                 current_cell = self.grid[x][y]
                 neighbour_count = neighbours[x][y]
                 if not current_cell and not neighbour_count:
@@ -263,7 +266,7 @@ class Life:
 
         if kind == 'rle' and not filename:
             filename = FILENAME
-        self.grid, self.neighbours = self.initialise_everything(WIDTH, HEIGHT, kind, filename)
+        self.grid, self.neighbours = self.initialise_everything(kind, filename)
 
         self.draw_grid()
         if DEBUG: print(str(time.ticks_ms())+" - initialized grid, neighbours")
@@ -271,7 +274,7 @@ class Life:
         self.presto.update()
 
         # capture up to MAX_CYCLES previous grids for comparison
-        self.cycles = [self.empty_grid(WIDTH, HEIGHT) for _ in range(MAX_CYCLES)]
+        self.cycles = [self.empty_grid() for _ in range(MAX_CYCLES)]
 
     async def _app_loop(self, generation=0, cycle_index=0):
         loop = asyncio.get_event_loop()
