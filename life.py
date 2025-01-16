@@ -1,28 +1,36 @@
 import asyncio
 import json
 import re
+import socket
 import sys
 import time
 from random import random
 
 import machine
+import network
 from presto import Presto
 
 
-FULL_RES     = False
-WIDTH        = 80
-HEIGHT       = 80
-DEBUG        = True
-MAX_CYCLES   = 6 # set 0 to disable cycle detection
-FILENAME     = 'tarantula'
+FULL_RES    = False
+WIDTH       = 80
+HEIGHT      = 80
+DEBUG       = False
+MAX_CYCLES  = 6 # set 0 to disable cycle detection
+FILENAME    = 'tarantula'
+LOG_COUNT   = True
+
+MCAST_GRP   = '239.255.255.250'
+MCAST_PORT  = 32301
 
 
 class Life:
     def __init__(self):
         self.presto = Presto(full_res=FULL_RES)
         self.display = self.presto.display
+        self.wipe()
 
-        # canvas
+        # canvas (it should be possible to calculate this)
+        # (but I need to fix up draw_block first)
         self.width = WIDTH
         self.height = HEIGHT
 
@@ -30,18 +38,51 @@ class Life:
         self.born = [3]
         self.survive = [2, 3]
 
+        self.socket = False
+        self.socket_setup_task =  asyncio.create_task(self.setup_socket())
+
+        self.start_tick = 0
+        self.end_tick = 0
+        self.generation = 0
+        self.cycle_index = 0
+
+
+    ### UDP setup
+    async def setup_socket(self):
+
+        self.presto.connect()
+        wlan = network.WLAN(network.AP_IF)
+        wlan.active(False)
+        host = wlan.ifconfig()[0]
+        addr = socket.getaddrinfo(host, MCAST_PORT)[0][-1]
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(addr)
+        self.socket = s
+
+    async def report(self):
+        duration = self.end_tick - self.start_tick
+        fps = 1000/duration
+        if self.socket:
+            if LOG_COUNT:
+                cells = sum([sum([cell for cell in row]) for row in self.grid])
+                self.socket.sendto(f'{fps:.2f} fps, generation {self.generation}, {cells} alive', (MCAST_GRP, MCAST_PORT))
+            else:
+                self.socket.sendto(f'{fps:.2f} fps, generation {self.generation}', (MCAST_GRP, MCAST_PORT))
 
     ### New grid setup
     def setup(self, kind="rle", filename=None):
-        if DEBUG: print(str(time.ticks_ms())+" - started")
-        self.wipe()
+        if DEBUG:
+            print(str(time.ticks_ms())+" - started")
 
         if kind == 'rle' and not filename:
             filename = FILENAME
         self.grid, self.neighbours = self.initialise_everything(kind, filename)
 
         self.draw_grid()
-        if DEBUG: print(str(time.ticks_ms())+" - initialized grid, neighbours")
+        if DEBUG:
+            print(str(time.ticks_ms())+" - initialized grid, neighbours")
 
         self.presto.update()
 
@@ -97,9 +138,9 @@ class Life:
     ### Life grid setup
     def initialise_everything(self, kind, filename='spaceship'):
         if kind == 'soup':
-            self.grid = self.initialize_soup(chance=0.15, border=20)
+            grid = self.initialize_soup(chance=0.15, border=20)
         if kind == 'kaleidosoup':
-            self.grid = self.initialize_kaleidosoup(chance=0.15, border=5)
+            grid = self.initialize_kaleidosoup(chance=0.15, border=5)
         if kind == 'rle':
             try:
                 with open(f'{filename}.rle') as f:
@@ -107,16 +148,16 @@ class Life:
                 width, height, born, survive, line_data = self.parse_rle(lines)
                 x_offset = int((self.width - width)/2)
                 y_offset = int((self.height - height)/2)
-                self.grid = self.build_grid(line_data, x_offset=x_offset, y_offset=y_offset)
+                grid = self.build_grid(line_data, x_offset=x_offset, y_offset=y_offset)
             except Exception as e:
                 print(f"Specified filename {filename}.rle which didn't work: {e}")
                 raise
 
-        if not self.grid:
+        if not grid:
             raise Exception(f"Didn't understand kind {kind}")
 
-        neighbours = self.initialize_neighbours()
-        return (self.grid, neighbours)
+        neighbours = self.initialize_neighbours(grid)
+        return (grid, neighbours)
 
     def empty_grid(self):
         return [[False for _ in range(self.width)] for _ in range(self.height)]
@@ -141,11 +182,11 @@ class Life:
                 grid[self.width-x-1][self.height-y-1] = state
         return grid
 
-    def initialize_neighbours(self):
+    def initialize_neighbours(self, grid):
         neighbours = [[0 for _ in range(self.width)] for _ in range(self.height)]
         for y in range(self.height):
             for x in range(self.width):
-                neighbours[x][y] = self.count_neighbours(self.grid, x, y)
+                neighbours[x][y] = self.count_neighbours(grid, x, y)
         return neighbours
 
 
@@ -233,7 +274,7 @@ class Life:
         for dx, dy in cells:
             nx, ny = x + dx, y + dy
             if 0 <= nx < self.height and 0 <= ny < self.width:
-                if self.grid[nx][ny]:
+                if grid[nx][ny]:
                     neighbours += 1
         return neighbours
 
@@ -261,59 +302,69 @@ class Life:
                 elif current_cell:
                     new_grid[x][y] = True
 
+        generation = self.generation + 1
+        self.generation = generation
+
         self.grid = new_grid
         self.neighbours = new_neighbours
 
 
     ### New grid setup
     def setup(self, kind="rle", filename=None):
-        if DEBUG: print(str(time.ticks_ms())+" - started")
+        if DEBUG:
+            print(str(time.ticks_ms())+" - started")
 
         if kind == 'rle' and not filename:
             filename = FILENAME
         self.grid, self.neighbours = self.initialise_everything(kind, filename)
 
         self.draw_grid()
-        if DEBUG: print(str(time.ticks_ms())+" - initialized grid, neighbours")
+        if DEBUG:
+            print(str(time.ticks_ms())+" - initialized grid, neighbours")
 
         self.presto.update()
 
         # capture up to MAX_CYCLES previous grids for comparison
         self.cycles = [self.empty_grid() for _ in range(MAX_CYCLES)]
+        self.cycle_index = 0
+        self.generation = 0
 
-    async def _app_loop(self, generation=0, cycle_index=0):
+    async def _app_loop(self):
         loop = asyncio.get_event_loop()
 
         while True:
-            t = time.ticks_ms()
+            self.start_tick = time.ticks_ms()
             await self.update_grid(self.display, self.grid, self.neighbours)
             self.presto.update()
 
-            generation += 1
-
             if MAX_CYCLES:
-                self.cycles[cycle_index] = self.grid
+                self.cycles[self.cycle_index] = self.grid
 
                 cycle = False
                 for i in range(0, MAX_CYCLES):
-                    if i == cycle_index:
+                    if i == self.cycle_index:
                         continue
-                    if self.cycles[cycle_index] == self.cycles[i]:
-                        print("Reached steady state: "+str(cycle_index)+" matched existing "+str(i)+"; reset in 5s")
-                        print("Generation "+str(generation))
-                        # await self.make_sound(440, 0.4)
-                        self.setup(kind="kaleidosoup")
-                        # this isn't very neat
-                        cycle_index = -1
-                        generation = -1
+                    if self.cycles[self.cycle_index] == self.cycles[i]:
+                        cycle = True
                         break
 
-                cycle_index += 1
-                if cycle_index >= MAX_CYCLES:
-                    cycle_index = 0
+                if cycle:
+                    if self.socket:
+                        self.socket.sendto("Reached steady state: "+str(self.cycle_index)+" matched existing "+str(i)+"; reset in 5s", (MCAST_GRP, MCAST_PORT))
+                    print("Reached steady state: "+str(self.cycle_index)+" matched existing "+str(i)+"; reset in 5s")
+                    if DEBUG:
+                        print("Generation "+str(self.generation))
+                    # await self.make_sound(440, 0.4)
+                    self.setup(kind="kaleidosoup")
 
-            g = time.ticks_ms() - t
-            if DEBUG: print(str(1000/g)+" fps, generation "+str(generation))
+                else:
+                    self.cycle_index += 1
+                    if self.cycle_index >= MAX_CYCLES:
+                        self.cycle_index = 0
+
+            self.end_tick = time.ticks_ms()
+
+            await self.report()
             await asyncio.sleep(0)
 
 
