@@ -3,13 +3,15 @@
 # See https://www.gerhard-richter.com/en/art/paintings/abstracts/colour-charts-12/4096-colours-6089
 
 import time
-from random import randrange
+from random import randrange, randint
 
 from presto import Presto
 
 PIXEL_SIZE = 7    # Size of each rectangle: 64*7 = 448
 COLOUR_STEP = 12  # How much to increment the RGB step; not 16 for a faded quality
 OFFSET = 16       # Since 448 < 480 and 64*8 > 480, centre the drawn pixels
+
+TICK = 5          # Seconds between redraws
 
 from random import randrange
 
@@ -35,10 +37,28 @@ def main():
     display.clear()
     presto.set_backlight(0.25)
     pens = get_pens(display)
+    shuffle(pens)
+
+    SWAP_COUNT = 1
 
     while True:
-        shuffle(pens)
+        # twiddle neighbouring cells, SWAP_COUNT times
+        print(SWAP_COUNT)
+        for i in range(0, SWAP_COUNT):
+            idx = randint(0, 4096)
+            swap = idx - 1
 
+            if swap < 0:
+                swap = 4096
+
+            print(i, swap, idx)
+            pens[idx], pens[swap] = pens[swap], pens[idx]
+        SWAP_COUNT += 1
+        if SWAP_COUNT > 256:
+            SWAP_COUNT = 1
+
+        # draw pixels
+        # (optimisation: only draw the changed ones?)
         for y in range(0, 64):
             for x in range(0, 64):
                 display.set_pen(pens[x+64*y])
@@ -50,7 +70,9 @@ def main():
                 )
                 # presto.update()
         presto.update()
-        time.sleep(5)
+        time.sleep(TICK)
+
+
 
 if __name__ == "__main__":
     main()
