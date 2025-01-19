@@ -60,6 +60,15 @@ class Life:
         s.bind(addr)
         self.socket = s
 
+    async def send_init(self):
+        if not self.socket:
+            return
+        info = {
+            'event': 'init',
+            'grid': self.grid,
+        }
+        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+
     async def send_generation(self):
         if not self.socket:
             return
@@ -350,8 +359,10 @@ class Life:
         self.cycle_index = 0
         self.generation = 0
 
+
     async def _app_loop(self):
         loop = asyncio.get_event_loop()
+
 
         while True:
             self.start_tick = time.ticks_ms()

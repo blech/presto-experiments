@@ -6,6 +6,7 @@ import curses
 import json
 import socket
 import struct
+import time
 
 MCAST_GRP = '239.255.255.250'
 MCAST_PORT = 32301
@@ -45,6 +46,11 @@ def curses_app(stdscr):
             stdscr.addstr(0, 0, "Listening...")
             stdscr.addstr(6, 0, f"Previous final generation: {data['generation']}")
             stdscr.addstr(7, 0, f"Cycle index & matched: {data['cycle_index'], data['matched']}")
+
+        if data['event'] == 'init':
+            epoch_time = int(time.time())
+            with open(f'grid_{epoch_time}.json') as f:
+                json.dump(data['grid'], f)
 
         stdscr.refresh()
     stdscr.getkey()
