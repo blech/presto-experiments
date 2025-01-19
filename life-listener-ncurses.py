@@ -3,6 +3,7 @@
 # runs on a computer to follow the state of the Life grid
 
 import curses
+import json
 import socket
 import struct
 
@@ -26,14 +27,24 @@ def curses_app(stdscr):
     curses.use_default_colors()
 
     stdscr.clear()
-    stdscr.addstr(0, 0, "listening")
+    stdscr.addstr(0, 0, "Listening...")
     stdscr.refresh()
 
     while True:
-        data, addr = s.recvfrom(100)
-        stdscr.addstr(0, 0, "listening")
+        raw, addr = s.recvfrom(100)
+        data = json.loads(raw)
 
-        stdscr.addstr(2, 0, data.decode('utf-8'))
+        if data['event'] == 'generation':
+            stdscr.addstr(2, 0, f"Generation: {data['generation']}")
+            if 'alive' in data:
+                stdscr.addstr(3, 0, f"Cells alive: {data['alive']}")
+            stdscr.addstr(4, 0, f"FPS: {data['fps']}")
+
+        if data['event'] == 'steady_state':
+            stdscr.clear()
+            stdscr.addstr(0, 0, "Listening...")
+            stdscr.addstr(6, 0, f"Previous final generation: {data['generation']}")
+            stdscr.addstr(7, 0, f"Cycle index & matched: {data['cycle_index'], data['matched']}")
 
         stdscr.refresh()
     stdscr.getkey()

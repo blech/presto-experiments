@@ -370,7 +370,7 @@ class Life:
                         break
 
                 if cycle:
-                    self.send_steady_state(matched=i)
+                    await self.send_steady_state(matched=i)
                     print("Reached steady state: "+str(self.cycle_index)+" matched existing "+str(i)+"; reset in 5s")
                     if DEBUG:
                         print("Generation "+str(self.generation))
