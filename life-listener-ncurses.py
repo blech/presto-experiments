@@ -44,7 +44,8 @@ def curses_app(stdscr):
             stdscr.clear()
             stdscr.addstr(0, 0, "Listening...")
             stdscr.addstr(6, 0, f"Previous final generation: {data['generation']}")
-            stdscr.addstr(7, 0, f"Cycle index & matched: {data['cycle_index'], data['matched']}")
+            if 'cycle_index' in data and 'matched' in data:
+                stdscr.addstr(7, 0, f"Cycle index & matched: {data['cycle_index'], data['matched']}")
 
         stdscr.refresh()
     stdscr.getkey()
