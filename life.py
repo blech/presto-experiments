@@ -51,8 +51,7 @@ class Life:
     async def setup_socket(self):
 
         self.presto.connect()
-        wlan = network.WLAN(network.AP_IF)
-        wlan.active(False)
+        wlan = network.WLAN(network.STA_IF)
         host = wlan.ifconfig()[0]
         addr = socket.getaddrinfo(host, MCAST_PORT)[0][-1]
 
@@ -61,15 +60,37 @@ class Life:
         s.bind(addr)
         self.socket = s
 
-    async def report(self):
+    async def send_generation(self):
+        if not self.socket:
+            return
         duration = self.end_tick - self.start_tick
-        fps = 1000/duration
-        if self.socket:
-            if LOG_COUNT:
-                cells = sum([sum([cell for cell in row]) for row in self.grid])
-                self.socket.sendto(f'{fps:.2f} fps, generation {self.generation}, {cells} alive', (MCAST_GRP, MCAST_PORT))
-            else:
-                self.socket.sendto(f'{fps:.2f} fps, generation {self.generation}', (MCAST_GRP, MCAST_PORT))
+        fps_raw = 1000/duration
+        fps = f"{fps_raw:.2f}"
+
+        info = {
+            'event': 'generation',
+            'fps': fps,
+            'fps_raw': fps_raw,
+            'generation': self.generation,
+        }
+
+        if LOG_COUNT:
+            info['alive'] = sum([sum([cell for cell in row]) for row in self.grid])
+        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+
+    async def send_steady_state(self, matched: int=None):
+        if not self.socket:
+            return
+
+        info = {
+            'event': 'steady_state',
+            'generation': self.generation,
+        }
+        if matched:
+            info['cycle_index'] = self.cycle_index
+            info['matched'] = matched
+        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+
 
     ### New grid setup
     def setup(self, kind="rle", filename=None):
@@ -349,8 +370,7 @@ class Life:
                         break
 
                 if cycle:
-                    if self.socket:
-                        self.socket.sendto("Reached steady state: "+str(self.cycle_index)+" matched existing "+str(i)+"; reset in 5s", (MCAST_GRP, MCAST_PORT))
+                    self.send_steady_state(matched=i)
                     print("Reached steady state: "+str(self.cycle_index)+" matched existing "+str(i)+"; reset in 5s")
                     if DEBUG:
                         print("Generation "+str(self.generation))
@@ -364,7 +384,7 @@ class Life:
 
             self.end_tick = time.ticks_ms()
 
-            await self.report()
+            await self.send_generation()
             await asyncio.sleep(0)
 
 
