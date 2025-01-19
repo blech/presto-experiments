@@ -16,7 +16,7 @@ WIDTH       = 80
 HEIGHT      = 80
 DEBUG       = False
 MAX_CYCLES  = 6 # set 0 to disable cycle detection
-FILENAME    = 'tarantula'
+FILENAME    = 'boss-synthesis'
 LOG_COUNT   = True
 
 MCAST_GRP   = '239.255.255.250'
@@ -164,7 +164,7 @@ class Life:
             grid = self.initialize_kaleidosoup(chance=0.15, border=5)
         if kind == 'rle':
             try:
-                with open(f'{filename}.rle') as f:
+                with open(f'life-rles/{filename}.rle') as f:
                     lines = f.readlines()
                 width, height, born, survive, line_data = self.parse_rle(lines)
                 x_offset = int((self.width - width)/2)
