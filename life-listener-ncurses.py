@@ -34,15 +34,20 @@ def curses_app(stdscr):
         raw, addr = s.recvfrom(100)
         data = json.loads(raw)
 
+        if data['event'] == 'start':
+            stdscr.clear()
+            stdscr.addstr(0, 0, "Listening...")
+
         if data['event'] == 'generation':
-            stdscr.addstr(2, 0, f"Generation: {data['generation']}")
+            stdscr.addstr(2, 0, f"Generation: {data['generation']}       ")
             if 'alive' in data:
-                stdscr.addstr(3, 0, f"Cells alive: {data['alive']}")
+                stdscr.addstr(3, 0, f"Cells alive: {data['alive']} / 6400       ")
             stdscr.addstr(4, 0, f"FPS: {data['fps']}")
 
         if data['event'] == 'steady_state':
             stdscr.clear()
             stdscr.addstr(0, 0, "Listening...")
+
             stdscr.addstr(6, 0, f"Previous final generation: {data['generation']}")
             if 'cycle_index' in data and 'matched' in data:
                 stdscr.addstr(7, 0, f"Cycle index & matched: {data['cycle_index'], data['matched']}")

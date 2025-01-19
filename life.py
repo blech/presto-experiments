@@ -60,6 +60,15 @@ class Life:
         s.bind(addr)
         self.socket = s
 
+    async def send_start(self):
+        if not self.socket:
+            return
+
+        info = {
+            'event': 'start',
+        }
+        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+
     async def send_generation(self):
         if not self.socket:
             return
@@ -299,14 +308,14 @@ class Life:
                     neighbours += 1
         return neighbours
 
-    async def update_grid(self, display, grid, neighbours):
+    async def update_grid(self):
         new_grid = self.empty_grid()
-        new_neighbours = [[neighbours[x][y] for y in range(self.height)] for x in range(self.width)]
+        new_neighbours = [[self.neighbours[x][y] for y in range(self.height)] for x in range(self.width)]
 
         for y in range(self.height):
             for x in range(self.width):
                 current_cell = self.grid[x][y]
-                neighbour_count = neighbours[x][y]
+                neighbour_count = self.neighbours[x][y]
                 if not current_cell and not neighbour_count:
                     continue
 
@@ -323,11 +332,40 @@ class Life:
                 elif current_cell:
                     new_grid[x][y] = True
 
-        generation = self.generation + 1
-        self.generation = generation
+        self.generation += 1
 
         self.grid = new_grid
         self.neighbours = new_neighbours
+
+    async def handle_cycles(self):
+        self.cycles[self.cycle_index] = self.grid
+
+        # detect cycles if not already in a steady state countdown
+        if not self.countdown:
+            cycle = False
+            for i in range(0, MAX_CYCLES):
+                if i == self.cycle_index:
+                    continue
+                if self.grid == self.cycles[i]:
+                    cycle = True
+                    break
+
+            if cycle:
+                self.countdown = 10
+                self.matched_index = i
+                await self.send_steady_state(matched=self.matched_index)
+            else:
+                self.cycle_index += 1
+                if self.cycle_index >= MAX_CYCLES:
+                    self.cycle_index = 0
+
+        # count down to reset
+        if self.countdown:
+            self.countdown -= 1
+            if not self.countdown:
+                await self.send_steady_state(matched=self.matched_index)
+                # await self.make_sound(440, 0.4)
+                self.setup(kind="kaleidosoup")
 
 
     ### New grid setup
@@ -352,36 +390,15 @@ class Life:
 
     async def _app_loop(self):
         loop = asyncio.get_event_loop()
+        self.countdown = 0
 
         while True:
             self.start_tick = time.ticks_ms()
-            await self.update_grid(self.display, self.grid, self.neighbours)
+            await self.update_grid()
             self.presto.update()
 
             if MAX_CYCLES:
-                self.cycles[self.cycle_index] = self.grid
-
-                cycle = False
-                for i in range(0, MAX_CYCLES):
-                    if i == self.cycle_index:
-                        continue
-                    if self.cycles[self.cycle_index] == self.cycles[i]:
-                        cycle = True
-                        break
-
-                if cycle:
-                    await self.send_steady_state(matched=i)
-                    print("Reached steady state: "+str(self.cycle_index)+" matched existing "+str(i)+"; reset in 5s")
-                    if DEBUG:
-                        print("Generation "+str(self.generation))
-                    # await self.make_sound(440, 0.4)
-                    self.setup(kind="kaleidosoup")
-
-                else:
-                    self.cycle_index += 1
-                    if self.cycle_index >= MAX_CYCLES:
-                        self.cycle_index = 0
-
+                await self.handle_cycles()
             self.end_tick = time.ticks_ms()
 
             await self.send_generation()
@@ -391,6 +408,6 @@ class Life:
 ### Go!
 if __name__ == "__main__":
     life = Life()
-    life.setup(kind='kaleidosoup')
+    life.setup(kind='rle', filename='blinkers')
 
     asyncio.run(life._app_loop())
