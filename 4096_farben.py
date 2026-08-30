@@ -1,6 +1,10 @@
 # Draw a grid of 4096 seven-pixel squares based on a shuffled RGB colour cube
 # Named in reference to Gerhard Richter's painting
 # See https://www.gerhard-richter.com/en/art/paintings/abstracts/colour-charts-12/4096-colours-6089
+#
+# ICON deployed_code
+# NAME 4096 Farben
+# DESC Draw a grid of 4096 seven-pixel squares based on a shuffled RGB colour cube
 
 import time
 from random import randrange, randint
@@ -74,5 +78,4 @@ def main():
 
 
 
-if __name__ == "__main__":
-    main()
+main()
