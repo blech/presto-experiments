@@ -34,6 +34,12 @@ ANIM_INTERVAL = 0.5          # seconds between dead-reckoning redraws (~2 fps)
 # ground speed of 0. When 0, show everything.
 HIDE_ON_GROUND = 1
 
+# Rather than plotting altitude, colour each aircraft by what it's doing
+# vertically. "baro_rate" (feet/minute, quantised to 64) is the climb/descent
+# rate; "geom_rate" is the GPS-derived fallback. Anything within this band of
+# zero -- or with no rate reported -- counts as flying level.
+LEVEL_RATE_FPM = 256
+
 # --- FRAME CONVERSIONS ---
 # 1 degree of latitude is 60 nm; a degree of longitude shrinks by cos(latitude).
 KM_PER_DEG_LAT = 60.0 * 1.852
@@ -59,17 +65,24 @@ WIDTH, HEIGHT = 480, 480
 # Pen Colors (RGB)
 BG_COLOR = display.create_pen(10, 20, 10)
 RADAR_GREEN = display.create_pen(0, 230, 70)
-PLANE_COLOR = display.create_pen(255, 255, 0)
 TEXT_COLOR = display.create_pen(200, 255, 200)
 
-def draw_track_arrow(x, y, heading_deg, speed_kt):
+# Vertical-state colours: level / cruising, climbing (departing), descending
+# (approaching). Keyed by the "vstate" string set in fetch_planes().
+VSTATE_PENS = {
+    "level": display.create_pen(235, 235, 235),   # white
+    "climb": display.create_pen(60, 200, 255),    # cyan
+    "descent": display.create_pen(255, 160, 40),  # amber
+}
+
+def draw_track_arrow(x, y, heading_deg, speed_kt, pen):
     # heading_deg is degrees clockwise from north (the aircraft's track over the
     # ground). Screen y grows downwards, so north maps to -y.
     a = math.radians(heading_deg)
     dx, dy = math.sin(a), -math.cos(a)
     length = min(60, max(12, speed_kt * 0.15))  # ~knots -> pixels, clamped
     tip_x, tip_y = int(x + dx * length), int(y + dy * length)
-    display.set_pen(PLANE_COLOR)
+    display.set_pen(pen)
     display.line(int(x), int(y), tip_x, tip_y)
     # Arrowhead: two short barbs splayed back from the tip.
     for barb_deg in (heading_deg + 148, heading_deg - 148):
@@ -156,6 +169,17 @@ def fetch_planes():
         if heading is None:
             heading = aircraft.get("true_heading")
 
+        # Vertical state from the reported climb/descent rate.
+        vrate = aircraft.get("baro_rate")
+        if vrate is None:
+            vrate = aircraft.get("geom_rate")
+        if vrate is None or abs(vrate) < LEVEL_RATE_FPM:
+            vstate = "level"
+        elif vrate > 0:
+            vstate = "climb"
+        else:
+            vstate = "descent"
+
         east, north = project(lat, lon)
         if heading is not None and gs:
             hr = math.radians(heading)
@@ -166,25 +190,38 @@ def fetch_planes():
 
         planes.append({
             "callsign": callsign, "e": east, "n": north,
-            "ve": ve, "vn": vn, "heading": heading, "gs": gs,
+            "ve": ve, "vn": vn, "heading": heading, "gs": gs, "vstate": vstate,
         })
     return planes
+
+
+def draw_legend():
+    for i, (state, label) in enumerate((("level", "level"),
+                                        ("climb", "climb / departing"),
+                                        ("descent", "descent / approaching"))):
+        row_y = 414 + i * 20
+        display.set_pen(VSTATE_PENS[state])
+        display.circle(14, row_y + 6, 3)
+        display.set_pen(TEXT_COLOR)
+        display.text(label, 24, row_y, WIDTH, 2)
 
 
 def draw_scene(planes):
     draw_radar_grid()
     display.set_pen(TEXT_COLOR)
     display.text(f"Aircraft: {len(planes)}", 20, 20, WIDTH, 2)
+    draw_legend()
 
     for p in planes:
         x, y = to_screen(p["e"], p["n"])
         if x < -40 or x > 520 or y < -40 or y > 520:
             continue  # drifted well off the display
 
-        display.set_pen(PLANE_COLOR)
+        pen = VSTATE_PENS[p["vstate"]]
+        display.set_pen(pen)
         display.circle(x, y, 3)
         if p["heading"] is not None and p["gs"] > 20:
-            draw_track_arrow(x, y, p["heading"], p["gs"])
+            draw_track_arrow(x, y, p["heading"], p["gs"], pen)
 
         display.set_pen(TEXT_COLOR)
         display.text(p["callsign"], x + 8, y - 8, WIDTH, 2)
