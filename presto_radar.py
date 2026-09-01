@@ -10,27 +10,46 @@ from presto import Presto
 CENTER_LAT = 37.74
 CENTER_LON = -122.42
 
-# adsb.lol: no API key, query by point + radius so the response only holds
-# nearby aircraft. Radius is in nautical miles, max 250. Keep it small: the
-# response body is ~450 bytes per aircraft and the Presto has to buffer the
-# whole thing plus the parsed dict in RAM (alongside the full-res framebuffer),
-# so an oversized radius shows up as a JSON parse / memory error, not an HTTP
-# error. Tune it with radar_debug.py on the desktop while watching the byte
-# count. Over SF, 10 nm is ~11 KB / ~25 aircraft, 15 nm ~15 KB / ~35.
-RADIUS_NM = 10
+# The display works in a local flat metric frame: kilometres east / north of the
+# centre. RADIUS_KM is the distance from the centre to the outer radar ring.
+RADIUS_KM = 30
 
-# Derive the bounding box used for the pixel mapping from the centre and radius,
-# so the query circle inscribes the radar display. 1 degree of latitude is
-# 60 nm; a degree of longitude shrinks by cos(latitude).
-_LAT_SPAN = RADIUS_NM / 60.0
-_LON_SPAN = RADIUS_NM / (60.0 * math.cos(math.radians(CENTER_LAT)))
-MIN_LAT, MAX_LAT = CENTER_LAT - _LAT_SPAN, CENTER_LAT + _LAT_SPAN
-MIN_LON, MAX_LON = CENTER_LON - _LON_SPAN, CENTER_LON + _LON_SPAN
+# adsb.lol still wants the query radius in nautical miles (1 nm = 1.852 km). Keep
+# it small: the response is ~450 bytes per aircraft and the Presto buffers the
+# whole body plus the parsed dict in RAM alongside the full-res framebuffer, so
+# an oversized radius shows up as a JSON / memory error rather than an HTTP one.
+# Tune with radar_debug.py while watching the byte count. ~16 nm over SF is
+# ~15 KB / ~35 aircraft.
+RADIUS_NM = round(RADIUS_KM / 1.852)
 RADAR_URL = f"https://api.adsb.lol/v2/point/{CENTER_LAT}/{CENTER_LON}/{RADIUS_NM}"
 
 # adsb.lol rejects generic user agents ("user-agent too generic; include valid
 # contact info"), so identify the app and give a contact URL.
 USER_AGENT = "presto-radar/1.0 (+https://github.com/blech/presto-experiments)"
+
+FETCH_INTERVAL_MS = 30_000   # adsb.lol public endpoints allow ~1 request/second
+ANIM_INTERVAL = 0.5          # seconds between dead-reckoning redraws (~2 fps)
+
+# When 1, hide aircraft that are on the ground: altitude of 0 / "ground", or a
+# ground speed of 0. When 0, show everything.
+HIDE_ON_GROUND = 1
+
+# --- FRAME CONVERSIONS ---
+# 1 degree of latitude is 60 nm; a degree of longitude shrinks by cos(latitude).
+KM_PER_DEG_LAT = 60.0 * 1.852
+KM_PER_DEG_LON = KM_PER_DEG_LAT * math.cos(math.radians(CENTER_LAT))
+KNOT_TO_KM_S = 1.852 / 3600.0        # knots -> km travelled per second
+PX_PER_KM = 230.0 / RADIUS_KM        # outer ring sits at RADIUS_KM
+
+def project(lat, lon):
+    # Geographic position -> kilometres east / north of the centre.
+    east = (lon - CENTER_LON) * KM_PER_DEG_LON
+    north = (lat - CENTER_LAT) * KM_PER_DEG_LAT
+    return east, north
+
+def to_screen(east_km, north_km):
+    # Metric frame -> 480x480 pixels, centre at (240, 240), north is up.
+    return int(240 + east_km * PX_PER_KM), int(240 - north_km * PX_PER_KM)
 
 # --- INITIALIZE PRESTO ---
 presto = Presto(full_res=True, ambient_light=True)
@@ -42,13 +61,6 @@ BG_COLOR = display.create_pen(10, 20, 10)
 RADAR_GREEN = display.create_pen(0, 230, 70)
 PLANE_COLOR = display.create_pen(255, 255, 0)
 TEXT_COLOR = display.create_pen(200, 255, 200)
-
-def lat_lon_to_xy(lat, lon):
-    # Map geographical bounding box to 480x480 pixel space
-    x = int(((lon - MIN_LON) / (MAX_LON - MIN_LON)) * WIDTH)
-    # Invert Y because pixel coordinates start at the top
-    y = int((1.0 - ((lat - MIN_LAT) / (MAX_LAT - MIN_LAT))) * HEIGHT)
-    return x, y
 
 def draw_track_arrow(x, y, heading_deg, speed_kt):
     # heading_deg is degrees clockwise from north (the aircraft's track over the
@@ -76,9 +88,9 @@ def ring(cx, cy, r, thickness=3):
 def draw_radar_grid():
     display.set_pen(BG_COLOR)
     display.clear()
-    # Two concentric radar rings
-    ring(240, 240, 230)
-    ring(240, 240, 120)
+    # Concentric rings at RADIUS_KM and half that
+    ring(240, 240, int(RADIUS_KM * PX_PER_KM))
+    ring(240, 240, int(RADIUS_KM * 0.5 * PX_PER_KM))
     # Crosshairs
     display.set_pen(RADAR_GREEN)
     display.line(240, 10, 240, 470)
@@ -92,9 +104,96 @@ def show_message(text):
     presto.update()
 
 
+def fetch_planes():
+    """Pull the current aircraft list from adsb.lol.
+
+    Returns a list of plane dicts holding position in the metric frame (e, n)
+    and a per-second velocity (ve, vn) for dead reckoning between fetches, or
+    None if the fetch/parse failed (the caller keeps animating the old list).
+    """
+    gc.collect()
+    try:
+        request = requests.get(RADAR_URL, headers={"User-Agent": USER_AGENT}, timeout=15)
+        status = request.status_code
+        body = request.text
+        request.close()
+    except Exception as e:
+        show_message(f"Fetch failed: {e}")
+        return None
+
+    if status != 200:
+        show_message(f"HTTP {status}\n{body[:200]}")
+        return None
+
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        show_message(f"Bad JSON ({len(body)} bytes)\n{e}\n{body[:120]}")
+        return None
+    finally:
+        body = None
+        gc.collect()
+
+    planes = []
+    for aircraft in data.get("ac", []) or []:
+        lat = aircraft.get("lat")
+        lon = aircraft.get("lon")
+        if lat is None or lon is None:
+            continue
+
+        altitude = aircraft.get("alt_baro")  # feet, or the string "ground"
+        gs = aircraft.get("gs") or 0.0       # ground speed, knots
+        if HIDE_ON_GROUND and (altitude in (0, "ground") or gs == 0):
+            continue
+
+        callsign = (aircraft.get("flight") or aircraft.get("hex", "")).strip()
+
+        # "track" is the direction of travel over the ground; it's absent for
+        # stationary aircraft, so fall back to nose heading. ("dir" in the feed
+        # is the bearing from the radar centre to the aircraft, not where it's
+        # heading, so it isn't what we want here.)
+        heading = aircraft.get("track")
+        if heading is None:
+            heading = aircraft.get("true_heading")
+
+        east, north = project(lat, lon)
+        if heading is not None and gs:
+            hr = math.radians(heading)
+            speed = gs * KNOT_TO_KM_S
+            ve, vn = speed * math.sin(hr), speed * math.cos(hr)
+        else:
+            ve = vn = 0.0
+
+        planes.append({
+            "callsign": callsign, "e": east, "n": north,
+            "ve": ve, "vn": vn, "heading": heading, "gs": gs,
+        })
+    return planes
+
+
+def draw_scene(planes):
+    draw_radar_grid()
+    display.set_pen(TEXT_COLOR)
+    display.text(f"Aircraft: {len(planes)}", 20, 20, WIDTH, 2)
+
+    for p in planes:
+        x, y = to_screen(p["e"], p["n"])
+        if x < -40 or x > 520 or y < -40 or y > 520:
+            continue  # drifted well off the display
+
+        display.set_pen(PLANE_COLOR)
+        display.circle(x, y, 3)
+        if p["heading"] is not None and p["gs"] > 20:
+            draw_track_arrow(x, y, p["heading"], p["gs"])
+
+        display.set_pen(TEXT_COLOR)
+        display.text(p["callsign"], x + 8, y - 8, WIDTH, 2)
+
+    presto.update()
+
+
 # Initialisation
 show_message("Connecting...")
-
 
 try:
     wifi = presto.connect()
@@ -107,80 +206,33 @@ except ImportError as e:
 
 
 # --- MAIN LOOP ---
+# Fetch every FETCH_INTERVAL_MS; in between, dead-reckon each aircraft forward
+# along its last known track/speed and redraw every ANIM_INTERVAL seconds.
+planes = []
+next_fetch_ms = time.ticks_ms()   # fetch straight away
+last_tick_ms = time.ticks_ms()
+
 while True:
-    draw_radar_grid()
+    now = time.ticks_ms()
+    dt = time.ticks_diff(now, last_tick_ms) / 1000.0
+    last_tick_ms = now
 
-    # Fetch flight data from adsb.lol. Free the previous loop's buffers first,
-    # then read the body as text, close the socket, and only then parse -- this
-    # keeps peak memory lower than request.json() and lets us report a parse
-    # failure separately from a network failure.
-    gc.collect()
-    try:
-        request = requests.get(RADAR_URL, headers={"User-Agent": USER_AGENT}, timeout=15)
-        status = request.status_code
-        body = request.text
-        request.close()
-    except Exception as e:
-        show_message(f"Fetch failed: {e}")
-        time.sleep(30)
-        continue
+    # Advance the existing plane positions by dt seconds of their velocity.
+    for p in planes:
+        p["e"] += p["ve"] * dt
+        p["n"] += p["vn"] * dt
 
-    if status != 200:
-        show_message(f"HTTP {status}\n{body[:200]}")
-        time.sleep(30)
-        continue
+    if time.ticks_diff(now, next_fetch_ms) >= 0:
+        fresh = fetch_planes()
+        if fresh is not None:
+            planes = fresh
+        next_fetch_ms = time.ticks_add(time.ticks_ms(), FETCH_INTERVAL_MS)
+        last_tick_ms = time.ticks_ms()  # don't fast-forward across the fetch
 
-    try:
-        data = json.loads(body)
-    except ValueError as e:
-        show_message(f"Bad JSON ({len(body)} bytes)\n{e}\n{body[:120]}")
-        time.sleep(30)
-        continue
-    finally:
-        body = None
-        gc.collect()
-
-    # adsb.lol returns {"ac": [ {aircraft}, ... ], "now": ..., "total": ...}
-    flights = data.get("ac", [])
-    if flights is None:
-        flights = []
-
-    display.set_pen(TEXT_COLOR)
-    display.text(f"Airplanes Tracked: {len(flights)}", 20, 20, WIDTH, 2)
-
-    for aircraft in flights:
-        callsign = (aircraft.get("flight") or aircraft.get("hex", "")).strip()
-        lat = aircraft.get("lat")
-        lon = aircraft.get("lon")
-        altitude = aircraft.get("alt_baro")  # feet, or the string "ground"
-
-        if lat is not None and lon is not None:
-            x, y = lat_lon_to_xy(lat, lon)
-
-            # "track" is the direction of travel over the ground; it's absent for
-            # stationary aircraft, so fall back to nose heading. ("dir" in the
-            # feed is the bearing from the radar centre to the aircraft, not
-            # where it's heading, so it isn't what we want here.)
-            heading = aircraft.get("track")
-            if heading is None:
-                heading = aircraft.get("true_heading")
-            gs = aircraft.get("gs")  # ground speed, knots
-
-            # Position anchor, plus a velocity arrow when it's actually moving.
-            display.set_pen(PLANE_COLOR)
-            display.circle(x, y, 3)
-            if heading is not None and gs and gs > 20:
-                draw_track_arrow(x, y, heading, gs)
-
-            # Draw short callsign snippet next to it if space permits
-            display.set_pen(TEXT_COLOR)
-            display.text(callsign, x + 8, y - 8, WIDTH, 2)
-
-
-    presto.update()
+    draw_scene(planes)
 
     # Check for touchscreen interaction to break loop/refresh manually
     if presto.touch.poll():
         pass
 
-    time.sleep(30)  # adsb.lol public endpoints are rate limited to ~1 req/sec
+    time.sleep(ANIM_INTERVAL)
