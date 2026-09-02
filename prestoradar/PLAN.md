@@ -282,3 +282,45 @@ clip, project, emit, draw) and all benefit from the layer-model refactor, so
 they're one coherent change rather than three. Airports was the smallest slice
 (no new parser) and landed first, ahead of the layer-model refactor -- it reused
 the existing `AIRPORTS` output shape. Highways and cities still want the refactor.
+
+---
+
+## 6. Callsign label overlap
+
+**Why:** `draw_scene()` draws every callsign at a fixed `(x + 8, y - 8)` from
+its dot, scale-2 (~8 px/char). Aircraft strung along a common corridor -- a
+runway approach -- sit close together with labels at the same height, so the
+text overwrites itself into an unreadable smear. Heathrow's final approach is
+almost due east/west, so an inbound stream lands right on the horizontal
+crosshair just east of centre; see `example_london.png` (also the departure
+cluster to the upper right). London is the worst case because of the traffic
+volume, but any busy single-runway field does it.
+
+**Why it's hard:** general map-label placement is NP-hard, and this runs on a
+~2 fps MicroPython loop redrawing from scratch each frame with positions that
+drift between fetches (dead reckoning), so any solution has to be cheap and
+stable frame-to-frame or labels will jitter and pop.
+
+**Options, cheapest first:**
+
+- **Greedy collision cull.** Keep a list of placed label rects for the frame;
+  before drawing each label, test its box against the list and skip it on a
+  hit. O(n^2) but n is ~30. Draw order decides who wins, so sort first by
+  what matters -- distance from centre, or lowest altitude (closest to
+  landing) -- so the most relevant labels get placed. Dropped aircraft still
+  show as dots. Simplest real improvement.
+- **Try alternate anchors.** On a collision, try the other three quadrants
+  (left/below/above) before giving up. A few lines on top of the cull; helps
+  sparse clashes, does nothing for a dense line where all four slots collide.
+- **1 px background box behind each label.** Doesn't deconflict, but makes the
+  topmost label in a pile readable instead of a smear. Cosmetic, pairs with
+  the cull.
+- **Label only what's interesting.** Only the tapped/selected plane (ties into
+  2a), or the nearest N, or none until zoomed/selected. Sidesteps layout
+  entirely; probably the right long-term answer.
+- **Leader lines + vertical stack.** Detect a cluster, fan its labels out
+  vertically with short lines back to the dots. The "proper" fix and by far
+  the most code; hard to keep stable as the cluster moves.
+
+Lean: greedy cull with a relevance sort, optionally the background box, and
+fold in per-plane labelling if 2a lands.
