@@ -253,14 +253,16 @@ the setting, and one clip/simplify/project pass per enabled source.
   domain, points with `name` + `POP_MAX` + `SCALERANK` to filter by size), or
   just a hand-maintained `LANDMARKS` table for a few well-known points. Draw as
   a distinct marker (square/diamond) from airports.
-- **airports (auto)** — OurAirports `airports.csv`
+- **airports (auto)** — *Done.* OurAirports `airports.csv`
   (`https://davidmegginson.github.io/ourairports-data/airports.csv`, public
-  domain, ~15 MB, stdlib `csv`). Cache it like the GSHHG zip. Filter
-  `type in {large_airport, medium_airport}` (a `--airports-type` flag for
-  large / +medium / +small) within the clip bbox; label with `iata_code` else
-  `ident`. Removes the SF-specific `AIRPORTS` constant entirely and fixes the
-  "London shows no airports" gap. `--if-stale` then records the filter, not a
-  list.
+  domain, ~13 MB, stdlib `csv`), cached in `~/.cache/ourairports/` alongside the
+  GSHHG cache. `make_basemap.py --airports large|medium|small|none` (default
+  `medium` = large + medium airports) filters by `type` within the clip bbox
+  and labels with `iata_code` else `ident`. The hardcoded `AIRPORTS` constant is
+  gone; `--if-stale` records the filter string, not a list. Output shape
+  (`AIRPORTS = [(label, e, n), ...]`) is unchanged, so `radar.py` didn't move.
+  Still open: a `--airports-extra` override for specific fields regardless of
+  `type`.
 
 ### Dependency decision
 
@@ -275,5 +277,6 @@ extra -- it's CSV.
 
 Yes -- highways, cities and auto-airports all have the same shape (add source,
 clip, project, emit, draw) and all benefit from the layer-model refactor, so
-they're one coherent change rather than three. Airports is the smallest slice
-(no new parser) and could land first.
+they're one coherent change rather than three. Airports was the smallest slice
+(no new parser) and landed first, ahead of the layer-model refactor -- it reused
+the existing `AIRPORTS` output shape. Highways and cities still want the refactor.

@@ -6,7 +6,8 @@ High-resolution Geography, https://www.soest.hawaii.edu/pwessel/gshhg/).
 Desktop tool, standard library only. It reads GSHHG's native binary shoreline
 file, clips it to a box around the radar centre, projects it into the same flat
 kilometres-east/north frame radar.py uses, simplifies it with Douglas-Peucker,
-and writes it out as a Python module of coordinate lists.
+and writes it out as a Python module of coordinate lists. Airport marks come
+from OurAirports' airports.csv, filtered to the clip box.
 
 Typical use:
 
@@ -17,9 +18,13 @@ GSHHG data (~119 MB zip, all resolutions) is cached in ~/.cache/gshhg/. Pass
 --gshhg to point at an existing gshhs_<res>.b file, a directory of them, or the
 zip. If a download is blocked, fetch the zip by hand from
 https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip and pass its path.
+
+OurAirports' airports.csv (~13 MB) is cached in ~/.cache/ourairports/. --download
+fetches it too; --airports-csv points at an existing copy.
 """
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -35,23 +40,21 @@ KM_PER_DEG_LAT = 60.0 * 1.852
 KM_PER_DEG_LON = KM_PER_DEG_LAT * math.cos(math.radians(CENTER_LAT))
 PX_PER_KM = 230.0 / RADIUS_KM   # matches radar.py; used by --min-ring-px
 
-# Major airports near the centre (name, lat, lon). Anything outside the clip box
-# is dropped automatically, so it is fine to list a wide set.
-AIRPORTS = [
-    ("SFO", 37.6213, -122.3790),
-    ("OAK", 37.7126, -122.2197),
-    ("SQL", 37.5119, -122.2495),   # San Carlos
-    ("HWD", 37.6592, -122.1219),   # Hayward
-    ("HAF", 37.5134, -122.5010),   # Half Moon Bay
-    ("PAO", 37.4611, -122.1150),   # Palo Alto
-    ("JFK", 40.6413, -73.7781),
-    ("LGA", 40.7769, -73.8740),
-    ("EWR", 40.6895, -74.1745),
-    ("TEB", 40.8501, -74.0608),    # Teterboro
-]
+# Airport marks come from OurAirports. --airports picks how far down the size
+# ladder to go: "large" keeps only large_airport, "medium" adds medium_airport,
+# "small" adds small_airport. Heliports, seaplane bases and closed fields are
+# never kept. Anything outside the clip box is dropped, so the filter is the
+# only knob -- there is no per-centre list to maintain.
+AIRPORT_TIERS = ("large", "medium", "small")
+_AIRPORT_TYPE = {"large": "large_airport",
+                 "medium": "medium_airport",
+                 "small": "small_airport"}
 
 GSHHG_ZIP_URL = "https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip"
 CACHE_DIR = os.path.expanduser("~/.cache/gshhg")
+
+OURAIRPORTS_URL = "https://davidmegginson.github.io/ourairports-data/airports.csv"
+AIRPORTS_CACHE = os.path.expanduser("~/.cache/ourairports")
 
 # GSHHG binary polygon header: 11 big-endian int32.
 #   id, n, flag, west, east, south, north, area, area_full, container, ancestor
@@ -229,6 +232,32 @@ def _extract_from_zip(zip_path, name, dest):
             out.write(src.read())
 
 
+def resolve_ourairports(arg, allow_download):
+    """Return a path to an OurAirports airports.csv, caching a download under
+    ~/.cache/ourairports/ if asked and no copy is present."""
+    if arg:
+        if os.path.isfile(arg):
+            return arg
+        sys.exit("--airports-csv %s not found" % arg)
+
+    cached = os.path.join(AIRPORTS_CACHE, "airports.csv")
+    if os.path.isfile(cached):
+        return cached
+
+    if not allow_download:
+        sys.exit("airports.csv not found. Re-run with --download, or pass "
+                 "--airports-csv PATH (fetch it from %s)." % OURAIRPORTS_URL)
+
+    os.makedirs(AIRPORTS_CACHE, exist_ok=True)
+    print("Downloading %s ..." % OURAIRPORTS_URL)
+    try:
+        urllib.request.urlretrieve(OURAIRPORTS_URL, cached)
+    except Exception as e:
+        sys.exit("Download failed (%s).\nFetch it by hand from\n  %s\n"
+                 "and re-run with --airports-csv <path>." % (e, OURAIRPORTS_URL))
+    return cached
+
+
 def build_layer(gshhg_path, levels, bbox, tol_km, min_span_km=0.0):
     """Clip + project + simplify all polygons of the given levels.
 
@@ -259,6 +288,32 @@ def build_layer(gshhg_path, levels, bbox, tol_km, min_span_km=0.0):
     return rings, kept_pts, dropped_small
 
 
+def build_airports(csv_path, bbox, keep_types):
+    """Read OurAirports airports.csv; keep rows whose `type` is in keep_types
+    and whose position falls inside bbox. Label with iata_code, else ident.
+    Returns [(label, e_km, n_km), ...] sorted by label."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+    out = []
+    with open(csv_path, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            if row.get("type") not in keep_types:
+                continue
+            try:
+                lat = float(row["latitude_deg"])
+                lon = float(row["longitude_deg"])
+            except (KeyError, ValueError):
+                continue
+            if not (min_lon <= lon <= max_lon and min_lat <= lat <= max_lat):
+                continue
+            label = (row.get("iata_code") or row.get("ident") or "").strip()
+            if not label:
+                continue
+            x, y = project(lat, lon)
+            out.append((label, round(x, 2), round(y, 2)))
+    out.sort()
+    return out
+
+
 def current_params(args):
     """Everything that, if changed, means basemap_data.py needs regenerating."""
     return {
@@ -268,7 +323,7 @@ def current_params(args):
         "simplify_km": args.simplify_km,
         "min_ring_px": args.min_ring_px,
         "levels": args.levels,
-        "airports": [[n, la, lo] for n, la, lo in AIRPORTS],
+        "airports": args.airports,
     }
 
 
@@ -317,9 +372,15 @@ def main():
     ap.add_argument("--levels", default="1,2",
                     help="GSHHG levels to keep: 1 land, 2 lake, 3 island-in-lake, "
                          "4 pond (default '1,2')")
+    ap.add_argument("--airports", choices=("none",) + AIRPORT_TIERS, default="medium",
+                    help="airport marks from OurAirports: 'large' = large_airport "
+                         "only, 'medium' (default) adds medium_airport, 'small' adds "
+                         "small_airport, 'none' skips the layer")
     ap.add_argument("--gshhg", help="path to gshhs_<res>.b, a directory of them, or the zip")
+    ap.add_argument("--airports-csv", help="path to an OurAirports airports.csv "
+                    "(default: cached download under ~/.cache/ourairports/)")
     ap.add_argument("--download", action="store_true",
-                    help="download + cache the GSHHG zip if the file is missing")
+                    help="download + cache the GSHHG zip and airports.csv if missing")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "basemap_data.py"),
                     help="output module path (default prestoradar/basemap_data.py)")
     ap.add_argument("--if-stale", action="store_true",
@@ -353,17 +414,20 @@ def main():
     lakes, lake_pts, lake_drop = build_layer(
         gshhg_path, [l for l in levels if l >= 2], bbox, args.simplify_km, min_span_km)
 
-    airports = []
-    for name, lat, lon in AIRPORTS:
-        if bbox[0] <= lon <= bbox[2] and bbox[1] <= lat <= bbox[3]:
-            x, y = project(lat, lon)
-            airports.append((name, round(x, 2), round(y, 2)))
+    if args.airports == "none":
+        airports = []
+    else:
+        cut = AIRPORT_TIERS.index(args.airports) + 1
+        keep_types = {_AIRPORT_TYPE[t] for t in AIRPORT_TIERS[:cut]}
+        csv_path = resolve_ourairports(args.airports_csv, args.download)
+        print("airports: %s  (%s)" % (args.airports, csv_path))
+        airports = build_airports(csv_path, bbox, keep_types)
 
     header = (
         '"""Generated by prestoradar/make_basemap.py -- do not edit by hand.\n\n'
-        "Source     : GSHHG %s (v2.3.7)\n"
+        "Source     : GSHHG %s (v2.3.7); airports from OurAirports\n"
         "Centre     : %.2f, %.2f\n"
-        "Clip radius: %g km   Simplify: %g km   Min ring: %g px   Levels: %s\n\n"
+        "Clip radius: %g km   Simplify: %g km   Min ring: %g px   Levels: %s   Airports: %s\n\n"
         "Coordinates are kilometres east / north of the centre, matching\n"
         "radar.py's project(). COASTLINE and LAKES are closed rings -- draw them\n"
         "as polylines for an outline or as filled polygons for land / water.\n"
@@ -371,7 +435,7 @@ def main():
         "# params: %s\n"
     ) % (args.resolution, CENTER_LAT, CENTER_LON,
          args.clip_radius_km, args.simplify_km, args.min_ring_px, args.levels,
-         json.dumps(params, separators=(",", ":")))
+         args.airports, json.dumps(params, separators=(",", ":")))
 
     parts = [header,
              format_rings("COASTLINE", coast),
