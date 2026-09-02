@@ -18,8 +18,9 @@ import sys
 import urllib.error
 import urllib.request
 
-CENTER_LAT = 37.745198164376006
-CENTER_LON = -122.4233394495865
+# Keep in step with radar.py (low precision on purpose).
+CENTER_LAT = 37.74
+CENTER_LON = -122.42
 WIDTH = HEIGHT = 480
 
 
@@ -32,7 +33,7 @@ def lat_lon_to_xy(lat, lon, box):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--radius", type=int, default=15, help="nautical miles, max 250")
+    ap.add_argument("--radius", type=int, default=16, help="nautical miles, max 250")
     ap.add_argument("--save", metavar="PATH", help="write the raw response body here")
     args = ap.parse_args()
 
