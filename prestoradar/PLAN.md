@@ -260,13 +260,14 @@ the setting, and one clip/simplify/project pass per enabled source.
 - **airports (auto)** — *Done.* OurAirports `airports.csv`
   (`https://davidmegginson.github.io/ourairports-data/airports.csv`, public
   domain, ~13 MB, stdlib `csv`), cached in `~/.cache/ourairports/` alongside the
-  GSHHG cache. `make_basemap.py --airports large|medium|small|none` (default
-  `medium` = large + medium airports) filters by `type` within the clip bbox
-  and labels with `iata_code` else `ident`. The hardcoded `AIRPORTS` constant is
-  gone; `--if-stale` records the filter string, not a list. Output shape
-  (`AIRPORTS = [(label, e, n), ...]`) is unchanged, so `radar.py` didn't move.
-  Still open: a `--airports-extra` override for specific fields regardless of
-  `type`.
+  GSHHG cache. The size tier is `settings.BASEMAP_AIRPORTS`
+  (`large|medium|small|none`, default `medium` = large + medium airports); the
+  `--airports <tier>` flag overrides it for a one-off build. Filters by `type`
+  within the clip bbox, labels with `iata_code` else `ident`. The hardcoded
+  `AIRPORTS` constant is gone; `--if-stale` records the tier string, not a list,
+  and reads it from `settings.py` so `deploy.sh`'s flagless run keeps it. Output
+  shape (`AIRPORTS = [(label, e, n), ...]`) is unchanged, so `radar.py` didn't
+  move. Still open: an override for specific fields regardless of `type`.
 
 ### Dependency decision
 

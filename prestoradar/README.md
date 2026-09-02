@@ -14,9 +14,9 @@ radar-style visual of aircraft in the airspace near a point.
 * Generate a local base map with `python3 prestoradar/make_basemap.py --download`
   (the first run caches GSHHG coastline data and the OurAirports list; later
   runs can drop `--download`). Airport marks are filtered from OurAirports by
-  size - `--airports large|medium|small|none`, default `medium`.
-  `basemap_data.py` is generated and gitignored; `./deploy.sh` rebuilds it when
-  `settings.py` changes.
+  size via `settings.BASEMAP_AIRPORTS` (`large`/`medium`/`small`/`none`);
+  `--airports <tier>` overrides it for a one-off build. `basemap_data.py` is
+  generated and gitignored; `./deploy.sh` rebuilds it when `settings.py` changes.
 * Run `./deploy.sh` from the top level to push the code
 * Reset the Presto, either with eg `ampy reset --hard` or the physical button
 * Select "Presto Radar" from the main menu (or eg `ampy run presto_radar.py`)

@@ -39,6 +39,15 @@ ANIM_INTERVAL = 0.5          # seconds between dead-reckoning redraws (~2 fps)
 DRAW_BASEMAP = 1             # 0 to skip the coastline layer entirely
 SKIP_NETWORK = 0             # 1 = don't connect or fetch, just draw grid + basemap
 
+# Which airports make_basemap.py bakes into basemap_data.py, by size:
+#   "large"  - large_airport only
+#   "medium" - large + medium (default)
+#   "small"  - large + medium + small
+#   "none"   - no airport marks
+# deploy.sh regenerates basemap_data.py when this changes; `make_basemap.py
+# --airports <tier>` overrides it for a one-off build.
+BASEMAP_AIRPORTS = "medium"
+
 # How aircraft are drawn:
 #   "radar" - scope style: a blip, a track arrow, and the callsign next to it.
 #   "map"   - a small plane icon pointed along the track, no callsign. Better

@@ -36,6 +36,11 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from settings import CENTER_LAT, CENTER_LON, RADIUS_KM
 
+try:
+    from settings import BASEMAP_AIRPORTS  # airport size tier; --airports overrides
+except ImportError:
+    BASEMAP_AIRPORTS = "medium"
+
 KM_PER_DEG_LAT = 60.0 * 1.852
 KM_PER_DEG_LON = KM_PER_DEG_LAT * math.cos(math.radians(CENTER_LAT))
 PX_PER_KM = 230.0 / RADIUS_KM   # matches radar.py; used by --min-ring-px
@@ -384,10 +389,11 @@ def main():
     ap.add_argument("--levels", default="1,2",
                     help="GSHHG levels to keep: 1 land, 2 lake, 3 island-in-lake, "
                          "4 pond (default '1,2')")
-    ap.add_argument("--airports", choices=("none",) + AIRPORT_TIERS, default="medium",
-                    help="airport marks from OurAirports: 'large' = large_airport "
-                         "only, 'medium' (default) adds medium_airport, 'small' adds "
-                         "small_airport, 'none' skips the layer")
+    ap.add_argument("--airports", choices=("none",) + AIRPORT_TIERS, default=BASEMAP_AIRPORTS,
+                    help="airport marks from OurAirports by size: 'large' = "
+                         "large_airport only, 'medium' adds medium_airport, 'small' "
+                         "adds small_airport, 'none' skips the layer (default from "
+                         "settings.BASEMAP_AIRPORTS, currently %r)" % BASEMAP_AIRPORTS)
     ap.add_argument("--gshhg", help="path to gshhs_<res>.b, a directory of them, or the zip")
     ap.add_argument("--airports-csv", help="path to an OurAirports airports.csv "
                     "(default: cached download under ~/.cache/ourairports/)")
