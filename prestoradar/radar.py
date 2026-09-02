@@ -362,15 +362,11 @@ def main():
         log("basemap rings", len(basemap_data.COASTLINE),
             "airports", len(getattr(basemap_data, "AIRPORTS", ())))
 
-    print("main: reading IP")
     try:
         ip = network.WLAN(network.STA_IF).ifconfig()[0]
-    except Exception as e:  # noqa: BLE001
-        print("main: ifconfig failed:", repr(e))
+    except Exception:  # noqa: BLE001
         ip = "?"
-    print("main: serve_init", SCREENSHOT_PORT)
     screenshot.serve_init(SCREENSHOT_PORT)
-    print("main: serve_init done")
     log("screenshot: pull with  python3 prestoradar/screenshot_pull.py", ip)
 
     # Fetch every FETCH_INTERVAL_MS; between fetches, dead-reckon each aircraft
@@ -408,11 +404,8 @@ def main():
                 log("frame", frame, "draw", draw_ms, "ms  basemap", _basemap_ms, "ms")
 
             # Serve a screenshot to any host that has connected this frame.
-            if frame <= 3:
-                print("frame", frame, "serve_poll")
             screenshot.serve_poll(display, presto.presto)
-            if frame <= 3:
-                print("frame", frame, "touch.poll")
+
             presto.touch.poll()
 
             time.sleep(ANIM_INTERVAL)
