@@ -55,6 +55,12 @@ BASEMAP_AIRPORTS = "medium"
 #             approach). A richer basemap for this mode is planned -- PLAN item 8.
 DISPLAY_MODE = "radar"
 
+# Aircraft colour:
+#   "alt"  - by vertical state: white level, cyan climbing, amber descending,
+#            with a legend.
+#   "mono" - everything radar-green, for a purer scope look (no legend).
+COLOUR_MODE = "alt"
+
 # Logging: every log() line goes to the serial console, and -- once the network
 # is up -- is also broadcast as a UDP packet so another machine on the LAN can
 # watch with `python3 prestoradar/radar_listen.py`. Set LOG_UDP_PORT to 0 to

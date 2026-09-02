@@ -24,6 +24,10 @@ try:
     DISPLAY_MODE  # noqa: F821  "radar" (scope + callsign tags) or "map" (plane icons)
 except NameError:
     DISPLAY_MODE = "radar"
+try:
+    COLOUR_MODE  # noqa: F821  "mono" (all radar-green) or "alt" (colour by vstate)
+except NameError:
+    COLOUR_MODE = "alt"
 
 import screenshot
 
@@ -424,15 +428,18 @@ def draw_legend_alt():
 
 _basemap_ms = 0
 
+def plane_pen(p):
+    # Pen for an aircraft mark under the current COLOUR_MODE. "mono" keeps the
+    # scope look (everything RADAR_GREEN); "alt" colours by vertical state.
+    # Extra schemes go here.
+    if COLOUR_MODE == "alt":
+        return VSTATE_PENS[p["vstate"]]
+    return RADAR_GREEN
+
 def _draw_planes_radar(order):
     # Scope style: blip, track arrow, callsign tag.
-    # FIXME pen setting COLOUR_MODE duplication here and in _draw_planes_map
     for x, y, p in order:
-        if COLOUR_MODE == 'alt':
-            display.set_pen(VSTATE_PENS[p["vstate"]])
-        else:
-            display.set_pen(RADAR_GREEN)
-
+        pen = plane_pen(p)
         display.set_pen(pen)
         display.circle(x, y, 3)
         if p["heading"] is not None and p["gs"] > 20:
@@ -444,13 +451,9 @@ def _draw_planes_map(order):
     # Map style: a plane icon along the track, no label; a plain blip when there
     # is no usable heading. Nearest is drawn last (order is pre-sorted), so a
     # dense in-trail stream on an approach reads as an overlapping line of
-    # aircraft in the vstate colour rather than a pile of text.
+    # aircraft rather than a pile of text.
     for x, y, p in order:
-        if COLOUR_MODE == 'alt':
-            display.set_pen(VSTATE_PENS[p["vstate"]])
-        else:
-            display.set_pen(RADAR_GREEN)
-
+        display.set_pen(plane_pen(p))
         if p["heading"] is not None and p["gs"] > 20:
             a = math.radians(p["heading"])
             _icon_pass(x, y, math.cos(a), math.sin(a), 1.0)
@@ -466,6 +469,13 @@ def draw_planes(planes):
             order.append((x, y, p))
     (_draw_planes_map if DISPLAY_MODE == "map" else _draw_planes_radar)(order)
 
+def _status_text(planes):
+    if _fetch_count == 0:
+        return "Connecting..."          # nothing fetched yet
+    if not _fetch_ok:                   # last fetch failed -- planes may be stale
+        return ("Aircraft: %d (stale)" % len(planes)) if planes else "Fetch failed"
+    return "Aircraft: %d" % len(planes)  # 0 is legitimate: a quiet sky
+
 def draw_scene(planes):
     global _basemap_ms
     draw_radar_grid()
@@ -473,20 +483,19 @@ def draw_scene(planes):
     draw_basemap()
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
     display.set_pen(TEXT_COLOR)
-    if len(planes):
-        display.text(f"Aircraft: {len(planes)}", 5, 10, WIDTH, 2)
-    else:
-        display.text(f"Fetching...", 5, 10, WIDTH, 2)
-    if COLOUR_MODE == 'alt':
+    display.text(_status_text(planes), 5, 10, WIDTH, 2)
+    if COLOUR_MODE == "alt":
         draw_legend_alt()
     draw_planes(planes)
     presto.update()
 
 
 # Shared between the two tasks below. asyncio on MicroPython is cooperative and
-# single-threaded, so _fetch_loop reassigning this and _render_loop reading it
+# single-threaded, so _fetch_loop reassigning these and _render_loop reading them
 # can't tear -- no lock needed.
 _planes = []
+_fetch_count = 0     # completed fetch attempts, any outcome (0 == still loading)
+_fetch_ok = False    # did the most recent attempt succeed?
 
 
 async def _render_loop():
@@ -521,7 +530,7 @@ async def _render_loop():
 
 
 async def _fetch_loop():
-    global _planes
+    global _planes, _fetch_count, _fetch_ok
     while True:
         log("fetch...")
         t = time.ticks_ms()
@@ -532,6 +541,8 @@ async def _fetch_loop():
             if hasattr(sys, "print_exception"):
                 sys.print_exception(e)
             fresh = None
+        _fetch_count += 1
+        _fetch_ok = fresh is not None
         if fresh is not None:
             _planes = fresh
             log("fetch done:", len(_planes), "planes",
@@ -544,8 +555,7 @@ async def _amain():
 
 
 def main():
-    print("main: start  display mode:", DISPLAY_MODE)
-    print("main: start  COLOUR mode:", COLOUR_MODE)
+    print("main: start  display:", DISPLAY_MODE, " colour:", COLOUR_MODE)
 
     build_basemap_cache()
     print("main: basemap cache:", len(_BASEMAP_SEGS or ()), "segments,",
