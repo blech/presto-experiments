@@ -411,7 +411,7 @@ async def fetch_planes():
     return planes
 
 
-def draw_legend():
+def draw_legend_alt():
     for i, (state, label) in enumerate((("level", "level"),
                                         ("climb", "climb"),
                                         ("descent", "descent"))):
@@ -426,8 +426,13 @@ _basemap_ms = 0
 
 def _draw_planes_radar(order):
     # Scope style: blip, track arrow, callsign tag.
+    # FIXME pen setting COLOUR_MODE duplication here and in _draw_planes_map
     for x, y, p in order:
-        pen = VSTATE_PENS[p["vstate"]]
+        if COLOUR_MODE == 'alt':
+            display.set_pen(VSTATE_PENS[p["vstate"]])
+        else:
+            display.set_pen(RADAR_GREEN)
+
         display.set_pen(pen)
         display.circle(x, y, 3)
         if p["heading"] is not None and p["gs"] > 20:
@@ -441,7 +446,11 @@ def _draw_planes_map(order):
     # dense in-trail stream on an approach reads as an overlapping line of
     # aircraft in the vstate colour rather than a pile of text.
     for x, y, p in order:
-        display.set_pen(VSTATE_PENS[p["vstate"]])
+        if COLOUR_MODE == 'alt':
+            display.set_pen(VSTATE_PENS[p["vstate"]])
+        else:
+            display.set_pen(RADAR_GREEN)
+
         if p["heading"] is not None and p["gs"] > 20:
             a = math.radians(p["heading"])
             _icon_pass(x, y, math.cos(a), math.sin(a), 1.0)
@@ -464,8 +473,12 @@ def draw_scene(planes):
     draw_basemap()
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
     display.set_pen(TEXT_COLOR)
-    display.text(f"Aircraft: {len(planes)}", 20, 20, WIDTH, 2)
-    draw_legend()
+    if len(planes):
+        display.text(f"Aircraft: {len(planes)}", 5, 10, WIDTH, 2)
+    else:
+        display.text(f"Fetching...", 5, 10, WIDTH, 2)
+    if COLOUR_MODE == 'alt':
+        draw_legend_alt()
     draw_planes(planes)
     presto.update()
 
@@ -532,6 +545,7 @@ async def _amain():
 
 def main():
     print("main: start  display mode:", DISPLAY_MODE)
+    print("main: start  COLOUR mode:", COLOUR_MODE)
 
     build_basemap_cache()
     print("main: basemap cache:", len(_BASEMAP_SEGS or ()), "segments,",
