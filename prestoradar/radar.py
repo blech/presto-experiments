@@ -115,6 +115,15 @@ VSTATE_PENS = {
     "descent": display.create_pen(255, 160, 40),  # amber
 }
 
+# Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
+# selected aircraft.
+PANEL_X = 330                                      # sidebar spans PANEL_X..WIDTH
+PANEL_BG = display.create_pen(16, 26, 16)
+PANEL_BORDER = display.create_pen(0, 150, 50)
+SELECT_PEN = display.create_pen(255, 235, 90)      # ring: distinct from vstate pens
+EMERG_PEN = display.create_pen(255, 70, 70)
+HIT_RADIUS = 26                                    # px; generous finger target
+
 def draw_track_arrow(x, y, heading_deg, speed_kt, pen):
     # heading_deg is degrees clockwise from north (the aircraft's track over the
     # ground). Screen y grows downwards, so north maps to -y.
@@ -411,8 +420,74 @@ async def fetch_planes():
         planes.append({
             "callsign": callsign, "e": east, "n": north,
             "ve": ve, "vn": vn, "heading": heading, "gs": gs, "vstate": vstate,
+            # Detail fields for the tap-to-inspect panel (item 2a).
+            "hex": aircraft.get("hex", ""),
+            "reg": aircraft.get("r"),
+            "type": aircraft.get("t"),
+            "desc": aircraft.get("desc"),
+            "alt": altitude,
+            "vrate": vrate,
+            "squawk": aircraft.get("squawk"),
+            "emergency": aircraft.get("emergency"),
+            "dst": aircraft.get("dst"),   # nm from centre
+            "dir": aircraft.get("dir"),   # bearing from centre, degrees
         })
     return planes
+
+
+# --- Tap to inspect (item 2a) --------------------------------------------------
+_selected = None          # the selected plane dict, or None
+_last_drawn = []           # [(x, y, plane), ...] from the last draw_planes()
+_route_cache = {}          # callsign -> (origin, dest) | None (unknown) | "" (pending)
+
+_COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def _compass(deg):
+    if deg is None:
+        return "?"
+    return _COMPASS[int((deg % 360) / 45 + 0.5) % 8]
+
+
+def _is_hex_id(cs):
+    return len(cs) == 6 and all(c in "0123456789abcdefABCDEF" for c in cs)
+
+
+async def _fetch_route(callsign):
+    try:
+        status, body = await _http_get("api.adsbdb.com", "/v0/callsign/" + callsign)
+        route = None
+        if status == 200:
+            resp = json.loads(body).get("response")
+            fr = resp.get("flightroute") if isinstance(resp, dict) else None
+            if fr:
+                o = (fr.get("origin") or {})
+                d = (fr.get("destination") or {})
+                route = (o.get("iata_code") or o.get("icao_code") or "?",
+                         d.get("iata_code") or d.get("icao_code") or "?")
+        _route_cache[callsign] = route
+        log("route", callsign, "->", route)
+    except Exception as e:  # noqa: BLE001
+        log("route lookup failed:", callsign, repr(e))
+        _route_cache[callsign] = None
+
+
+def handle_tap(tx, ty):
+    global _selected
+    # A tap inside the open sidebar is for the panel, not a dismiss.
+    if _selected is not None and tx >= PANEL_X:
+        return
+    best, best_d = None, HIT_RADIUS * HIT_RADIUS
+    for x, y, p in _last_drawn:
+        d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
+        if d < best_d:
+            best, best_d = p, d
+    _selected = best   # None => tapped empty space => dismiss
+    if best is not None:
+        cs = (best["callsign"] or "").strip()
+        if cs and not _is_hex_id(cs) and cs not in _route_cache:
+            _route_cache[cs] = ""            # pending
+            asyncio.create_task(_fetch_route(cs))
 
 
 def draw_legend_alt():
@@ -461,6 +536,7 @@ def _draw_planes_map(order):
             display.circle(x, y, 3)
 
 def draw_planes(planes):
+    global _last_drawn
     # Nearest the centre drawn last, so it sits on top of the pile.
     order = []
     for p in sorted(planes, key=lambda p: -(p["e"] * p["e"] + p["n"] * p["n"])):
@@ -468,6 +544,72 @@ def draw_planes(planes):
         if -40 <= x <= 520 and -40 <= y <= 520:
             order.append((x, y, p))
     (_draw_planes_map if DISPLAY_MODE == "map" else _draw_planes_radar)(order)
+    _last_drawn = order
+
+    # Ring the selected aircraft, on top of everything. Outer/inner discs so it's
+    # an outline; radius 14 clears the ~11 px icon half-span.
+    for x, y, p in order:
+        if p is _selected:
+            display.set_pen(SELECT_PEN)
+            display.circle(x, y, 14)
+            display.set_pen(BG_COLOR)
+            display.circle(x, y, 12)
+            break
+
+def _fmt_alt(alt):
+    if alt in (0, "ground"):
+        return "ground"
+    return "%s ft" % alt
+
+def draw_panel(p):
+    display.set_pen(PANEL_BG)
+    display.rectangle(PANEL_X, 0, WIDTH - PANEL_X, HEIGHT)
+    display.set_pen(PANEL_BORDER)
+    display.line(PANEL_X, 0, PANEL_X, HEIGHT)
+
+    tx = PANEL_X + 6
+    display.set_pen(TEXT_COLOR)
+    display.text(p["callsign"] or p["hex"] or "?", tx, 8, WIDTH, 2)
+
+    rows = []
+    rows.append("%s  %s" % (p["reg"] or "-", p["type"] or "-"))
+    if p["desc"]:
+        rows.append(p["desc"][:16])
+    rows.append("alt " + _fmt_alt(p["alt"]))
+    vr = p["vrate"]
+    if vr:
+        rows.append("%s%d fpm" % ("+" if vr > 0 else "", vr))
+    rows.append("gs %d kt" % (p["gs"] or 0))
+    hdg = p["heading"]
+    rows.append("trk %s" % (round(hdg) if hdg is not None else "-"))
+    if p["squawk"]:
+        rows.append("sqk %s" % p["squawk"])
+    if p["dst"] is not None:
+        rows.append("%d nm %s" % (round(p["dst"]), _compass(p["dir"])))
+
+    y = 34
+    for r in rows:
+        display.text(r, tx, y, WIDTH - tx, 1)
+        y += 14
+
+    em = p["emergency"]
+    if em and em != "none":
+        display.set_pen(EMERG_PEN)
+        display.text("! %s" % em, tx, y, WIDTH - tx, 1)
+        display.set_pen(TEXT_COLOR)
+        y += 14
+
+    cs = (p["callsign"] or "").strip()
+    if cs not in _route_cache:
+        line = ""
+    elif _route_cache[cs] == "":
+        line = "route ..."
+    elif _route_cache[cs]:
+        line = "%s > %s" % _route_cache[cs]
+    else:
+        line = "route: unknown"
+    if line:
+        display.text(line, tx, y + 4, WIDTH - tx, 1)
 
 def _status_text(planes):
     if _fetch_count == 0:
@@ -487,6 +629,8 @@ def draw_scene(planes):
     if COLOUR_MODE == "alt":
         draw_legend_alt()
     draw_planes(planes)
+    if _selected is not None:
+        draw_panel(_selected)
     presto.update()
 
 
@@ -521,7 +665,6 @@ async def _render_loop():
                     "ms  basemap", _basemap_ms, "ms")
 
             screenshot.serve_poll(display, presto.presto)
-            presto.touch.poll()
         except Exception as e:  # noqa: BLE001
             log("RENDER ERROR:", repr(e))
             if hasattr(sys, "print_exception"):
@@ -529,8 +672,28 @@ async def _render_loop():
         await asyncio.sleep(ANIM_INTERVAL)
 
 
+async def _touch_loop():
+    # Polled faster than the redraw so a quick tap isn't missed; acts on the
+    # rising edge (untouched -> touched).
+    was = False
+    last_ms = 0
+    while True:
+        try:
+            presto.touch.poll()
+            touched = presto.touch.state
+            if touched and not was:
+                now = time.ticks_ms()
+                if time.ticks_diff(now, last_ms) > 250:   # debounce
+                    last_ms = now
+                    handle_tap(presto.touch.x, presto.touch.y)
+            was = touched
+        except Exception as e:  # noqa: BLE001
+            log("TOUCH ERROR:", repr(e))
+        await asyncio.sleep_ms(50)
+
+
 async def _fetch_loop():
-    global _planes, _fetch_count, _fetch_ok
+    global _planes, _fetch_count, _fetch_ok, _selected
     while True:
         log("fetch...")
         t = time.ticks_ms()
@@ -545,13 +708,18 @@ async def _fetch_loop():
         _fetch_ok = fresh is not None
         if fresh is not None:
             _planes = fresh
+            # Re-point the selection at the same aircraft in the fresh list;
+            # clear it if that aircraft has dropped off.
+            if _selected is not None:
+                h = _selected["hex"]
+                _selected = next((q for q in fresh if q["hex"] == h), None)
             log("fetch done:", len(_planes), "planes",
                 time.ticks_diff(time.ticks_ms(), t), "ms  mem", gc.mem_free())
         await asyncio.sleep_ms(FETCH_INTERVAL_MS)
 
 
 async def _amain():
-    await asyncio.gather(_render_loop(), _fetch_loop())
+    await asyncio.gather(_render_loop(), _fetch_loop(), _touch_loop())
 
 
 def main():

@@ -95,33 +95,31 @@ held longer than 500 ms. Still no asyncio.
 
 ### 2a. Tap a plane → detail overlay
 
-The callsign is the only thing shown, but the feed carries much more. On tap,
-hit-test against the plane screen positions from the last `draw_scene()` (keep a
-`[(x, y, plane), ...]` list as they're drawn; match within a few px), mark one
-plane "selected", and draw a panel with:
+**Done (first cut).** A dedicated `_touch_loop` task polls `presto.touch` at
+20 Hz (decoupled from the ~2 Hz redraw, so a quick tap isn't missed) and acts on
+the rising edge. `handle_tap()` hit-tests the tap against `_last_drawn`
+(`[(x, y, plane), ...]`, stashed by `draw_planes()`), nearest within
+`HIT_RADIUS` = 26 px wins; a tap that hits nothing, or empty map with a panel
+open, clears the selection. `fetch_planes()` now also keeps `reg`/`type`/`desc`/
+`alt`/`vrate`/`squawk`/`emergency`/`dst`/`dir`/`hex` per plane. `_fetch_loop`
+re-points `_selected` to the same `hex` in each fresh list (or clears it if the
+aircraft dropped off).
 
-- registration (`r`), type (`t`) and `desc` if present
-- altitude (`alt_baro`) + climb/descent rate (`baro_rate`) — reuse the vstate
-- ground speed (`gs`), track (`track`)
-- squawk (`squawk`), `emergency` flag
-- distance + bearing from centre (`dst`, `dir` — already in the feed)
+`draw_panel()` is a right-hand sidebar (`PANEL_X = 330`) with callsign, reg +
+type, desc, altitude, vertical rate, gs, track, squawk, distance + compass
+bearing, and an `emergency` line in red when set. The selected aircraft gets a
+`SELECT_PEN` ring (chosen over a leader line). Tapping empty map dismisses.
 
-Tap elsewhere / on the panel to dismiss. Selected plane could also get a ring or
-brighter marker.
+**Route (origin / destination):** `https://api.adsbdb.com/v0/callsign/<callsign>`
+(no key, contact User-Agent, `hex`-only ids skipped). On select, `handle_tap`
+fires `asyncio.create_task(_fetch_route(cs))` -- async now that item 2 landed, no
+freeze -- which fills `_route_cache[cs]` with `(origin, dest)`, `None` (unknown),
+or `""` while pending; the panel shows `route ...` / `LHR > JFK` / `route:
+unknown` accordingly.
 
-**Route (origin / destination):** a separate API, `https://api.adsbdb.com/v0/
-callsign/<callsign>` (no key; strip the trailing spaces off `flight`;
-`hex`-only contacts won't resolve; give it a contact User-Agent). Response is
-`{"response": {"flightroute": {"origin": {...}, "destination": {...},
-"airline": {...}}}}` or the string `{"response": "unknown callsign"}`.
-
-First cut: synchronous on tap -- show the panel immediately with the ADS-B data,
-then a blocking `requests.get(..., timeout=5)` and redraw with the route filled
-in. Cache by callsign (routes don't change within a session), which also keeps
-under adsbdb's rate limit and makes the freeze a once-per-callsign thing. It's a
-deliberate tap-to-inspect gesture, so a brief "route..." pause is acceptable. If
-it grates, that's the point where the network layer (this + the periodic fetch)
-moves to `asyncio` -- `_thread` is unavailable (see item 2's note).
+**Still open:** `_route_cache` is unbounded (one entry per callsign tapped, fine
+in practice); the panel covers the eastern sector while open; no toggle-off by
+re-tapping the same plane; airline name / `desc` wrapping could be nicer.
 
 ### 2b. Settings screen + on-device persistence
 
