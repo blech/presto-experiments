@@ -43,6 +43,13 @@ LOG_UDP_ADDR = ("255.255.255.255", LOG_UDP_PORT)
 # ground speed of 0. When 0, show everything.
 HIDE_ON_GROUND = 1
 
+# Screenshots (PLAN item 4). While 1, a tap anywhere on the screen saves the
+# framebuffer to SCREENSHOT_PATH on flash; pull it with `mpremote fs cp
+# :shot.bmp .` and convert with `sips -s format png shot.bmp --out shot.png`.
+# The tap trigger is temporary -- it becomes tap-to-select once touch lands.
+SCREENSHOT_ON_TAP = 1
+SCREENSHOT_PATH = "/shot.bmp"
+
 # Rather than plotting altitude, colour each aircraft by what it's doing
 # vertically. "baro_rate" (feet/minute, quantised to 64) is the climb/descent
 # rate; "geom_rate" is the GPS-derived fallback. Anything within this band of

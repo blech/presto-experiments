@@ -25,9 +25,10 @@ fi
 echo "Creating :prestoradar/ ..."
 mpremote mkdir :prestoradar 2>/dev/null || true
 
-echo "Copying prestoradar/radar.py + settings.py ..."
+echo "Copying prestoradar/radar.py + settings.py + screenshot.py ..."
 mpremote cp prestoradar/radar.py :prestoradar/radar.py
 mpremote cp prestoradar/settings.py :prestoradar/settings.py
+mpremote cp prestoradar/screenshot.py :prestoradar/screenshot.py
 
 if [ -f prestoradar/basemap_data.py ]; then
     echo "Copying prestoradar/basemap_data.py ..."
