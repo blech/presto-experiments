@@ -408,8 +408,11 @@ def main():
                 log("frame", frame, "draw", draw_ms, "ms  basemap", _basemap_ms, "ms")
 
             # Serve a screenshot to any host that has connected this frame.
+            if frame <= 3:
+                print("frame", frame, "serve_poll")
             screenshot.serve_poll(display, presto.presto)
-
+            if frame <= 3:
+                print("frame", frame, "touch.poll")
             presto.touch.poll()
 
             time.sleep(ANIM_INTERVAL)

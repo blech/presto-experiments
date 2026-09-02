@@ -18,17 +18,19 @@ rows top-to-bottom.
 writes work; it is a no-op hazard on this one.
 """
 
+import select
 import socket
 import struct
 import time
 
 _srv = None
+_poller = None
 
 
 def serve_init(port):
     """Open the non-blocking listening socket. Safe to call once WiFi is up.
     Best-effort: any failure (or a falsy port) just leaves the server off."""
-    global _srv
+    global _srv, _poller
     if not port:
         print("screenshot: server disabled (SCREENSHOT_PORT is 0)")
         return
@@ -41,22 +43,26 @@ def serve_init(port):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(addr)
         s.listen(1)
-        s.setblocking(False)
+        # Poll for a waiting connection rather than trusting setblocking(False)
+        # on accept(), whose behaviour varies across MicroPython ports.
+        _poller = select.poll()
+        _poller.register(s, select.POLLIN)
         _srv = s
         print("screenshot: server on tcp/%d" % port)
     except Exception as e:  # noqa: BLE001
         _srv = None
+        _poller = None
         print("screenshot: serve_init failed:", repr(e))
 
 
 def serve_poll(display, framebuffer_owner):
     """Call once per frame. Serves one waiting client, if any; else returns fast."""
-    if _srv is None:
-        return
+    if _srv is None or not _poller.poll(0):
+        return  # server off, or nobody waiting
     try:
         conn, addr = _srv.accept()
     except OSError:
-        return  # EAGAIN -- nobody waiting
+        return
 
     try:
         conn.settimeout(10)
