@@ -22,9 +22,9 @@ if "/prestoradar" not in sys.path:
 
 from presto import Presto
 import basemap_data
+from settings import RADIUS_KM
 
 WIDTH = HEIGHT = 480
-RADIUS_KM = 30
 PX_PER_KM = 230.0 / RADIUS_KM
 
 

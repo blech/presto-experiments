@@ -27,9 +27,9 @@ import sys
 import urllib.request
 import zipfile
 
-# --- keep in step with radar.py (low precision on purpose) ---
-CENTER_LAT = 37.74
-CENTER_LON = -122.42
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from settings import CENTER_LAT, CENTER_LON
+
 KM_PER_DEG_LAT = 60.0 * 1.852
 KM_PER_DEG_LON = KM_PER_DEG_LAT * math.cos(math.radians(CENTER_LAT))
 

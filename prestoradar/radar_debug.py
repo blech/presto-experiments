@@ -14,14 +14,16 @@ pinned down: wrong status, HTML error page, gzip, truncation, chunked, etc.
 import argparse
 import json
 import math
+import os
 import sys
 import urllib.error
 import urllib.request
 
-# Keep in step with radar.py (low precision on purpose).
-CENTER_LAT = 37.74
-CENTER_LON = -122.42
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from settings import CENTER_LAT, CENTER_LON, RADIUS_KM
+
 WIDTH = HEIGHT = 480
+DEFAULT_RADIUS_NM = round(RADIUS_KM / 1.852)
 
 
 def lat_lon_to_xy(lat, lon, box):
@@ -33,7 +35,8 @@ def lat_lon_to_xy(lat, lon, box):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--radius", type=int, default=16, help="nautical miles, max 250")
+    ap.add_argument("--radius", type=int, default=DEFAULT_RADIUS_NM,
+                    help="nautical miles, max 250 (default from settings.RADIUS_KM)")
     ap.add_argument("--save", metavar="PATH", help="write the raw response body here")
     args = ap.parse_args()
 

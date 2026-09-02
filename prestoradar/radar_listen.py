@@ -12,10 +12,14 @@ firewall / AP-isolation is dropping broadcast packets. Falling back to the
 serial console (`mpremote run ...`) always works.
 """
 
+import os
 import socket
 import sys
 
-PORT = 47269
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from settings import LOG_UDP_PORT
+
+PORT = LOG_UDP_PORT
 
 
 def main():

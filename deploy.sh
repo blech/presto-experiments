@@ -8,7 +8,8 @@
 #     started with `mpremote run presto_radar.py` or from the launcher
 #   * no main.py is deployed -- the stock Pimoroni launcher is left untouched
 #
-# Desktop-only files (radar_debug.py, make_basemap.py) are never copied.
+# Desktop-only files (radar_debug.py, make_basemap.py, radar_listen.py,
+# basemap_test.py) are never copied.
 #
 # Usage:  ./deploy.sh
 # Then:   mpremote run presto_radar.py      (or reset and use the launcher)
@@ -24,8 +25,9 @@ fi
 echo "Creating :prestoradar/ ..."
 mpremote mkdir :prestoradar 2>/dev/null || true
 
-echo "Copying prestoradar/radar.py ..."
+echo "Copying prestoradar/radar.py + settings.py ..."
 mpremote cp prestoradar/radar.py :prestoradar/radar.py
+mpremote cp prestoradar/settings.py :prestoradar/settings.py
 
 if [ -f prestoradar/basemap_data.py ]; then
     echo "Copying prestoradar/basemap_data.py ..."
