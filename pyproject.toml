@@ -1,0 +1,21 @@
+# Tooling dependencies for working with this repo from a computer.
+# The code that runs *on* the Presto is MicroPython and has no pip requirements.
+#
+# Set up with:  uv sync       (or)  pip install mpremote
+
+[project]
+name = "presto-experiments"
+version = "0.0.0"
+description = "Pimoroni Presto experiments"
+requires-python = ">=3.9"
+dependencies = [
+    # deploy.sh pushes prestoradar/ to the Presto over USB.
+    "mpremote>=1.22",
+]
+
+# prestoradar/make_basemap.py, radar_debug.py, radar_listen.py and
+# screenshot_pull.py are standard-library only (screenshot_pull.py also shells
+# out to macOS `sips`), so nothing beyond CPython is needed to run them.
+
+[tool.uv]
+package = false
