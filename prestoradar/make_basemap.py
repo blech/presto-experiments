@@ -240,11 +240,16 @@ def build_layer(gshhg_path, levels, bbox, tol_km):
     return rings, kept_pts
 
 
-def format_rings(name, rings):
+def format_rings(name, rings, per_line=8):
+    """One ring per list, coordinates wrapped every `per_line` pairs -- long
+    single-line list literals can choke MicroPython's compiler on the device."""
     lines = ["%s = [" % name]
     for ring in rings:
-        body = ", ".join("(%g, %g)" % (x, y) for x, y in ring)
-        lines.append("    [%s]," % body)
+        coords = ["(%g, %g)" % (x, y) for x, y in ring]
+        lines.append("    [")
+        for i in range(0, len(coords), per_line):
+            lines.append("        " + ", ".join(coords[i:i + per_line]) + ",")
+        lines.append("    ],")
     lines.append("]")
     return "\n".join(lines)
 
