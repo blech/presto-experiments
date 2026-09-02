@@ -20,6 +20,7 @@ https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip and pass its path
 """
 
 import argparse
+import json
 import math
 import os
 import struct
@@ -240,6 +241,30 @@ def build_layer(gshhg_path, levels, bbox, tol_km):
     return rings, kept_pts
 
 
+def current_params(args):
+    """Everything that, if changed, means basemap_data.py needs regenerating."""
+    return {
+        "resolution": args.resolution,
+        "center": [CENTER_LAT, CENTER_LON],
+        "clip_radius_km": args.clip_radius_km,
+        "simplify_km": args.simplify_km,
+        "levels": args.levels,
+        "airports": [[n, la, lo] for n, la, lo in AIRPORTS],
+    }
+
+
+def stamped_params(path):
+    """Read the '# params:' line back out of an existing basemap_data.py."""
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.startswith("# params: "):
+                    return json.loads(line[len("# params: "):])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def format_rings(name, rings, per_line=8):
     """One ring per list, coordinates wrapped every `per_line` pairs -- long
     single-line list literals can choke MicroPython's compiler on the device."""
@@ -274,7 +299,16 @@ def main():
                     help="download + cache the GSHHG zip if the file is missing")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "basemap_data.py"),
                     help="output module path (default prestoradar/basemap_data.py)")
+    ap.add_argument("--if-stale", action="store_true",
+                    help="do nothing if --out already matches settings + these args "
+                         "(centre, radius, simplify, resolution, levels, airports)")
     args = ap.parse_args()
+
+    params = current_params(args)
+    if args.if_stale and stamped_params(args.out) == params:
+        print("basemap_data.py already current for %.2f, %.2f -- skipping"
+              % (CENTER_LAT, CENTER_LON))
+        return
 
     levels = [int(x) for x in args.levels.split(",") if x.strip()]
     gshhg_path = resolve_gshhg(args.gshhg, args.resolution, args.download)
@@ -310,8 +344,10 @@ def main():
         "radar.py's project(). COASTLINE and LAKES are closed rings -- draw them\n"
         "as polylines for an outline or as filled polygons for land / water.\n"
         '"""\n'
+        "# params: %s\n"
     ) % (args.resolution, CENTER_LAT, CENTER_LON,
-         args.clip_radius_km, args.simplify_km, args.levels)
+         args.clip_radius_km, args.simplify_km, args.levels,
+         json.dumps(params, separators=(",", ":")))
 
     parts = [header,
              format_rings("COASTLINE", coast),

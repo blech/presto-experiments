@@ -22,6 +22,9 @@ if ! command -v mpremote >/dev/null 2>&1; then
     exit 1
 fi
 
+echo "Checking basemap matches settings.py ..."
+python3 prestoradar/make_basemap.py --if-stale
+
 echo "Creating :prestoradar/ ..."
 mpremote mkdir :prestoradar 2>/dev/null || true
 
