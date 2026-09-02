@@ -337,49 +337,34 @@ answer is a directional aircraft icon: orientation carries the track, shape can
 later carry the type (item 3), and callsigns move to tap/selection only. Keeps
 the vstate colour, kills the text pile-up.
 
-**Decided in discussion:**
+**Done (first cut).** `settings.DISPLAY_MODE` selects `"radar"` (the scope look
+-- blip + track arrow + callsign, unchanged) or `"map"` (a plane icon along the
+track, no callsign). `radar.py`:
 
-- **Route A -- plain PicoGraphics.** Rotate the icon's vertices in Python with
-  `sin`/`cos`, the way `draw_track_arrow()` already does. No PicoVector, no new
-  object, matches the existing code. (PicoVector is bundled and would give
-  anti-aliasing + a `Transform`, but it isn't worth pulling in for this.)
-- **A detailed plane silhouette**, accepting the higher point count -- a
-  top-down airliner outline (nose, fuselage, swept wings, tailplane), not a
-  chevron.
-- **Drop ambient callsign labels entirely.** Callsign shows only for the
-  tapped/selected plane (item 2a); until 2a lands, no labels at all.
+- `_ICON_TRIS` is a top-down airliner (fuselage quad + nose + swept wing per
+  side + tailplane per side, 7 convex triangles, ~14 px long), local coords with
+  the nose at +Y. `_icon_pass()` rotates every vertex in Python
+  (`dx = sin(a)`, `dy = -cos(a)`, the `draw_track_arrow()` convention) and fills
+  with `display.triangle()`. Every wing/tail root overlaps the fuselage quad so
+  the shape stays connected at any rotation.
+- Filled in `VSTATE_PENS[vstate]`. `heading is None` or `gs` ~ 0 falls back to
+  the plain blip.
+- Both modes now draw nearest-to-centre last (`sort` by e^2 + n^2) so the
+  closest icon/tag sits on top.
+- **No halo.** A per-icon `BG_COLOR` outline pass was tried; on a dense in-trail
+  stream (the case this is for) it chops the icons into a centipede. Body-only
+  with nearest-on-top reads as an overlapping line of aircraft, which is what
+  FR24 does at low zoom. Individual identification is what item 2a is for.
 
-**Shape and fill.** The silhouette is concave, and `display.polygon()` fills
-reliably only for convex polygons, so build it as a fixed set of convex pieces
-drawn with `display.triangle()` -- e.g. fuselage quad (two triangles) + a
-triangle per wing + a triangle per tailplane half, ~6 triangles. Define it once
-in icon-local units with the nose at +Y, scaled to a `size` in px.
+**Still open:**
 
-**Orientation.** Rotate every vertex by `heading` using the screen convention
-already in `draw_track_arrow()` (`dx = sin(a)`, `dy = -cos(a)`; y grows down,
-north is -y). Continuous rotation, no bucketing -- ~6 triangles x 3 points x ~30
-planes is nothing next to the basemap's ~500 line calls.
-
-**Colour and overlap.** Fill in `VSTATE_PENS[vstate]` (white / cyan / amber),
-unchanged meaning. Draw the silhouette one `size` larger in `BG_COLOR` first as
-a 1 px halo so two same-colour icons stacked on a final approach still read as
-two. Draw planes far-to-near (`sort` by `dst` descending) so the nearest sits on
-top; same-heading icons overlapping is fine, unlike text.
-
-**Signature for later.** `draw_aircraft_icon(x, y, heading, vstate, size, kind)`
-with `size`/`kind` constant for now, wired to item 3's type table later (heavy =
-bigger, GA = smaller, rotorcraft = its own glyph).
-
-**No heading / on ground.** `heading is None` or `gs` ~ 0: keep the plain filled
-dot (or a hollow diamond) -- a silhouette with no orientation is misleading.
-
-**Optional speed cue.** A thin line off the nose, length proportional to `gs`,
-same pen (the current arrow shaft without the barbs). Or omit it -- an icon
-already implies airborne.
-
-**Migration.** Replace `draw_track_arrow()` with `draw_aircraft_icon()`, swap it
-into `draw_scene()`'s per-plane loop, delete the callsign `display.text()` (or
-gate it on a `selected` flag). Contained change.
+- **Callsign on selection.** With 2a, show the tag for the tapped plane only.
+- **Type-driven icon (item 3).** Give `_icon_pass()` a `size`/`kind` arg: heavy
+  bigger, GA smaller, rotorcraft its own glyph. Currently one fixed shape.
+- **Speed cue.** Optional thin line off the nose, length proportional to `gs`.
+- **Tuning.** `_ICON_TRIS` coords and the on-ground fallback are easy to adjust;
+  the shape is spiky at 45-degree headings and merges badly below ~1 px/plane
+  spacing.
 
 ---
 
@@ -419,11 +404,12 @@ bytearray as the background". Two routes:
 already stress the Pico; a second full-frame buffer may not fit at `full_res`,
 which is why the 240x240 `PEN_P8` route is the one to try first.
 
-**As a mode.** `settings.py` gets `BASEMAP_MODE = "vector" | "raster"`.
-`draw_scene()` branches once: `raster` blits the image and skips the grid;
-`vector` does what it does now. Item 7's icons and item 6's no-labels are
-independent changes but pair naturally with `raster` into one coherent
-"map / dense-airspace" mode versus the current "scope" mode.
+**As a mode.** Fold into the existing `settings.DISPLAY_MODE` (item 7) rather
+than a separate `BASEMAP_MODE`: `"map"` gains the raster background (blit the
+image, skip the green grid), `"radar"` keeps the vector scope. `draw_scene()`
+already branches on `DISPLAY_MODE` for aircraft; this extends that branch to the
+backdrop. Items 6 and 7 already ship the no-labels + icon half of the mode; this
+is the backdrop half.
 
 **Lean:** prototype `raster` at 240x240 `PEN_P8` with two layers and Natural
 Earth raster; decide from that whether the resolution and RAM headroom justify

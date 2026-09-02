@@ -39,6 +39,13 @@ ANIM_INTERVAL = 0.5          # seconds between dead-reckoning redraws (~2 fps)
 DRAW_BASEMAP = 1             # 0 to skip the coastline layer entirely
 SKIP_NETWORK = 0             # 1 = don't connect or fetch, just draw grid + basemap
 
+# How aircraft are drawn:
+#   "radar" - scope style: a blip, a track arrow, and the callsign next to it.
+#   "map"   - a small plane icon pointed along the track, no callsign. Better
+#             for busy airspace where callsign tags pile up (e.g. a runway
+#             approach). A richer basemap for this mode is planned -- PLAN item 8.
+DISPLAY_MODE = "radar"
+
 # Logging: every log() line goes to the serial console, and -- once the network
 # is up -- is also broadcast as a UDP packet so another machine on the LAN can
 # watch with `python3 prestoradar/radar_listen.py`. Set LOG_UDP_PORT to 0 to
