@@ -76,6 +76,18 @@ state machine polled from the main loop. TLS makes the latter hard, which is
 why a first cut of the route lookup should just be synchronous with a
 per-callsign cache (see 2a).
 
+**Done: the fetch is now on asyncio.** A probe confirmed Presto firmware v2.0.0
+does a non-blocking TLS handshake via `asyncio.open_connection(..., ssl=...)`
+(worst animation hitch ~280 ms, and a 58 KB body downloaded over 4.4 s with the
+loop still ticking). `radar.py`'s `main()` now runs two tasks -- `_render_loop`
+(dead-reckon + draw every `ANIM_INTERVAL`) and `_fetch_loop` (`await`s a small
+hand-rolled async HTTPS GET, `_http_get()`, then swaps the shared `_planes`).
+`requests` is gone. The ~6 s per-fetch freeze is down to the ~280 ms handshake
+plus a ~100-200 ms `json.loads` on the body. Still open: **keep-alive** (hold
+the connection so the handshake is a one-time startup cost) and a streaming JSON
+parse if that 100-200 ms grates. A per-tap route lookup (2a) can reuse
+`_http_get`.
+
 One caveat: `ANIM_INTERVAL = 0.5` means touch is only sampled ~2x/s, so a fast
 tap can be missed. Either shorten the loop sleep and decouple poll rate from
 redraw rate (poll ~50 ms, redraw ~500 ms), or accept that a deliberate tap is

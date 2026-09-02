@@ -1,10 +1,11 @@
+import asyncio
 import gc
 import json
 import math
 import sys
 import network
+import ssl
 import time
-import requests
 from presto import Presto
 
 # This module lives in /prestoradar/ on the device so its files stay out of the
@@ -41,7 +42,9 @@ except Exception as _e:  # noqa: BLE001
 # --- DERIVED FROM settings ---
 # adsb.lol wants the query radius in nautical miles (1 nm = 1.852 km).
 RADIUS_NM = round(RADIUS_KM / 1.852)
-RADAR_URL = f"https://api.adsb.lol/v2/point/{CENTER_LAT}/{CENTER_LON}/{RADIUS_NM}"
+RADAR_HOST = "api.adsb.lol"
+RADAR_PATH = f"/v2/point/{CENTER_LAT}/{CENTER_LON}/{RADIUS_NM}"
+RADAR_URL = f"https://{RADAR_HOST}{RADAR_PATH}"  # kept for logging / radar_debug.py
 
 # Flat local frame: 1 degree of latitude is 60 nm; a degree of longitude shrinks
 # by cos(latitude).
@@ -271,7 +274,68 @@ def show_message(text):
     presto.update()
 
 
-def fetch_planes():
+async def _http_get(host, path, port=443, timeout=15):
+    """Minimal async HTTPS GET. Returns (status:int, body:bytes). The socket I/O
+    is non-blocking, so the animation keeps running during the transfer; only
+    the TLS handshake (~0.3 s) and json.loads still hitch. No cert check --
+    urequests didn't verify either, and there's no CA bundle on the device."""
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.verify_mode = ssl.CERT_NONE
+    except Exception:  # noqa: BLE001 -- older ssl module: fall back to a plain flag
+        ctx = True
+
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(host, port, ssl=ctx), timeout)
+    try:
+        writer.write(("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
+                      "Connection: close\r\n\r\n" % (path, host, USER_AGENT)).encode())
+        await writer.drain()
+
+        status = int((await asyncio.wait_for(reader.readline(), timeout)).split()[1])
+        clen = None
+        chunked = False
+        while True:
+            h = await asyncio.wait_for(reader.readline(), timeout)
+            if h in (b"\r\n", b"\n", b""):
+                break
+            hl = h.lower()
+            if hl.startswith(b"content-length:"):
+                clen = int(h.split(b":", 1)[1])
+            elif hl.startswith(b"transfer-encoding:") and b"chunked" in hl:
+                chunked = True
+
+        parts = []
+        if chunked:
+            while True:
+                n = int((await reader.readline()).strip() or b"0", 16)
+                if n == 0:
+                    await reader.readline()
+                    break
+                got = 0
+                while got < n:
+                    b = await reader.read(min(2048, n - got))
+                    if not b:
+                        break
+                    parts.append(b)
+                    got += len(b)
+                await reader.readline()  # chunk trailing CRLF
+        else:
+            want = clen if clen is not None else (1 << 30)
+            got = 0
+            while got < want:
+                b = await reader.read(min(2048, want - got))
+                if not b:
+                    break
+                parts.append(b)
+                got += len(b)
+        return status, b"".join(parts)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def fetch_planes():
     """Pull the current aircraft list from adsb.lol.
 
     Returns a list of plane dicts holding position in the metric frame (e, n)
@@ -280,25 +344,20 @@ def fetch_planes():
     """
     gc.collect()
     try:
-        request = requests.get(RADAR_URL, headers={"User-Agent": USER_AGENT}, timeout=15)
-        status = request.status_code
-        body = request.text
-        request.close()
-    except Exception as e:
+        status, body = await _http_get(RADAR_HOST, RADAR_PATH)
+    except Exception as e:  # noqa: BLE001
         log("fetch: request failed:", repr(e))
-        show_message(f"Fetch failed: {e}")
         return None
 
     log("fetch: HTTP", status, len(body), "bytes")
     if status != 200:
-        show_message(f"HTTP {status}\n{body[:200]}")
+        log("fetch: HTTP", status, body[:200])
         return None
 
     try:
         data = json.loads(body)
     except ValueError as e:
-        log("fetch: bad JSON:", repr(e))
-        show_message(f"Bad JSON ({len(body)} bytes)\n{e}\n{body[:120]}")
+        log("fetch: bad JSON:", repr(e), len(body), "bytes")
         return None
     finally:
         body = None
@@ -411,6 +470,66 @@ def draw_scene(planes):
     presto.update()
 
 
+# Shared between the two tasks below. asyncio on MicroPython is cooperative and
+# single-threaded, so _fetch_loop reassigning this and _render_loop reading it
+# can't tear -- no lock needed.
+_planes = []
+
+
+async def _render_loop():
+    # Dead-reckon each aircraft along its last velocity and redraw every
+    # ANIM_INTERVAL. Runs uninterrupted while _fetch_loop is awaiting the
+    # network, so a fetch no longer freezes the animation.
+    last = time.ticks_ms()
+    frame = 0
+    while True:
+        try:
+            now = time.ticks_ms()
+            dt = time.ticks_diff(now, last) / 1000.0
+            last = now
+            for p in _planes:
+                p["e"] += p["ve"] * dt
+                p["n"] += p["vn"] * dt
+
+            t = time.ticks_ms()
+            draw_scene(_planes)
+            frame += 1
+            if frame <= 3 or frame % 20 == 0:
+                log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
+                    "ms  basemap", _basemap_ms, "ms")
+
+            screenshot.serve_poll(display, presto.presto)
+            presto.touch.poll()
+        except Exception as e:  # noqa: BLE001
+            log("RENDER ERROR:", repr(e))
+            if hasattr(sys, "print_exception"):
+                sys.print_exception(e)
+        await asyncio.sleep(ANIM_INTERVAL)
+
+
+async def _fetch_loop():
+    global _planes
+    while True:
+        log("fetch...")
+        t = time.ticks_ms()
+        try:
+            fresh = await fetch_planes()
+        except Exception as e:  # noqa: BLE001
+            log("FETCH ERROR:", repr(e))
+            if hasattr(sys, "print_exception"):
+                sys.print_exception(e)
+            fresh = None
+        if fresh is not None:
+            _planes = fresh
+            log("fetch done:", len(_planes), "planes",
+                time.ticks_diff(time.ticks_ms(), t), "ms  mem", gc.mem_free())
+        await asyncio.sleep_ms(FETCH_INTERVAL_MS)
+
+
+async def _amain():
+    await asyncio.gather(_render_loop(), _fetch_loop())
+
+
 def main():
     print("main: start  display mode:", DISPLAY_MODE)
 
@@ -455,51 +574,7 @@ def main():
     screenshot.serve_init(SCREENSHOT_PORT)
     log("screenshot: pull with  python3 prestoradar/screenshot_pull.py", ip)
 
-    # Fetch every FETCH_INTERVAL_MS; between fetches, dead-reckon each aircraft
-    # forward along its last known track/speed and redraw every ANIM_INTERVAL.
-    planes = []
-    next_fetch_ms = time.ticks_ms()   # fetch straight away
-    last_tick_ms = time.ticks_ms()
-    frame = 0
-
-    while True:
-        try:
-            now = time.ticks_ms()
-            dt = time.ticks_diff(now, last_tick_ms) / 1000.0
-            last_tick_ms = now
-
-            # Advance existing plane positions by dt seconds of their velocity.
-            for p in planes:
-                p["e"] += p["ve"] * dt
-                p["n"] += p["vn"] * dt
-
-            if time.ticks_diff(now, next_fetch_ms) >= 0:
-                log("fetch...")
-                fresh = fetch_planes()
-                if fresh is not None:
-                    planes = fresh
-                log("fetch done:", len(planes), "planes  mem", gc.mem_free())
-                next_fetch_ms = time.ticks_add(time.ticks_ms(), FETCH_INTERVAL_MS)
-                last_tick_ms = time.ticks_ms()  # don't fast-forward across fetch
-
-            t = time.ticks_ms()
-            draw_scene(planes)
-            draw_ms = time.ticks_diff(time.ticks_ms(), t)
-            frame += 1
-            if frame <= 3 or frame % 20 == 0:
-                log("frame", frame, "draw", draw_ms, "ms  basemap", _basemap_ms, "ms")
-
-            # Serve a screenshot to any host that has connected this frame.
-            screenshot.serve_poll(display, presto.presto)
-
-            presto.touch.poll()
-
-            time.sleep(ANIM_INTERVAL)
-        except Exception as e:  # noqa: BLE001
-            log("LOOP ERROR:", repr(e))
-            if hasattr(sys, "print_exception"):
-                sys.print_exception(e)
-            time.sleep(3)
+    asyncio.run(_amain())
 
 
 main()
