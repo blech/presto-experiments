@@ -121,9 +121,11 @@ tunables that make sense at runtime — `RADIUS_KM`, `HIDE_ON_GROUND`,
 Persistence: `settings.py` stays the defaults; write overrides as JSON to
 `/prestoradar/settings_local.json` (gitignored). On boot, load defaults then
 merge the file. Changing `RADIUS_KM` at runtime needs the derived values
-(`RADIUS_NM`, `RADAR_URL`, `PX_PER_KM`) recomputed and ideally a basemap that
-matches — note that `make_basemap.py` is keyed to `CENTER_LAT/LON` + a 50 km
-clip, so a much larger `RADIUS_KM` would need a regenerated `basemap_data.py`.
+(`RADIUS_NM`, `RADAR_URL`, `PX_PER_KM`) recomputed and a basemap that matches.
+`make_basemap.py` clips to `RADIUS_KM * 1.6` and records `RADIUS_KM` in the
+`--if-stale` key, so a build-time radius change re-clips and rebuilds — but a
+runtime change still leaves the deployed `basemap_data.py` clipped for the old
+radius until it is regenerated and redeployed.
 
 ---
 
