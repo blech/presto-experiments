@@ -26,12 +26,20 @@ _srv = None
 
 
 def serve_init(port):
-    """Open the non-blocking listening socket. Safe to call once WiFi is up."""
+    """Open the non-blocking listening socket. Safe to call once WiFi is up.
+    Best-effort: any failure (or a falsy port) just leaves the server off."""
     global _srv
+    if not port:
+        print("screenshot: server disabled (SCREENSHOT_PORT is 0)")
+        return
     try:
+        # Resolve the bind address the way the rest of this ecosystem does --
+        # passing a plain ("0.0.0.0", port) tuple to bind() is unreliable on
+        # MicroPython's lwIP sockets.
+        addr = socket.getaddrinfo("0.0.0.0", port)[0][-1]
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("0.0.0.0", port))
+        s.bind(addr)
         s.listen(1)
         s.setblocking(False)
         _srv = s

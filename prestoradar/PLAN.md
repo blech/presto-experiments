@@ -60,12 +60,21 @@ frame-to-frame to spot a tap (rising edge). There is an interrupt mode
 an ISR is the opposite of needing asyncio anyway.
 
 What *would* justify asyncio is unrelated to touch: the blocking
-`requests.get()` (up to a 15 s timeout) freezes the animation during a fetch.
+`requests.get()` (up to a 15 s timeout) freezes the animation during a fetch,
+and a per-tap route lookup (adsbdb, see 2a) would add a second blocking call.
 That is a networking concern; touch would just come along for free since it is
 already non-blocking. The screenshot TCP server (item 4) adds only a little more
 pressure -- a non-blocking `accept()` per frame plus one on-demand burst send --
-not a recurring stall. Running tally: fetch = real, touch = none, screenshot
-server = transient. Not enough yet.
+not a recurring stall. Running tally: fetch = real, route lookup = would add to
+it, touch = none, screenshot server = transient.
+
+**`_thread` is not an option on the Presto** -- core 1 is permanently owned by
+the display driver (`Presto.__init__` launches the ST7701 driver + backlight
+loop there for the object's lifetime). So the only way to make blocking network
+calls not stall the loop is cooperative: `asyncio`, or a non-blocking-socket
+state machine polled from the main loop. TLS makes the latter hard, which is
+why a first cut of the route lookup should just be synchronous with a
+per-callsign cache (see 2a).
 
 One caveat: `ANIM_INTERVAL = 0.5` means touch is only sampled ~2x/s, so a fast
 tap can be missed. Either shorten the loop sleep and decouple poll rate from
@@ -87,6 +96,20 @@ plane "selected", and draw a panel with:
 
 Tap elsewhere / on the panel to dismiss. Selected plane could also get a ring or
 brighter marker.
+
+**Route (origin / destination):** a separate API, `https://api.adsbdb.com/v0/
+callsign/<callsign>` (no key; strip the trailing spaces off `flight`;
+`hex`-only contacts won't resolve; give it a contact User-Agent). Response is
+`{"response": {"flightroute": {"origin": {...}, "destination": {...},
+"airline": {...}}}}` or the string `{"response": "unknown callsign"}`.
+
+First cut: synchronous on tap -- show the panel immediately with the ADS-B data,
+then a blocking `requests.get(..., timeout=5)` and redraw with the route filled
+in. Cache by callsign (routes don't change within a session), which also keeps
+under adsbdb's rate limit and makes the freeze a once-per-callsign thing. It's a
+deliberate tap-to-inspect gesture, so a brief "route..." pause is acceptable. If
+it grates, that's the point where the network layer (this + the periodic fetch)
+moves to `asyncio` -- `_thread` is unavailable (see item 2's note).
 
 ### 2b. Settings screen + on-device persistence
 
