@@ -178,26 +178,51 @@ def _clip_segment(x0, y0, x1, y1):
         else:
             x1, y1, c1 = x, y, _outcode(x, y)
 
-def _draw_rings(rings):
+# The basemap never changes shape at runtime -- fixed centre, fixed projection --
+# so project and viewport-clip every coastline/lake segment ONCE, at import, into
+# screen-space integer endpoints. draw_basemap() then just replays a list of
+# display.line() calls: no float maths, no Cohen-Sutherland per segment, and
+# off-screen geometry has already been discarded. Doing this every frame (the
+# NYC coastline alone is ~1800 vertices) was the bulk of the per-frame draw cost
+# at ANIM_INTERVAL.
+_BASEMAP_SEGS = None   # [(x0, y0, x1, y1), ...] ints, clipped to the viewport
+_BASEMAP_MARKS = ()    # [(x, y, name), ...] airports inside the viewport
+
+def _cache_rings(rings, out):
     for r in rings:
         px, py = to_screen(*r[0])
         for point in r[1:]:
             cx, cy = to_screen(*point)
             seg = _clip_segment(px, py, cx, cy)
             if seg is not None:
-                display.line(int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3]))
+                out.append((int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3])))
             px, py = cx, cy
 
-def draw_basemap():
-    if basemap_data is None or not DRAW_BASEMAP:
+def build_basemap_cache():
+    global _BASEMAP_SEGS, _BASEMAP_MARKS
+    if basemap_data is None:
+        _BASEMAP_SEGS = []
         return
-    display.set_pen(COAST_PEN)
-    _draw_rings(basemap_data.COASTLINE)
-    _draw_rings(getattr(basemap_data, "LAKES", ()))
+    segs = []
+    _cache_rings(basemap_data.COASTLINE, segs)
+    _cache_rings(getattr(basemap_data, "LAKES", ()), segs)
+    marks = []
     for name, e, n in getattr(basemap_data, "AIRPORTS", ()):
         x, y = to_screen(e, n)
         if 0 <= x < WIDTH and 0 <= y < HEIGHT:
-            display.set_pen(AIRPORT_PEN)
+            marks.append((x, y, name))
+    _BASEMAP_SEGS, _BASEMAP_MARKS = segs, marks
+    gc.collect()
+
+def draw_basemap():
+    if not DRAW_BASEMAP or not _BASEMAP_SEGS:
+        return
+    display.set_pen(COAST_PEN)
+    for s in _BASEMAP_SEGS:
+        display.line(s[0], s[1], s[2], s[3])
+    if _BASEMAP_MARKS:
+        display.set_pen(AIRPORT_PEN)
+        for x, y, name in _BASEMAP_MARKS:
             display.circle(x, y, 3)
             display.text(name, x + 5, y - 4, WIDTH, 1)
 
@@ -301,6 +326,10 @@ def draw_legend():
         display.text(label, 24, row_y, WIDTH, 2)
 
 
+build_basemap_cache()
+print("radar.py: basemap cache:", len(_BASEMAP_SEGS or ()), "segments,",
+      len(_BASEMAP_MARKS), "marks")
+
 _basemap_ms = 0
 
 def draw_scene(planes):
@@ -360,7 +389,8 @@ def main():
                                                   if basemap_error else "none"))
     if basemap_data is not None:
         log("basemap rings", len(basemap_data.COASTLINE),
-            "airports", len(getattr(basemap_data, "AIRPORTS", ())))
+            "airports", len(getattr(basemap_data, "AIRPORTS", ())),
+            "cached segs", len(_BASEMAP_SEGS or ()), "marks", len(_BASEMAP_MARKS))
 
     try:
         ip = network.WLAN(network.STA_IF).ifconfig()[0]

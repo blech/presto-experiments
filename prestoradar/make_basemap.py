@@ -29,10 +29,11 @@ import urllib.request
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from settings import CENTER_LAT, CENTER_LON
+from settings import CENTER_LAT, CENTER_LON, RADIUS_KM
 
 KM_PER_DEG_LAT = 60.0 * 1.852
 KM_PER_DEG_LON = KM_PER_DEG_LAT * math.cos(math.radians(CENTER_LAT))
+PX_PER_KM = 230.0 / RADIUS_KM   # matches radar.py; used by --min-ring-px
 
 # Major airports near the centre (name, lat, lon). Anything outside the clip box
 # is dropped automatically, so it is fine to list a wide set.
@@ -43,6 +44,10 @@ AIRPORTS = [
     ("HWD", 37.6592, -122.1219),   # Hayward
     ("HAF", 37.5134, -122.5010),   # Half Moon Bay
     ("PAO", 37.4611, -122.1150),   # Palo Alto
+    ("JFK", 40.6413, -73.7781),
+    ("LGA", 40.7769, -73.8740),
+    ("EWR", 40.6895, -74.1745),
+    ("TEB", 40.8501, -74.0608),    # Teterboro
 ]
 
 GSHHG_ZIP_URL = "https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip"
@@ -224,10 +229,17 @@ def _extract_from_zip(zip_path, name, dest):
             out.write(src.read())
 
 
-def build_layer(gshhg_path, levels, bbox, tol_km):
-    """Clip + project + simplify all polygons of the given levels."""
+def build_layer(gshhg_path, levels, bbox, tol_km, min_span_km=0.0):
+    """Clip + project + simplify all polygons of the given levels.
+
+    Rings whose projected bounding box is smaller than min_span_km in *both*
+    axes are dropped -- islets that land as an unreadable speck on screen but
+    still cost a per-frame draw call. The "both axes" test keeps thin features
+    (a spit, a river mouth) that are small one way but long the other.
+    """
     rings = []
     kept_pts = 0
+    dropped_small = 0
     for _level, ll_ring in iter_gshhg_polygons(gshhg_path, set(levels), bbox):
         clipped = clip_ring(ll_ring, bbox)
         if len(clipped) < 3:
@@ -236,9 +248,15 @@ def build_layer(gshhg_path, levels, bbox, tol_km):
         reduced = simplify(projected, tol_km)
         if len(reduced) < 3:
             continue
+        if min_span_km > 0.0:
+            xs = [p[0] for p in reduced]
+            ys = [p[1] for p in reduced]
+            if max(xs) - min(xs) < min_span_km and max(ys) - min(ys) < min_span_km:
+                dropped_small += 1
+                continue
         rings.append([(round(x, 2), round(y, 2)) for x, y in reduced])
         kept_pts += len(reduced)
-    return rings, kept_pts
+    return rings, kept_pts, dropped_small
 
 
 def current_params(args):
@@ -248,6 +266,7 @@ def current_params(args):
         "center": [CENTER_LAT, CENTER_LON],
         "clip_radius_km": args.clip_radius_km,
         "simplify_km": args.simplify_km,
+        "min_ring_px": args.min_ring_px,
         "levels": args.levels,
         "airports": [[n, la, lo] for n, la, lo in AIRPORTS],
     }
@@ -289,8 +308,12 @@ def main():
     ap.add_argument("--clip-radius-km", type=float, default=50.0,
                     help="half-size of the clip box around the centre (default 50; "
                          "must cover the display's visible corners, ~44 km)")
-    ap.add_argument("--simplify-km", type=float, default=0.12,
-                    help="Douglas-Peucker tolerance in km (default 0.12, ~1 px)")
+    ap.add_argument("--simplify-km", type=float, default=0.25,
+                    help="Douglas-Peucker tolerance in km (default 0.25, ~2 px at "
+                         "the radar's zoom; the dominant control on vertex count)")
+    ap.add_argument("--min-ring-px", type=float, default=6.0,
+                    help="drop rings whose projected bounding box is under this many "
+                         "pixels in both axes (default 6; unreadable islet specks)")
     ap.add_argument("--levels", default="1,2",
                     help="GSHHG levels to keep: 1 land, 2 lake, 3 island-in-lake, "
                          "4 pond (default '1,2')")
@@ -301,7 +324,7 @@ def main():
                     help="output module path (default prestoradar/basemap_data.py)")
     ap.add_argument("--if-stale", action="store_true",
                     help="do nothing if --out already matches settings + these args "
-                         "(centre, radius, simplify, resolution, levels, airports)")
+                         "(centre, radius, simplify, min-ring, resolution, levels, airports)")
     args = ap.parse_args()
 
     params = current_params(args)
@@ -324,10 +347,11 @@ def main():
     print("clip box: lon %.3f..%.3f  lat %.3f..%.3f  (+/- %g km)"
           % (bbox[0], bbox[2], bbox[1], bbox[3], r))
 
-    coast, coast_pts = build_layer(gshhg_path, [l for l in levels if l == 1], bbox,
-                                   args.simplify_km)
-    lakes, lake_pts = build_layer(gshhg_path, [l for l in levels if l >= 2], bbox,
-                                  args.simplify_km)
+    min_span_km = args.min_ring_px / PX_PER_KM
+    coast, coast_pts, coast_drop = build_layer(
+        gshhg_path, [l for l in levels if l == 1], bbox, args.simplify_km, min_span_km)
+    lakes, lake_pts, lake_drop = build_layer(
+        gshhg_path, [l for l in levels if l >= 2], bbox, args.simplify_km, min_span_km)
 
     airports = []
     for name, lat, lon in AIRPORTS:
@@ -339,14 +363,14 @@ def main():
         '"""Generated by prestoradar/make_basemap.py -- do not edit by hand.\n\n'
         "Source     : GSHHG %s (v2.3.7)\n"
         "Centre     : %.2f, %.2f\n"
-        "Clip radius: %g km   Simplify: %g km   Levels: %s\n\n"
+        "Clip radius: %g km   Simplify: %g km   Min ring: %g px   Levels: %s\n\n"
         "Coordinates are kilometres east / north of the centre, matching\n"
         "radar.py's project(). COASTLINE and LAKES are closed rings -- draw them\n"
         "as polylines for an outline or as filled polygons for land / water.\n"
         '"""\n'
         "# params: %s\n"
     ) % (args.resolution, CENTER_LAT, CENTER_LON,
-         args.clip_radius_km, args.simplify_km, args.levels,
+         args.clip_radius_km, args.simplify_km, args.min_ring_px, args.levels,
          json.dumps(params, separators=(",", ":")))
 
     parts = [header,
@@ -362,8 +386,10 @@ def main():
     with open(args.out, "w") as fh:
         fh.write(text)
 
-    print("\ncoastline rings: %4d  (%d vertices)" % (len(coast), coast_pts))
-    print("lake rings     : %4d  (%d vertices)" % (len(lakes), lake_pts))
+    print("\ncoastline rings: %4d  (%d vertices, %d small rings dropped)"
+          % (len(coast), coast_pts, coast_drop))
+    print("lake rings     : %4d  (%d vertices, %d small rings dropped)"
+          % (len(lakes), lake_pts, lake_drop))
     print("airports       : %4d  %s" % (len(airports), [a[0] for a in airports]))
     print("wrote %s  (%d bytes)" % (args.out, len(text.encode())))
 
