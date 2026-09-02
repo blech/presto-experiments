@@ -216,3 +216,64 @@ or FEC). compresto's TCP transfer gets all of that for free in ~15 lines.
   or 120x120 = 28 KB) as N numbered chunks, best-effort, a dropped chunk just
   skips that frame. Could ride the same multicast group as the shared `netlog`
   (item 1).
+
+---
+
+## 5. More basemap layers + auto airports
+
+Coastline alone is useless for an inland centre -- London 50 km shows a blank
+field (see `example-london.png`). Add layers, and stop hardcoding airports.
+
+### Layer model
+
+Generalise `basemap_data.py` from fixed `COASTLINE` / `LAKES` / `AIRPORTS` to a
+small set of line layers and mark (point + label) layers, e.g.
+
+    LINES = {"coast": [...], "highways": [...]}       # closed/open rings, km
+    MARKS = {"airports": [("LHR", e, n), ...], "cities": [...]}
+
+`settings.py` gets a toggle, which feeds `--if-stale`'s param hash so flipping a
+layer forces a rebuild:
+
+    BASEMAP_LAYERS = ("coast", "highways", "airports")   # "cities" optional
+
+`radar.py`'s `draw_basemap()` iterates whatever's present: a pen per line layer,
+a dot + label per mark layer. `make_basemap.py` grows a `--layers` arg mirroring
+the setting, and one clip/simplify/project pass per enabled source.
+
+### Data sources
+
+- **highways** — Natural Earth `ne_10m_roads` (public domain, one download).
+  Sparse but has the UK motorway network (M25 ring + radials round Heathrow =
+  instant orientation). `type` field distinguishes Major/Secondary. Same
+  processing shape as GSHHG: clip box -> simplify -> project -> polylines.
+  OSM via Overpass (`way["highway"~"motorway|trunk"](bbox)`) is the
+  higher-detail alternative, ODbL, needs heavier simplification.
+- **cities / city centres** — Natural Earth `ne_10m_populated_places` (public
+  domain, points with `name` + `POP_MAX` + `SCALERANK` to filter by size), or
+  just a hand-maintained `LANDMARKS` table for a few well-known points. Draw as
+  a distinct marker (square/diamond) from airports.
+- **airports (auto)** — OurAirports `airports.csv`
+  (`https://davidmegginson.github.io/ourairports-data/airports.csv`, public
+  domain, ~15 MB, stdlib `csv`). Cache it like the GSHHG zip. Filter
+  `type in {large_airport, medium_airport}` (a `--airports-type` flag for
+  large / +medium / +small) within the clip bbox; label with `iata_code` else
+  `ident`. Removes the SF-specific `AIRPORTS` constant entirely and fixes the
+  "London shows no airports" gap. `--if-stale` then records the filter, not a
+  list.
+
+### Dependency decision
+
+GSHHG was hand-parsed with `struct` to stay stdlib-only. Natural Earth ships as
+ESRI Shapefile (+ dBASE `.dbf` for attributes). **Decided: add `pyshp`** (pure
+Python, small) rather than hand-roll a `.shp`/`.dbf` reader -- the DIY version
+would be ~90 lines and only exists to avoid one lightweight dependency.
+`pyproject.toml` gets `pyshp` when this work starts. OurAirports needs nothing
+extra -- it's CSV.
+
+### One pass?
+
+Yes -- highways, cities and auto-airports all have the same shape (add source,
+clip, project, emit, draw) and all benefit from the layer-model refactor, so
+they're one coherent change rather than three. Airports is the smallest slice
+(no new parser) and could land first.
