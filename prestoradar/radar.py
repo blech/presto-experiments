@@ -89,8 +89,10 @@ def project(lat, lon):
     return east, north
 
 def to_screen(east_km, north_km):
-    # Metric frame -> 480x480 pixels, centre at (240, 240), north is up.
-    return int(240 + east_km * PX_PER_KM), int(240 - north_km * PX_PER_KM)
+    # Metric frame -> 480x480 pixels; north is up. _view_cx is the x-pixel that
+    # km-east 0 maps to -- screen centre normally, shifted left while the detail
+    # sidebar is open (see _set_selected).
+    return int(_view_cx + east_km * PX_PER_KM), int(240 - north_km * PX_PER_KM)
 
 print("radar.py: importing done, basemap =", "loaded" if basemap_data else "none")
 
@@ -118,8 +120,13 @@ VSTATE_PENS = {
 # Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
 # selected aircraft.
 PANEL_X = 256                                      # sidebar spans PANEL_X..WIDTH (~224 px)
+# x-pixel that km-east 0 maps to (see to_screen). Shifts left by half the panel
+# width while the sidebar is open so the visible radar re-centres in what's left;
+# the basemap cache is rebuilt on change since its segments are pre-projected.
+_view_cx = WIDTH // 2
 PANEL_BG = display.create_pen(16, 26, 16)
 PANEL_BORDER = display.create_pen(0, 150, 50)
+PANEL_LABEL = display.create_pen(192, 192, 192)    # row labels, dimmer than values
 SELECT_PEN = display.create_pen(255, 235, 90)      # ring: distinct from vstate pens
 EMERG_PEN = display.create_pen(255, 70, 70)
 HIT_RADIUS = 26                                    # px; generous finger target
@@ -177,12 +184,13 @@ def draw_radar_grid():
     display.set_pen(BG_COLOR)
     display.clear()
     # Concentric rings at RADIUS_KM and half that
-    ring(240, 240, int(RADIUS_KM * PX_PER_KM))
-    ring(240, 240, int(RADIUS_KM * 0.5 * PX_PER_KM))
-    # Crosshairs
+    ring(_view_cx, 240, int(RADIUS_KM * PX_PER_KM))
+    ring(_view_cx, 240, int(RADIUS_KM * 0.5 * PX_PER_KM))
+    # Crosshairs -- stop the horizontal one at the sidebar when it's open
+    x_right = PANEL_X - 4 if _selected is not None else WIDTH - 10
     display.set_pen(RADAR_GREEN)
-    display.line(240, 10, 240, 470)
-    display.line(10, 240, 470, 240)
+    display.line(_view_cx, 10, _view_cx, 470)
+    display.line(10, 240, x_right, 240)
 
 # Cohen-Sutherland: clip a segment to [0, WIDTH) x [0, HEIGHT) before it reaches
 # display.line(). The coastline rings run out to a 50 km clip box (~+/-620 px),
@@ -440,6 +448,10 @@ _selected = None          # the selected plane dict, or None
 _last_drawn = []           # [(x, y, plane), ...] from the last draw_planes()
 _route_cache = {}          # callsign -> (origin, dest) | None (unknown) | "" (pending)
 
+# How far to shift the radar left while the sidebar is open, so the visible part
+# re-centres in the remaining width instead of just being cropped.
+_PANEL_SHIFT = (WIDTH - PANEL_X) // 2
+
 _COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
 
@@ -472,8 +484,22 @@ async def _fetch_route(callsign):
         _route_cache[callsign] = None
 
 
+def _set_selected(p):
+    # Select p (or None to dismiss), shift the view, and kick a route lookup.
+    global _selected, _view_cx
+    _selected = p
+    cx = (WIDTH // 2) - (_PANEL_SHIFT if p is not None else 0)
+    if cx != _view_cx:
+        _view_cx = cx
+        build_basemap_cache()   # its segments are pre-projected through to_screen
+    if p is not None:
+        cs = (p["callsign"] or "").strip()
+        if cs and not _is_hex_id(cs) and cs not in _route_cache:
+            _route_cache[cs] = ""            # pending
+            asyncio.create_task(_fetch_route(cs))
+
+
 def handle_tap(tx, ty):
-    global _selected
     # A tap inside the open sidebar is for the panel, not a dismiss.
     if _selected is not None and tx >= PANEL_X:
         return
@@ -482,12 +508,7 @@ def handle_tap(tx, ty):
         d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
         if d < best_d:
             best, best_d = p, d
-    _selected = best   # None => tapped empty space => dismiss
-    if best is not None:
-        cs = (best["callsign"] or "").strip()
-        if cs and not _is_hex_id(cs) and cs not in _route_cache:
-            _route_cache[cs] = ""            # pending
-            asyncio.create_task(_fetch_route(cs))
+    _set_selected(best)          # None => tapped empty space => dismiss
 
 
 def draw_legend_alt():
@@ -561,6 +582,16 @@ def _fmt_alt(alt):
         return "on ground"
     return "%s ft" % alt
 
+def _fmt_route(cs):
+    rc = _route_cache.get(cs, "absent")
+    if rc == "":
+        return "..."
+    if isinstance(rc, tuple):
+        return "%s > %s" % rc
+    if cs and not _is_hex_id(cs):
+        return "unknown"
+    return "-"
+
 def draw_panel(p):
     display.set_pen(PANEL_BG)
     display.rectangle(PANEL_X, 0, WIDTH - PANEL_X, HEIGHT)
@@ -568,47 +599,38 @@ def draw_panel(p):
     display.line(PANEL_X, 0, PANEL_X, HEIGHT)
 
     tx = PANEL_X + 8
-    wrap = WIDTH - tx - 4
+    y = [10]
+
     display.set_pen(TEXT_COLOR)
-    display.text(p["callsign"] or p["hex"] or "?", tx, 10, wrap, 2)
-    y = [40]
-
-    def row(s, pen=None):
-        display.set_pen(pen or TEXT_COLOR)
-        display.text(s, tx, y[0], wrap, 2)
-        y[0] += 22
-
-    ident = "  ".join(v for v in (p["reg"], p["type"]) if v)
-    if ident:
-        row(ident)
-    if p["desc"]:
-        row(p["desc"][:13])
-    row("alt " + _fmt_alt(p["alt"]))
-    vr = p["vrate"]
-    if vr:
-        row("vs %s%d fpm" % ("+" if vr > 0 else "", vr))
-    row("speed %d kt" % (p["gs"] or 0))
-    hdg = p["heading"]
-    if hdg is not None:
-        row("track %d" % round(hdg))
-    if p["squawk"]:
-        row("squawk %s" % p["squawk"])
-    if p["dst"] is not None:
-        row("%d nm %s" % (round(p["dst"]), _compass(p["dir"])))
+    display.text(p["callsign"] or p["hex"] or "?", tx, y[0], WIDTH - tx, 2)
+    y[0] += 28
 
     em = p["emergency"]
     if em and em != "none":
-        row("! " + str(em), EMERG_PEN)
+        display.set_pen(EMERG_PEN)
+        display.text("! " + str(em).upper(), tx, y[0], WIDTH - tx, 2)
+        y[0] += 24
 
-    cs = (p["callsign"] or "").strip()
-    if cs in _route_cache:
-        rc = _route_cache[cs]
-        if rc == "":
-            row("route ...")
-        elif rc:
-            row("%s > %s" % rc)
-        else:
-            row("route unknown")
+    def row(label, value):
+        display.set_pen(PANEL_LABEL)
+        display.text(label, tx, y[0], WIDTH - tx, 2)
+        vx = tx + (len(label) + 1) * 16
+        display.set_pen(TEXT_COLOR)
+        display.text(str(value), vx, y[0], WIDTH - vx - 2, 2)
+        y[0] += 22
+
+    hdg = p["heading"]
+    vr = p["vrate"]
+    row("REG", p["reg"] or "-")
+    row("TYPE", p["type"] or "-")
+    row("RTE", _fmt_route((p["callsign"] or "").strip()))
+    row("ALT", _fmt_alt(p["alt"]))
+    row("VS", ("%+d fpm" % vr) if vr else "level")
+    row("SPEED", "%d kt" % (p["gs"] or 0))
+    row("TRACK", ("%d" % round(hdg)) if hdg is not None else "-")
+    row("DIST", ("%d nm %s" % (round(p["dst"]), _compass(p["dir"])))
+        if p["dst"] is not None else "-")
+    row("SQUAWK", p["squawk"] or "-")
 
 def _status_text(planes):
     if _fetch_count == 0:
@@ -692,7 +714,7 @@ async def _touch_loop():
 
 
 async def _fetch_loop():
-    global _planes, _fetch_count, _fetch_ok, _selected
+    global _planes, _fetch_count, _fetch_ok
     while True:
         log("fetch...")
         t = time.ticks_ms()
@@ -707,11 +729,11 @@ async def _fetch_loop():
         _fetch_ok = fresh is not None
         if fresh is not None:
             _planes = fresh
-            # Re-point the selection at the same aircraft in the fresh list;
-            # clear it if that aircraft has dropped off.
+            # Re-point the selection at the same aircraft in the fresh list, or
+            # clear it (and un-shift the view) if that aircraft has dropped off.
             if _selected is not None:
                 h = _selected["hex"]
-                _selected = next((q for q in fresh if q["hex"] == h), None)
+                _set_selected(next((q for q in fresh if q["hex"] == h), None))
             log("fetch done:", len(_planes), "planes",
                 time.ticks_diff(time.ticks_ms(), t), "ms  mem", gc.mem_free())
         await asyncio.sleep_ms(FETCH_INTERVAL_MS)
