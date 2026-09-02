@@ -577,17 +577,19 @@ def draw_planes(planes):
             display.circle(x, y, 12)
             break
 
+_VAL_DX = 96   # value column: px from the label's x. Fits the longest label + gap.
+
 def _fmt_alt(alt):
     if alt in (0, "ground"):
-        return "on ground"
-    return "%s ft" % alt
+        return "ground"
+    return "%sft" % alt
 
 def _fmt_route(cs):
     rc = _route_cache.get(cs, "absent")
     if rc == "":
         return "..."
     if isinstance(rc, tuple):
-        return "%s > %s" % rc
+        return "%s-%s" % rc
     if cs and not _is_hex_id(cs):
         return "unknown"
     return "-"
@@ -599,6 +601,8 @@ def draw_panel(p):
     display.line(PANEL_X, 0, PANEL_X, HEIGHT)
 
     tx = PANEL_X + 8
+    vx = tx + _VAL_DX
+    vwrap = WIDTH - vx - 2
     y = [10]
 
     display.set_pen(TEXT_COLOR)
@@ -613,10 +617,9 @@ def draw_panel(p):
 
     def row(label, value):
         display.set_pen(PANEL_LABEL)
-        display.text(label, tx, y[0], WIDTH - tx, 2)
-        vx = tx + (len(label) + 1) * 16
+        display.text(label, tx, y[0], _VAL_DX, 2)
         display.set_pen(TEXT_COLOR)
-        display.text(str(value), vx, y[0], WIDTH - vx - 2, 2)
+        display.text(str(value), vx, y[0], vwrap, 2)
         y[0] += 22
 
     hdg = p["heading"]
@@ -625,12 +628,13 @@ def draw_panel(p):
     row("TYPE", p["type"] or "-")
     row("RTE", _fmt_route((p["callsign"] or "").strip()))
     row("ALT", _fmt_alt(p["alt"]))
-    row("VS", ("%+d fpm" % vr) if vr else "level")
+    row("VS", ("%+d" % vr) if vr else "level")
     row("SPEED", "%d kt" % (p["gs"] or 0))
     row("TRACK", ("%d" % round(hdg)) if hdg is not None else "-")
-    row("DIST", ("%d nm %s" % (round(p["dst"]), _compass(p["dir"])))
+    row("DIST", ("%dnm %s" % (round(p["dst"]), _compass(p["dir"])))
         if p["dst"] is not None else "-")
-    row("SQUAWK", p["squawk"] or "-")
+    row("SQWK", p["squawk"] or "-")
+    row("ICAO", (p["hex"] or "-").upper())
 
 def _status_text(planes):
     if _fetch_count == 0:
