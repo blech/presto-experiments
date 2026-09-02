@@ -118,9 +118,11 @@ settings screen (long-press? corner button? tap the centre?) that edits the
 tunables that make sense at runtime — `RADIUS_KM`, `HIDE_ON_GROUND`,
 `DRAW_BASEMAP`, `ANIM_INTERVAL`, maybe `LEVEL_RATE_FPM`.
 
-Persistence: `settings.py` stays the defaults; write overrides as JSON to
-`/prestoradar/settings_local.json` (gitignored). On boot, load defaults then
-merge the file. Changing `RADIUS_KM` at runtime needs the derived values
+Persistence: `settings.py` is the per-location config (gitignored, copied from
+`settings_example.py`); it holds the deploy-time values. Write runtime overrides
+as JSON to `/prestoradar/settings_local.json` (also gitignored). On boot, load
+`settings.py` then merge the JSON over it. Changing `RADIUS_KM` at runtime needs
+the derived values
 (`RADIUS_NM`, `RADAR_URL`, `PX_PER_KM`) recomputed and a basemap that matches.
 `make_basemap.py` clips to `RADIUS_KM * 1.6` and records `RADIUS_KM` in the
 `--if-stale` key, so a build-time radius change re-clips and rebuilds — but a

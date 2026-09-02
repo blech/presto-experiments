@@ -1,10 +1,17 @@
 """
-User-tunable settings for the flight radar.
+User-tunable settings for the flight radar -- template.
+
+Copy this to `settings.py` (which is gitignored) and edit it for your location:
+
+    cp prestoradar/settings_example.py prestoradar/settings.py
 
 radar.py does `from settings import *`; make_basemap.py, radar_debug.py and
 radar_listen.py import the specific names they need. Everything here is a plain
 constant -- no imports, safe to pull in from anywhere. Derived values
 (RADAR_URL, the km/degree factors, the pixel scale) live in radar.py.
+
+The values below centre the radar on San Francisco, matching
+example_sanfrancisco.png.
 """
 
 # Centre of the radar. Deliberately low precision -- enough to place the display,

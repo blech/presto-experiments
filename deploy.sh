@@ -22,6 +22,14 @@ if ! command -v mpremote >/dev/null 2>&1; then
     exit 1
 fi
 
+# settings.py is per-location and gitignored; seed it from the template on first run.
+if [ ! -f prestoradar/settings.py ]; then
+    cp prestoradar/settings_example.py prestoradar/settings.py
+    echo "Created prestoradar/settings.py from settings_example.py."
+    echo "Set CENTER_LAT / CENTER_LON (and RADIUS_KM) in it, then re-run ./deploy.sh." >&2
+    exit 1
+fi
+
 echo "Checking basemap matches settings.py ..."
 python3 prestoradar/make_basemap.py --if-stale
 
