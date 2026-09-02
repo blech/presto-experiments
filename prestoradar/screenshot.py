@@ -11,8 +11,8 @@ front buffer. The host does the RGB565 -> PNG conversion.
 
     host:      python3 prestoradar/screenshot_pull.py <presto-ip>
 
-Wire format:  b"<w>x<h> <nbytes>\\n"  then  <nbytes> of RGB565 (little-endian),
-rows top-to-bottom.
+Wire format:  b"<w>x<h> <nbytes>\\n"  then  <nbytes> of the raw framebuffer,
+rows top-to-bottom. That is big-endian RGB565 (Presto native); the host swaps.
 
 `save()` (framebuffer -> BMP on flash) is kept for use on a firmware where flash
 writes work; it is a no-op hazard on this one.
@@ -104,7 +104,7 @@ def save(display, framebuffer_owner, path="/shot.bmp"):
         o = y * stride
         for x in range(w):
             i = src + x * 2
-            px = fb[i] | (fb[i + 1] << 8)
+            px = (fb[i] << 8) | fb[i + 1]       # big-endian RGB565
             r = (px >> 11) & 0x1F
             g = (px >> 5) & 0x3F
             b = px & 0x1F

@@ -7,9 +7,11 @@ The radar prints its IP at startup ("screenshot: pull with ... <ip>"). It must
 be running with the TCP screenshot server (screenshot.serve_init), which reads
 the port from settings.
 
-The device sends  b"<w>x<h> <nbytes>\\n"  then <nbytes> of RGB565 (little-endian,
-rows top-to-bottom). We expand to RGB888, write a 24-bit BMP, and (unless
---bmp) convert to PNG with `sips` (macOS).
+The device sends  b"<w>x<h> <nbytes>\\n"  then <nbytes> of RGB565, rows
+top-to-bottom. The Presto framebuffer is big-endian RGB565 (high byte first --
+same as compresto's byteswap and the presto repo's convert-image-rgb565.py). We
+expand to RGB888, write a 24-bit BMP, and (unless --bmp) convert to PNG with
+`sips` (macOS).
 """
 
 import argparse
@@ -68,7 +70,7 @@ def _write_bmp(path, rgb565, w, h):
     for y in range(h - 1, -1, -1):             # BMP bottom-up; framebuffer top-down
         base = y * w * 2
         for x in range(w):
-            px = rgb565[base + x * 2] | (rgb565[base + x * 2 + 1] << 8)
+            px = (rgb565[base + x * 2] << 8) | rgb565[base + x * 2 + 1]  # big-endian
             r = (px >> 11) & 0x1F
             g = (px >> 5) & 0x3F
             b = px & 0x1F
