@@ -9,7 +9,7 @@
 #   * no main.py is deployed -- the stock Pimoroni launcher is left untouched
 #
 # Desktop-only files (radar_debug.py, make_basemap.py, radar_listen.py,
-# basemap_test.py) are never copied.
+# basemap_test.py, screenshot_pull.py) are never copied.
 #
 # Usage:  ./deploy.sh
 # Then:   mpremote run presto_radar.py      (or reset and use the launcher)

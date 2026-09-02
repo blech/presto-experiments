@@ -362,13 +362,19 @@ def main():
         log("basemap rings", len(basemap_data.COASTLINE),
             "airports", len(getattr(basemap_data, "AIRPORTS", ())))
 
+    try:
+        ip = network.WLAN(network.STA_IF).ifconfig()[0]
+    except Exception:  # noqa: BLE001
+        ip = "?"
+    screenshot.serve_init(SCREENSHOT_PORT)
+    log("screenshot: pull with  python3 prestoradar/screenshot_pull.py", ip)
+
     # Fetch every FETCH_INTERVAL_MS; between fetches, dead-reckon each aircraft
     # forward along its last known track/speed and redraw every ANIM_INTERVAL.
     planes = []
     next_fetch_ms = time.ticks_ms()   # fetch straight away
     last_tick_ms = time.ticks_ms()
     frame = 0
-    touch_was_down = False
 
     while True:
         try:
@@ -397,17 +403,10 @@ def main():
             if frame <= 3 or frame % 20 == 0:
                 log("frame", frame, "draw", draw_ms, "ms  basemap", _basemap_ms, "ms")
 
-            # A capture armed on the last tap gets written here, over a whole frame.
-            screenshot.service(display, presto.presto)
+            # Serve a screenshot to any host that has connected this frame.
+            screenshot.serve_poll(display, presto.presto)
 
-            # Tap the screen -> screenshot (temporary trigger; becomes tap-to-
-            # select once PLAN item 2a lands).
             presto.touch.poll()
-            down = bool(presto.touch_a[2])
-            if SCREENSHOT_ON_TAP and down and not touch_was_down:
-                log("tap", presto.touch_a[0], presto.touch_a[1], "-> screenshot")
-                screenshot.request(SCREENSHOT_PATH)
-            touch_was_down = down
 
             time.sleep(ANIM_INTERVAL)
         except Exception as e:  # noqa: BLE001

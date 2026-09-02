@@ -62,7 +62,10 @@ an ISR is the opposite of needing asyncio anyway.
 What *would* justify asyncio is unrelated to touch: the blocking
 `requests.get()` (up to a 15 s timeout) freezes the animation during a fetch.
 That is a networking concern; touch would just come along for free since it is
-already non-blocking.
+already non-blocking. The screenshot TCP server (item 4) adds only a little more
+pressure -- a non-blocking `accept()` per frame plus one on-demand burst send --
+not a recurring stall. Running tally: fetch = real, touch = none, screenshot
+server = transient. Not enough yet.
 
 One caveat: `ANIM_INTERVAL = 0.5` means touch is only sampled ~2x/s, so a fast
 tap can be missed. Either shorten the loop sleep and decouple poll rate from
@@ -143,14 +146,15 @@ drawn in place of (or around) the current dot.
 
 ## 4. Screenshots off the device
 
-**Done (flash-BMP path):** `screenshot.py` writes the RGB565 front buffer
-(`memoryview(presto.presto)`) out as a 24-bit BMP to `/shot.bmp`.
-`screenshot.request()` arms it; the main loop calls `screenshot.service()` right
-after `presto.update()` so the capture is a whole frame. Trigger for now is a
-tap anywhere (`SCREENSHOT_ON_TAP`), which becomes tap-to-select when item 2a
-lands. Pull with `mpremote fs cp :shot.bmp .`, convert with `sips -s format png
-shot.bmp --out shot.png`. Still open: a `tools/` host helper, and the
-network paths below.
+**Done (TCP push):** flash writes deadlock this firmware, confirmed --
+`screenshot.save()` gets through the RGB565->RGB888 expansion (~5 s) and then
+hangs hard on `open()`. So `screenshot.py` runs a tiny TCP server instead
+(`serve_init()` once, `serve_poll()` per frame, non-blocking `accept()`); on a
+connection it sends `b"<w>x<h> <nbytes>\n"` then the raw RGB565 front buffer.
+`screenshot_pull.py <presto-ip>` on the host reads that, expands to RGB888,
+writes a BMP and shells out to `sips` for the PNG. `save()` is kept for a
+firmware where flash writes work. Still open: fold `screenshot_pull.py` into a
+`tools/` dir; optional multicast "live preview" (below).
 
 Prior art in the sibling repos:
 
