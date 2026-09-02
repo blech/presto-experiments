@@ -117,7 +117,7 @@ VSTATE_PENS = {
 
 # Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
 # selected aircraft.
-PANEL_X = 330                                      # sidebar spans PANEL_X..WIDTH
+PANEL_X = 256                                      # sidebar spans PANEL_X..WIDTH (~224 px)
 PANEL_BG = display.create_pen(16, 26, 16)
 PANEL_BORDER = display.create_pen(0, 150, 50)
 SELECT_PEN = display.create_pen(255, 235, 90)      # ring: distinct from vstate pens
@@ -558,7 +558,7 @@ def draw_planes(planes):
 
 def _fmt_alt(alt):
     if alt in (0, "ground"):
-        return "ground"
+        return "on ground"
     return "%s ft" % alt
 
 def draw_panel(p):
@@ -567,49 +567,48 @@ def draw_panel(p):
     display.set_pen(PANEL_BORDER)
     display.line(PANEL_X, 0, PANEL_X, HEIGHT)
 
-    tx = PANEL_X + 6
+    tx = PANEL_X + 8
+    wrap = WIDTH - tx - 4
     display.set_pen(TEXT_COLOR)
-    display.text(p["callsign"] or p["hex"] or "?", tx, 8, WIDTH, 2)
+    display.text(p["callsign"] or p["hex"] or "?", tx, 10, wrap, 2)
+    y = [40]
 
-    rows = []
-    rows.append("%s  %s" % (p["reg"] or "-", p["type"] or "-"))
+    def row(s, pen=None):
+        display.set_pen(pen or TEXT_COLOR)
+        display.text(s, tx, y[0], wrap, 2)
+        y[0] += 22
+
+    ident = "  ".join(v for v in (p["reg"], p["type"]) if v)
+    if ident:
+        row(ident)
     if p["desc"]:
-        rows.append(p["desc"][:16])
-    rows.append("alt " + _fmt_alt(p["alt"]))
+        row(p["desc"][:13])
+    row("alt " + _fmt_alt(p["alt"]))
     vr = p["vrate"]
     if vr:
-        rows.append("%s%d fpm" % ("+" if vr > 0 else "", vr))
-    rows.append("gs %d kt" % (p["gs"] or 0))
+        row("vs %s%d fpm" % ("+" if vr > 0 else "", vr))
+    row("speed %d kt" % (p["gs"] or 0))
     hdg = p["heading"]
-    rows.append("trk %s" % (round(hdg) if hdg is not None else "-"))
+    if hdg is not None:
+        row("track %d" % round(hdg))
     if p["squawk"]:
-        rows.append("sqk %s" % p["squawk"])
+        row("squawk %s" % p["squawk"])
     if p["dst"] is not None:
-        rows.append("%d nm %s" % (round(p["dst"]), _compass(p["dir"])))
-
-    y = 34
-    for r in rows:
-        display.text(r, tx, y, WIDTH - tx, 1)
-        y += 14
+        row("%d nm %s" % (round(p["dst"]), _compass(p["dir"])))
 
     em = p["emergency"]
     if em and em != "none":
-        display.set_pen(EMERG_PEN)
-        display.text("! %s" % em, tx, y, WIDTH - tx, 1)
-        display.set_pen(TEXT_COLOR)
-        y += 14
+        row("! " + str(em), EMERG_PEN)
 
     cs = (p["callsign"] or "").strip()
-    if cs not in _route_cache:
-        line = ""
-    elif _route_cache[cs] == "":
-        line = "route ..."
-    elif _route_cache[cs]:
-        line = "%s > %s" % _route_cache[cs]
-    else:
-        line = "route: unknown"
-    if line:
-        display.text(line, tx, y + 4, WIDTH - tx, 1)
+    if cs in _route_cache:
+        rc = _route_cache[cs]
+        if rc == "":
+            row("route ...")
+        elif rc:
+            row("%s > %s" % rc)
+        else:
+            row("route unknown")
 
 def _status_text(planes):
     if _fetch_count == 0:
