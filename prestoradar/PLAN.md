@@ -324,3 +324,105 @@ stable frame-to-frame or labels will jitter and pop.
 
 Lean: greedy cull with a relevance sort, optionally the background box, and
 fold in per-plane labelling if 2a lands.
+
+---
+
+## 7. Aircraft icons instead of dot + arrow + label
+
+**Why:** the label overlap in item 6 is a symptom -- the ambient view tries to
+show a callsign per aircraft in a space that can't hold them. FlightRadar24's
+answer is a directional aircraft icon: orientation carries the track, shape can
+later carry the type (item 3), and callsigns move to tap/selection only. Keeps
+the vstate colour, kills the text pile-up.
+
+**Decided in discussion:**
+
+- **Route A -- plain PicoGraphics.** Rotate the icon's vertices in Python with
+  `sin`/`cos`, the way `draw_track_arrow()` already does. No PicoVector, no new
+  object, matches the existing code. (PicoVector is bundled and would give
+  anti-aliasing + a `Transform`, but it isn't worth pulling in for this.)
+- **A detailed plane silhouette**, accepting the higher point count -- a
+  top-down airliner outline (nose, fuselage, swept wings, tailplane), not a
+  chevron.
+- **Drop ambient callsign labels entirely.** Callsign shows only for the
+  tapped/selected plane (item 2a); until 2a lands, no labels at all.
+
+**Shape and fill.** The silhouette is concave, and `display.polygon()` fills
+reliably only for convex polygons, so build it as a fixed set of convex pieces
+drawn with `display.triangle()` -- e.g. fuselage quad (two triangles) + a
+triangle per wing + a triangle per tailplane half, ~6 triangles. Define it once
+in icon-local units with the nose at +Y, scaled to a `size` in px.
+
+**Orientation.** Rotate every vertex by `heading` using the screen convention
+already in `draw_track_arrow()` (`dx = sin(a)`, `dy = -cos(a)`; y grows down,
+north is -y). Continuous rotation, no bucketing -- ~6 triangles x 3 points x ~30
+planes is nothing next to the basemap's ~500 line calls.
+
+**Colour and overlap.** Fill in `VSTATE_PENS[vstate]` (white / cyan / amber),
+unchanged meaning. Draw the silhouette one `size` larger in `BG_COLOR` first as
+a 1 px halo so two same-colour icons stacked on a final approach still read as
+two. Draw planes far-to-near (`sort` by `dst` descending) so the nearest sits on
+top; same-heading icons overlapping is fine, unlike text.
+
+**Signature for later.** `draw_aircraft_icon(x, y, heading, vstate, size, kind)`
+with `size`/`kind` constant for now, wired to item 3's type table later (heavy =
+bigger, GA = smaller, rotorcraft = its own glyph).
+
+**No heading / on ground.** `heading is None` or `gs` ~ 0: keep the plain filled
+dot (or a hollow diamond) -- a silhouette with no orientation is misleading.
+
+**Optional speed cue.** A thin line off the nose, length proportional to `gs`,
+same pen (the current arrow shaft without the barbs). Or omit it -- an icon
+already implies airborne.
+
+**Migration.** Replace `draw_track_arrow()` with `draw_aircraft_icon()`, swap it
+into `draw_scene()`'s per-plane loop, delete the callsign `display.text()` (or
+gate it on a `selected` flag). Contained change.
+
+---
+
+## 8. Raster basemap / a map mode
+
+**Why:** the coastline vector basemap is thin for an inland or urban centre
+(item 5 adds highways + cities to help), and the icon direction of item 7 pushes
+the whole display toward a FlightRadar24-style map rather than a scope. A
+pre-rendered raster map sidesteps both: arbitrary richness -- roads, water,
+parks, place names -- baked in, drawn as a static background at essentially zero
+per-frame cost. Worth having as **an alternative mode**, not a replacement: the
+green-rings scope look still suits sparse airspace and the retro feel.
+
+**Build side.** A `make_basemap_raster.py` (or a `--raster` mode on the existing
+tool) renders a square image in the same kilometres-east/north frame radar.py
+projects into, keyed on centre / `RADIUS_KM` / `--if-stale` like the vector
+build. Source options: Natural Earth raster (public domain, coarse), a local
+tile render, or a one-off static-map export (mind tile-usage terms +
+attribution). Output as **`PEN_P8` palette** (1 byte/px, ~230 KB at 480x480, vs
+460 KB for RGB565; 256 colours is plenty for a map) plus its palette, or plain
+RGB565.
+
+**Device side -- the blit is the crux.** PicoGraphics has no "draw this
+bytearray as the background". Two routes:
+
+- **240x240, non-`full_res` -> 2 layers.** Put the raster on layer 0 once, draw
+  only planes (and optional rings) on layer 1 each frame. Cleanest; half the
+  resolution. The right first prototype.
+- **`full_res` `PEN_P8`, single layer + a resident copy.** Hold a ~230 KB
+  `bytearray` of the rendered background; each frame
+  `memoryview(fb)[:] = background` then draw planes on top. Needs
+  `direct_to_fb=True` to expose the framebuffer as writable (see item 4's
+  notes). ~230 KB on top of the framebuffer -- check `gc.mem_free()` against the
+  TLS + fetch-body pressure first.
+
+**RAM, not CPU, is the blocker.** TLS, the response body and the framebuffer
+already stress the Pico; a second full-frame buffer may not fit at `full_res`,
+which is why the 240x240 `PEN_P8` route is the one to try first.
+
+**As a mode.** `settings.py` gets `BASEMAP_MODE = "vector" | "raster"`.
+`draw_scene()` branches once: `raster` blits the image and skips the grid;
+`vector` does what it does now. Item 7's icons and item 6's no-labels are
+independent changes but pair naturally with `raster` into one coherent
+"map / dense-airspace" mode versus the current "scope" mode.
+
+**Lean:** prototype `raster` at 240x240 `PEN_P8` with two layers and Natural
+Earth raster; decide from that whether the resolution and RAM headroom justify
+the `full_res` `direct_to_fb` copy.
