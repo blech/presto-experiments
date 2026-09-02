@@ -200,18 +200,22 @@ def _cache_rings(rings, out):
 
 def build_basemap_cache():
     global _BASEMAP_SEGS, _BASEMAP_MARKS
-    if basemap_data is None:
+    try:
+        if basemap_data is None:
+            _BASEMAP_SEGS = []
+            return
+        segs = []
+        _cache_rings(basemap_data.COASTLINE, segs)
+        _cache_rings(getattr(basemap_data, "LAKES", ()), segs)
+        marks = []
+        for name, e, n in getattr(basemap_data, "AIRPORTS", ()):
+            x, y = to_screen(e, n)
+            if 0 <= x < WIDTH and 0 <= y < HEIGHT:
+                marks.append((x, y, name))
+        _BASEMAP_SEGS, _BASEMAP_MARKS = segs, marks
+    except Exception as e:  # noqa: BLE001 -- the basemap is optional, don't die for it
+        print("build_basemap_cache failed:", repr(e))
         _BASEMAP_SEGS = []
-        return
-    segs = []
-    _cache_rings(basemap_data.COASTLINE, segs)
-    _cache_rings(getattr(basemap_data, "LAKES", ()), segs)
-    marks = []
-    for name, e, n in getattr(basemap_data, "AIRPORTS", ()):
-        x, y = to_screen(e, n)
-        if 0 <= x < WIDTH and 0 <= y < HEIGHT:
-            marks.append((x, y, name))
-    _BASEMAP_SEGS, _BASEMAP_MARKS = segs, marks
     gc.collect()
 
 def draw_basemap():
@@ -326,10 +330,6 @@ def draw_legend():
         display.text(label, 24, row_y, WIDTH, 2)
 
 
-build_basemap_cache()
-print("radar.py: basemap cache:", len(_BASEMAP_SEGS or ()), "segments,",
-      len(_BASEMAP_MARKS), "marks")
-
 _basemap_ms = 0
 
 def draw_scene(planes):
@@ -361,6 +361,10 @@ def draw_scene(planes):
 
 def main():
     print("main: start")
+
+    build_basemap_cache()
+    print("main: basemap cache:", len(_BASEMAP_SEGS or ()), "segments,",
+          len(_BASEMAP_MARKS), "marks")
 
     if SKIP_NETWORK:
         print("main: SKIP_NETWORK -- drawing grid + basemap only")
