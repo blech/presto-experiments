@@ -16,6 +16,10 @@ However, there is code to show a non-kaleidoscope version, and to initialise bas
 
 Meanwhile, there are two files in this directory for computer terminals, not the Presto. Those are `listener.py`, which shows currently updating info on the state of the current pattern iteration, and `logger.py`, a less sophisticated version which simply logs JSON lines.
 
+## Images
+
+![Game of Life in "kaleidosoup" mode](example_kaleidosoup.png)
+
 ## Further Development
 
 These are things I'd like to get to, in theory.
@@ -26,7 +30,7 @@ These are things I'd like to get to, in theory.
   - Tweak startup probabilities (currently hardcoded and maybe broken?)
   - Starting pattern
   - General ruleset (ie allow variations from 23/3)
-* Refactor UDP logging; add screenshot (see the `adsb-radar` branch)
+* ~Refactor UDP logging; add screenshot (see the `adsb-radar` branch)~
 * Add colours for cell state (born, survived?)
 * ~Move Life class into life/life.py; keep launcher small~
 
