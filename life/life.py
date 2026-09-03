@@ -16,10 +16,14 @@ WIDTH           = 80
 HEIGHT          = 80
 DEBUG           = False
 MAX_CYCLES      = 6 # set 0 to disable cycle detection
-FILENAME        = 'dart-synthesis'
 LOG_COUNT       = True
 CHANCE          = 0.15 # chance of an initial cell being populated
 SCREENSHOT_PORT = 8011 # TCP port for screenshot.py; 0 disables it
+
+# What to seed the grid with -- both the first grid and every steady-state reset.
+MODE            = 'kaleidosoup'   # 'soup' | 'kaleidosoup' | 'rle'
+FILENAME        = 'dart-synthesis' # RLE stem, used when MODE == 'rle'
+ALIGN           = 'centre'         # 'left' | 'right' | 'centre', for MODE == 'rle'
 
 
 class Life:
@@ -41,8 +45,9 @@ class Life:
 
         self.start_tick = 0
         self.end_tick = 0
-        self.generation = 0
-        self.cycle_index = 0
+
+        # seed the first grid (generation, cycle_index and cycles are set here too)
+        self.setup()
 
 
     ### Networking: telemetry + screenshot server
@@ -80,25 +85,6 @@ class Life:
             fields['cycle_index'] = self.cycle_index
             fields['matched'] = matched
         netlog.emit('steady_state', **fields)
-
-
-    ### New grid setup
-    def setup(self, kind="rle", filename=None):
-        if DEBUG:
-            print(str(time.ticks_ms())+" - started")
-
-        if kind == 'rle' and not filename:
-            filename = FILENAME
-        self.grid, self.neighbours = self.initialise_everything(kind, filename)
-
-        self.draw_grid()
-        if DEBUG:
-            print(str(time.ticks_ms())+" - initialized grid, neighbours")
-
-        self.presto.update()
-
-        # capture up to MAX_CYCLES previous grids for comparison
-        self.cycles = [self.empty_grid() for _ in range(MAX_CYCLES)]
 
 
     ### Presto display handling
@@ -353,16 +339,16 @@ class Life:
             if not self.countdown:
                 await self.send_steady_state(matched=self.matched_index)
                 # await self.make_sound(440, 0.4)
-                self.setup(kind="kaleidosoup")
+                self.setup()
 
 
     ### New grid setup
-    def setup(self, kind="rle", filename=None, align='centre'):
+    def setup(self, kind=MODE, filename=FILENAME, align=ALIGN):
+        # kind / filename / align default to the module settings; pass them
+        # explicitly (e.g. from a REPL) only for a one-off override.
         if DEBUG:
             print(str(time.ticks_ms())+" - started")
 
-        if kind == 'rle' and not filename:
-            filename = FILENAME
         self.grid, self.neighbours = self.initialise_everything(kind, filename, align=align)
 
         self.draw_grid()
