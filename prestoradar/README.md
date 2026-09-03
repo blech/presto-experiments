@@ -17,7 +17,7 @@ radar-style visual of aircraft in the airspace near a point.
   size via `settings.BASEMAP_AIRPORTS` (`large`/`medium`/`small`/`none`);
   `--airports <tier>` overrides it for a one-off build. `basemap_data.py` is
   generated and gitignored; `./deploy.sh` rebuilds it when `settings.py` changes.
-* Run `./deploy.sh` from the top level to push the code
+* Run `./radar_deploy.sh` from the top level to push the code
 * Reset the Presto, either with eg `ampy reset --hard` or the physical button
 * Select "Presto Radar" from the main menu (or eg `ampy run presto_radar.py`)
 
