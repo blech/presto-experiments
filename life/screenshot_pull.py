@@ -24,6 +24,28 @@ import sys
 SCREENSHOT_PORT = 8011  # keep in step with life/life.py
 
 
+def pull(host, output="shot.png", port=SCREENSHOT_PORT, keep_bmp=False):
+    """Fetch one frame from the device's screenshot server and write it to
+    `output`. Returns (path, width, height). Raises OSError on a network /
+    short-read failure, CalledProcessError if `sips` fails. Importable so
+    life/listener.py can trigger a shot from its key handler."""
+    with socket.create_connection((host, port), timeout=10) as s:
+        f = s.makefile("rb")
+        w, h, n = _parse_header(f.readline())
+        data = f.read(n)
+    if len(data) != n:
+        raise OSError("short read: got %d of %d bytes" % (len(data), n))
+
+    bmp_path = os.path.splitext(output)[0] + ".bmp"
+    _write_bmp(bmp_path, data, w, h)
+    if keep_bmp:
+        return bmp_path, w, h
+    subprocess.run(["sips", "-s", "format", "png", bmp_path, "--out", output],
+                   check=True, stdout=subprocess.DEVNULL)
+    os.remove(bmp_path)
+    return output, w, h
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("host")
@@ -32,22 +54,11 @@ def main():
     ap.add_argument("--bmp", action="store_true", help="keep the BMP, skip the PNG step")
     args = ap.parse_args()
 
-    with socket.create_connection((args.host, args.port), timeout=10) as s:
-        f = s.makefile("rb")
-        w, h, n = _parse_header(f.readline())
-        data = f.read(n)
-    if len(data) != n:
-        sys.exit("short read: got %d of %d bytes" % (len(data), n))
-
-    bmp_path = os.path.splitext(args.output)[0] + ".bmp"
-    _write_bmp(bmp_path, data, w, h)
-    if args.bmp:
-        print("wrote %s (%dx%d)" % (bmp_path, w, h))
-        return
-    subprocess.run(["sips", "-s", "format", "png", bmp_path, "--out", args.output],
-                   check=True, stdout=subprocess.DEVNULL)
-    os.remove(bmp_path)
-    print("wrote %s (%dx%d)" % (args.output, w, h))
+    try:
+        path, w, h = pull(args.host, args.output, args.port, keep_bmp=args.bmp)
+    except OSError as e:
+        sys.exit(str(e))
+    print("wrote %s (%dx%d)" % (path, w, h))
 
 
 def _parse_header(line):

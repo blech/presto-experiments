@@ -169,3 +169,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# screenshots pulled off the device by life/listener.py (s key)
+life/life-*.png
