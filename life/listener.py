@@ -23,15 +23,23 @@ def init_socket():
 # curses
 def curses_app(stdscr):
     s = init_socket()
+    s.settimeout(0.5)          # unblock recvfrom so the loop can poll the keyboard
 
     curses.use_default_colors()
+    stdscr.nodelay(True)       # getch() returns -1 rather than blocking
 
     stdscr.clear()
-    stdscr.addstr(0, 0, "Listening...")
+    stdscr.addstr(0, 0, "Listening...  (any key or Ctrl-C to quit)")
     stdscr.refresh()
 
     while True:
-        raw, addr = s.recvfrom(100)
+        if stdscr.getch() != -1:      # any key -> quit
+            break
+
+        try:
+            raw, addr = s.recvfrom(100)
+        except socket.timeout:
+            continue
         data = json.loads(raw)
 
         if data['event'] == 'start':
@@ -52,8 +60,11 @@ def curses_app(stdscr):
             if 'cycle_index' in data and 'matched' in data:
                 stdscr.addstr(7, 0, f"Cycle index & matched: {data['cycle_index'], data['matched']}")
 
+        stdscr.addstr(curses.LINES - 1, 0, "any key or Ctrl-C to quit")
         stdscr.refresh()
-    stdscr.getkey()
 
 if __name__ == "__main__":
-    curses.wrapper(curses_app)
+    try:
+        curses.wrapper(curses_app)
+    except KeyboardInterrupt:
+        pass
