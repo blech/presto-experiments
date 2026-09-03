@@ -131,28 +131,14 @@ SELECT_PEN = display.create_pen(255, 235, 90)      # ring: distinct from vstate 
 EMERG_PEN = display.create_pen(255, 70, 70)
 HIT_RADIUS = 26                                    # px; generous finger target
 
-# Panel text: try the on-device vector font (Roboto-Medium.af), fall back to the
-# built-in bitmap font if PicoVector or the .af file isn't there.
-try:
-    from picovector import PicoVector, ANTIALIAS_FAST
-    _vector = PicoVector(display)
-    _vector.set_antialiasing(ANTIALIAS_FAST)
-    _vector.set_font("Roboto-Medium.af", 22)
-    _vector.set_font_letter_spacing(95)
-    print("radar.py: panel font = Roboto-Medium.af")
-except Exception as _fe:  # noqa: BLE001
-    _vector = None
-    print("radar.py: vector font unavailable (%r); panel uses bitmap8" % _fe)
-
+# Panel text. A PicoVector / Roboto-Medium.af experiment (commit e49dede) hard-
+# locked the render loop on device -- likely the per-call set_font_size plus
+# vector fill cost on the full-res buffer -- so this stays on the bitmap font.
 def _ptext(s, x, y_top, size, pen):
-    # One line of panel text with its top edge at y_top. Vector text anchors on
-    # the baseline, so drop it by ~0.8 * size.
+    # One line of panel text with its top edge at y_top; size is a pixel height,
+    # mapped to the nearest bitmap8 integer scale.
     display.set_pen(pen)
-    if _vector is not None:
-        _vector.set_font_size(size)
-        _vector.text(str(s), x, y_top + (size * 4) // 5)
-    else:
-        display.text(str(s), x, y_top, WIDTH, max(1, size // 8))
+    display.text(str(s), x, y_top, WIDTH, max(1, size // 8))
 
 def draw_track_arrow(x, y, heading_deg, speed_kt, pen):
     # heading_deg is degrees clockwise from north (the aircraft's track over the
@@ -625,15 +611,15 @@ def draw_panel(p):
 
     tx = PANEL_X + 8
     vx = tx + _VAL_DX
-    rh = 26 if _vector is not None else 22
+    rh = 22
     y = 8
 
-    _ptext(p["callsign"] or p["hex"] or "?", tx, y, 30, TEXT_COLOR)
-    y += 38
+    _ptext(p["callsign"] or p["hex"] or "?", tx, y, 16, TEXT_COLOR)
+    y += 28
 
     em = p["emergency"]
     if em and em != "none":
-        _ptext("! " + str(em).upper(), tx, y, 22, EMERG_PEN)
+        _ptext("! " + str(em).upper(), tx, y, 16, EMERG_PEN)
         y += rh
 
     hdg = p["heading"]
@@ -652,8 +638,8 @@ def draw_panel(p):
         ("ICAO", (p["hex"] or "-").upper()),
     )
     for label, value in rows:
-        _ptext(label, tx, y, 20, PANEL_LABEL)
-        _ptext(value, vx, y, 20, TEXT_COLOR)
+        _ptext(label, tx, y, 16, PANEL_LABEL)
+        _ptext(value, vx, y, 16, TEXT_COLOR)
         y += rh
 
 def _status_text(planes):
