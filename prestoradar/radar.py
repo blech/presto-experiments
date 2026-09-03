@@ -576,14 +576,16 @@ def draw_planes(planes):
     (_draw_planes_map if DISPLAY_MODE == "map" else _draw_planes_radar)(order)
     _last_drawn = order
 
-    # Ring the selected aircraft, on top of everything. Outer/inner discs so it's
-    # an outline; radius 14 clears the ~11 px icon half-span.
+    # Ring the selected aircraft, on top of everything. Outer/inner discs make an
+    # outline; kept small (r 7) so it doesn't reach the callsign tag at (x+8, y-8).
     for x, y, p in order:
         if p is _selected:
             display.set_pen(SELECT_PEN)
-            display.circle(x, y, 14)
+            display.circle(x, y, 7)
             display.set_pen(BG_COLOR)
-            display.circle(x, y, 12)
+            display.circle(x, y, 5)
+            display.set_pen(plane_pen(p))
+            display.circle(x, y, 3)   # put the marker back inside the ring
             break
 
 _VAL_DX = 96   # value column: px from the label's x, clears the widest label
