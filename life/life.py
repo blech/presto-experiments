@@ -1,7 +1,3 @@
-# NAME Game of Life
-# ICON joystick
-# DESC Conway's classic for Presto
-
 import asyncio
 import json
 import re
@@ -172,13 +168,15 @@ class Life:
 
     ### Life grid setup
     def initialise_everything(self, kind, filename='spaceship', align=None):
+        grid = False
+
         if kind == 'soup':
             grid = self.initialize_soup(chance=CHANCE, border=20)
         if kind == 'kaleidosoup':
             grid = self.initialize_kaleidosoup(chance=CHANCE, border=5)
         if kind == 'rle':
             try:
-                with open(f'life-rles/{filename}.rle') as f:
+                with open(f'life/rles/{filename}.rle') as f:
                     lines = f.readlines()
                 width, height, born, survive, line_data = self.parse_rle(lines)
                 if align == 'left':
@@ -413,11 +411,3 @@ class Life:
 
             await self.send_generation()
             await asyncio.sleep(0)
-
-
-### Go!
-life = Life()
-life.setup(kind='rle', filename=FILENAME, align='left')
-# life.setup(kind='rle', filename='dart-synthesis', align='left')
-
-asyncio.run(life._app_loop())
