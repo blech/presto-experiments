@@ -16,7 +16,7 @@ DEBUG       = False
 MAX_CYCLES  = 6 # set 0 to disable cycle detection
 FILENAME    = 'dart-synthesis'
 LOG_COUNT   = True
-CHANCE      = 0.05 # chance of an initial cell being populated
+CHANCE      = 0.15 # chance of an initial cell being populated
 
 
 class Life:
