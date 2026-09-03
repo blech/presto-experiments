@@ -173,7 +173,7 @@ class Life:
             grid = self.initialize_kaleidosoup(chance=0.15, border=5)
         if kind == 'rle':
             try:
-                with open(f'life-rles/{filename}.rle') as f:
+                with open(f'life/rles/{filename}.rle') as f:
                     lines = f.readlines()
                 width, height, born, survive, line_data = self.parse_rle(lines)
                 x_offset = int((self.width - width)/2)
