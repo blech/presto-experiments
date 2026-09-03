@@ -527,7 +527,48 @@ def _set_selected(p):
             asyncio.create_task(_fetch_route(cs))
 
 
+# --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
+_settings_open = False
+SETTINGS_BTN = (WIDTH - 40, HEIGHT - 36, 36, 32)      # x, y, w, h  (bottom-right)
+_SPANEL = (WIDTH - 186, HEIGHT - 170, 182, 150)       # x, y, w, h
+_SP_ROW0 = _SPANEL[1] + 40                            # top y of the first value row
+_SP_ROWH = 26
+
+def _in_rect(px, py, r):
+    return r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]
+
+def _toggle_setting(row):
+    global DISPLAY_MODE, COLOUR_MODE, HIDE_ON_GROUND
+    if row == 0:
+        DISPLAY_MODE = "radar" if DISPLAY_MODE == "map" else "map"
+    elif row == 1:
+        COLOUR_MODE = "mono" if COLOUR_MODE == "alt" else "alt"
+    elif row == 2:
+        HIDE_ON_GROUND = 0 if HIDE_ON_GROUND else 1   # takes effect next fetch
+    log("settings:", DISPLAY_MODE, COLOUR_MODE,
+        "ground", "hide" if HIDE_ON_GROUND else "show")
+
+def _settings_tap(tx, ty):
+    global _settings_open
+    if not _in_rect(tx, ty, _SPANEL):
+        _settings_open = False                        # tap outside closes
+        return
+    row = (ty - _SP_ROW0) // _SP_ROWH
+    if 0 <= row <= 2:
+        _toggle_setting(row)                          # cycle value, stay open
+    else:
+        _settings_open = False                        # title / footer taps close
+
+
 def handle_tap(tx, ty):
+    global _settings_open
+    if _settings_open:
+        _settings_tap(tx, ty)
+        return
+    if _in_rect(tx, ty, SETTINGS_BTN):
+        _settings_open = True
+        _set_selected(None)          # settings and the detail panel are exclusive
+        return
     # A tap inside the open sidebar is for the panel, not a dismiss.
     if _selected is not None and tx >= PANEL_X:
         return
@@ -681,6 +722,39 @@ def _status_text(planes):
         return ("Aircraft: %d (stale)" % len(planes)) if planes else "Fetch failed"
     return "Aircraft: %d" % len(planes)  # 0 is legitimate: a quiet sky
 
+def draw_settings_btn():
+    bx, by, bw, bh = SETTINGS_BTN
+    display.set_pen(PANEL_BG)
+    display.rectangle(bx, by, bw, bh)
+    display.set_pen(PANEL_BORDER)
+    for i in range(3):                    # hamburger glyph
+        ly = by + 10 + i * 6
+        display.line(bx + 8, ly, bx + bw - 8, ly)
+
+def draw_settings_panel():
+    px, py, pw, ph = _SPANEL
+    display.set_pen(PANEL_BG)
+    display.rectangle(px, py, pw, ph)
+    display.set_pen(PANEL_BORDER)
+    display.line(px, py, px + pw, py)
+    display.line(px, py + ph, px + pw, py + ph)
+    display.line(px, py, px, py + ph)
+    display.line(px + pw, py, px + pw, py + ph)
+
+    _ptext("SETTINGS", px + 8, py + 8, 16, TEXT_COLOR)
+    display.set_pen(PANEL_BORDER)
+    display.line(px + 6, py + 32, px + pw - 6, py + 32)
+
+    rows = (("mode", DISPLAY_MODE),
+            ("colour", COLOUR_MODE),
+            ("ground", "hide" if HIDE_ON_GROUND else "show"))
+    y = _SP_ROW0
+    for label, value in rows:
+        _ptext(label, px + 8, y, 16, PANEL_LABEL)
+        _ptext(str(value).upper(), px + 8 + 64, y, 16, TEXT_COLOR)
+        y += _SP_ROWH
+    _ptext("tap away to close", px + 8, y + 4, 8, PANEL_LABEL)
+
 def draw_scene(planes):
     global _basemap_ms
     draw_radar_grid()
@@ -694,6 +768,10 @@ def draw_scene(planes):
     draw_planes(planes)
     if _selected is not None:
         draw_panel(_selected)
+    elif not _settings_open:
+        draw_settings_btn()
+    if _settings_open:
+        draw_settings_panel()
     presto.update()
 
 

@@ -123,10 +123,21 @@ re-tapping the same plane; airline name / `desc` wrapping could be nicer.
 
 ### 2b. Settings screen + on-device persistence
 
-`settings.py` is currently edit-and-redeploy only. Add a touch-reachable
-settings screen (long-press? corner button? tap the centre?) that edits the
-tunables that make sense at runtime — `RADIUS_KM`, `HIDE_ON_GROUND`,
-`DRAW_BASEMAP`, `ANIM_INTERVAL`, maybe `LEVEL_RATE_FPM`.
+**Phase 1 done (in-memory).** A hamburger button bottom-right opens a small
+overlay (`draw_settings_panel` / `_settings_tap`) with tap-to-cycle rows for
+`DISPLAY_MODE`, `COLOUR_MODE` and `HIDE_ON_GROUND` — display-only tunables that
+just change the next `draw_scene` (ground filter applies on the next fetch).
+Reuses the item 2a touch plumbing; mutually exclusive with the detail panel.
+Changes are lost on reboot.
+
+**Phase 2 (persistence) is blocked.** `settings.py` is still edit-and-redeploy
+for anything that must survive a reboot. The plan was a JSON overrides file, but
+flash writes deadlock this firmware (the reason item 4 uses a TCP screenshot
+server, not a flash BMP) -- so persistence needs another route: host edits
+`settings_local.json` and `deploy.sh` pushes it, or accept reboot = back to
+`settings.py`. `RADIUS_KM` also can't move at runtime (needs `RADAR_URL` /
+`PX_PER_KM` recompute *and* a matching basemap, which can't regenerate on
+device).
 
 Persistence: `settings.py` is the per-location config (gitignored, copied from
 `settings_example.py`); it holds the deploy-time values. Write runtime overrides
