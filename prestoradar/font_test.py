@@ -1,25 +1,25 @@
 """
-Font rendering report for the Presto at full res: what actually draws on THIS
-firmware?
+Font rendering report for the Presto at full res: what actually draws *legibly*
+on THIS firmware?
 
-    mpremote run prestoradar/font_test.py
+    ../venv/bin/mpremote run prestoradar/font_test.py
 
-Tries, each in its own try/except and timed:
+Tries each backend in its own try/except and holds the sample on screen for a
+few seconds. IMPORTANT: "OK" in the log only means "no exception" -- a font can
+render as a scribble and still pass, so LOOK AT THE SCREEN (or photograph it).
+The backend name is drawn in bitmap8 at the top of every frame so you always
+know what you're looking at.
 
-  - PicoGraphics bitmap8            -- the baseline the radar uses now
-  - PicoGraphics built-in vector fonts (sans / gothic / serif ...), if this
-    build still has them, via display.set_font() + display.text(size)
+Backends:
+  - PicoGraphics bitmap8 (the radar's current panel font)
+  - PicoGraphics built-in vector fonts: sans / gothic / serif / ...
+    NB on Presto firmware v2.0.0 these render as tangled strokes.
   - every *.af file on the device, via PicoVector
+    NB Roboto-Medium.af threw `NotImplementedError: opcode` when
+    set_font_letter_spacing/word_spacing were also set (radar.py e49dede).
 
-Background: radar.py's Roboto-Medium.af attempt (commit e49dede) threw
-`NotImplementedError: opcode` -- the font uses an Alright-Fonts drawing opcode
-the firmware's .af interpreter doesn't implement. The font loads; the first
-glyph draw fails. In the radar that landed mid-frame (before presto.update()),
-so the screen froze on the previous frame and every retry threw again.
-
-If no vector option works, the bitmap font is the answer. Otherwise: regenerate
-the .af from a TTF with curves flattened (see ../alright-fonts), or use whichever
-built-in vector font renders here.
+If nothing vector is legible, the bitmap font stands. Otherwise: use whatever
+renders here, or rebuild an .af from a TTF with curves flattened (../alright-fonts).
 """
 
 import os
@@ -27,6 +27,7 @@ import time
 
 from presto import Presto
 
+HOLD_S = 4
 ROWS = ["REG N29977", "TYPE B789", "RTE DEN-EWR", "ALT 37000ft",
         "VS -1216", "SPEED 334 kt", "TRACK 140", "DIST 12nm NW",
         "SQWK 1466", "ICAO A1B2C3"]
@@ -49,42 +50,45 @@ FG = display.create_pen(225, 235, 225)
 log("Presto full_res", WIDTH, "x", HEIGHT)
 
 
-def block(name, draw_line):
-    """draw_line(text, x, y) draws one line. Clears, draws 10 rows, updates,
-    times it, and reports OK / FAIL without stopping the run."""
+def block(name, setup, draw_line):
+    """setup() selects the font under test; draw_line(text, x, y) draws one row."""
     try:
         display.set_pen(BG)
         display.clear()
+        display.set_font("bitmap8")          # header stays readable whatever else does
         display.set_pen(FG)
+        display.text(name, 10, 8, WIDTH, 2)
+        setup()
         t0 = time.ticks_ms()
-        y = 44
+        y = 60
         for r in ROWS:
             draw_line(r, 20, y)
             y += 36
         dt = since(t0)
+        display.set_font("bitmap8")
         presto.update()
-        log("OK    %-24s  10 lines in %4d ms" % (name, dt))
-        time.sleep(1.5)
+        log("OK    %-26s 10 lines %4d ms -- LOOK AT THE SCREEN" % (name, dt))
+        time.sleep(HOLD_S)
         return True
     except Exception as e:  # noqa: BLE001
-        log("FAIL  %-24s  %r" % (name, e))
+        display.set_font("bitmap8")
+        log("FAIL  %-26s %r" % (name, e))
         return False
 
 
 # --- 1. bitmap8 baseline -----------------------------------------------
-display.set_font("bitmap8")
-block("bitmap8 (scale 2)", lambda s, x, y: display.text(s, x, y, WIDTH, 2))
+block("bitmap8 scale 2",
+      lambda: display.set_font("bitmap8"),
+      lambda s, x, y: display.text(s, x, y, WIDTH, 2))
 
 # --- 2. PicoGraphics built-in vector fonts --------------------------
+_has_thick = hasattr(display, "set_thickness")
 for f in ("sans", "gothic", "serif", "cursive", "serif_italic"):
-    try:
+    def setup(f=f):
         display.set_font(f)
-    except Exception as e:  # noqa: BLE001
-        log("FAIL  set_font(%r)             %r" % (f, e))
-        continue
-    if hasattr(display, "set_thickness"):
-        display.set_thickness(2)
-    block("PicoGraphics %s (h 24)" % f,
+        if _has_thick:
+            display.set_thickness(2)
+    block("PicoGraphics %s h24" % f, setup,
           lambda s, x, y: display.text(s, x, y, WIDTH, 24))
 display.set_font("bitmap8")
 
@@ -106,22 +110,21 @@ try:
         except OSError:
             pass
     afs = sorted(set(afs))
-    log(".af files found:", afs or "(none -- mpremote cp one to the device)")
+    log(".af files found:", afs or "(none)")
 
     for af in afs:
         try:
-            t0 = time.ticks_ms()
             vector.set_font(af, 22)
-            log("      set_font(%r) in %d ms" % (af, since(t0)))
         except Exception as e:  # noqa: BLE001
-            log("FAIL  set_font(%r)  %r" % (af, e))
+            log("FAIL  set_font(%r) %r" % (af, e))
             continue
-        vector.set_font_size(22)
+        # deliberately NOT calling set_font_letter_spacing / word_spacing here
         block("PicoVector %s" % af.rsplit("/", 1)[-1],
+              lambda: vector.set_font_size(22),
               lambda s, x, y: vector.text(s, x, y))
 except Exception as e:  # noqa: BLE001
     log("PicoVector unavailable:", repr(e))
 
-log("done -- holding")
+log("done -- holding on the last sample")
 while True:
     time.sleep(1)
