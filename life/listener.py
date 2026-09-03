@@ -85,10 +85,11 @@ def curses_app(stdscr):
                 stdscr.clear()
                 stdscr.addstr(0, 0, "Listening...")
 
+            # reminding myself - these extra spaces ensure that new lines don't leave junk
             if data['event'] == 'generation':
                 stdscr.addstr(2, 0, f"Generation: {data['generation']}       ")
                 if 'alive' in data:
-                    stdscr.addstr(3, 0, f"Cells alive: {data['alive']} / 6400       ")
+                    stdscr.addstr(3, 0, f"Cells alive: {data['alive']} / 6400 ({data['alive']/64.0:.1f}%)       ")
                 stdscr.addstr(4, 0, f"FPS: {data['fps']}")
 
             if data['event'] == 'steady_state':

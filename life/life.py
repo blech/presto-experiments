@@ -21,9 +21,9 @@ CHANCE          = 0.15 # chance of an initial cell being populated
 SCREENSHOT_PORT = 8011 # TCP port for screenshot.py; 0 disables it
 
 # What to seed the grid with -- both the first grid and every steady-state reset.
-MODE            = 'kaleidosoup'   # 'soup' | 'kaleidosoup' | 'rle'
-FILENAME        = 'dart-synthesis' # RLE stem, used when MODE == 'rle'
-ALIGN           = 'centre'         # 'left' | 'right' | 'centre', for MODE == 'rle'
+MODE            = 'kaleidosoup'     # 'soup' | 'kaleidosoup' | 'rle'
+FILENAME        = 'dart-synthesis'  # RLE stem, used when MODE == 'rle'
+ALIGN           = 'centre'          # 'left' | 'right' | 'centre', for MODE == 'rle'
 
 
 class Life:
@@ -36,6 +36,11 @@ class Life:
         # (but I need to fix up draw_block first)
         self.width = WIDTH
         self.height = HEIGHT
+
+        # pattern - allows for runtime changes, later
+        self.kind = MODE
+        self.filename = FILENAME
+        self.align = ALIGN
 
         # rules
         self.born = [3]
@@ -132,33 +137,33 @@ class Life:
         buzzer.duty_u16(0)
 
 
-    ### Life grid setup
-    def initialise_everything(self, kind, filename='spaceship', align=None):
+    ### Generate the initial pattern of cells
+    def initialise_everything(self):
         grid = False
 
-        if kind == 'soup':
+        if self.kind == 'soup':
             grid = self.initialize_soup(chance=CHANCE, border=20)
-        if kind == 'kaleidosoup':
+        if self.kind == 'kaleidosoup':
             grid = self.initialize_kaleidosoup(chance=CHANCE, border=5)
-        if kind == 'rle':
+        if self.kind == 'rle':
             try:
-                with open(f'life/rles/{filename}.rle') as f:
+                with open(f'life/rles/{self.filename}.rle') as f:
                     lines = f.readlines()
                 width, height, born, survive, line_data = self.parse_rle(lines)
-                if align == 'left':
+                if self.align == 'left':
                     x_offset = 0
-                elif align == 'right':
+                elif self.align == 'right':
                     x_offset = width
                 else:
                     x_offset = int((self.width - width)/2)
                 y_offset = int((self.height - height)/2)
                 grid = self.build_grid(line_data, x_offset=x_offset, y_offset=y_offset)
             except Exception as e:
-                print(f"Specified filename {filename}.rle which didn't work: {e}")
+                print(f"Specified filename {self.filename}.rle which didn't work: {e}")
                 raise
 
         if not grid:
-            raise Exception(f"Didn't understand kind {kind}")
+            raise Exception(f"Didn't understand kind {self.kind}")
 
         neighbours = self.initialize_neighbours(grid)
         return (grid, neighbours)
@@ -343,13 +348,11 @@ class Life:
 
 
     ### New grid setup
-    def setup(self, kind=MODE, filename=FILENAME, align=ALIGN):
-        # kind / filename / align default to the module settings; pass them
-        # explicitly (e.g. from a REPL) only for a one-off override.
+    def setup(self):
         if DEBUG:
             print(str(time.ticks_ms())+" - started")
 
-        self.grid, self.neighbours = self.initialise_everything(kind, filename, align=align)
+        self.grid, self.neighbours = self.initialise_everything()
 
         self.draw_grid()
         if DEBUG:
