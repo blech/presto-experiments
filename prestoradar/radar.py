@@ -590,11 +590,16 @@ def _draw_planes_map(order):
             a = math.radians(heading)
             _icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
 
+def _alt_key(p):
+    a = p["alt"]
+    return a if isinstance(a, (int, float)) else -1   # "ground" / None sort lowest
+
 def draw_planes(planes):
     global _last_drawn
-    # Nearest the centre drawn last, so it sits on top of the pile.
+    # Lowest altitude first, so where two overlap the higher aircraft is drawn on
+    # top -- it's the one nearer the viewer looking down.
     order = []
-    for p in sorted(planes, key=lambda p: -(p["e"] * p["e"] + p["n"] * p["n"])):
+    for p in sorted(planes, key=_alt_key):
         x, y = to_screen(p["e"], p["n"])
         if -40 <= x <= 520 and -40 <= y <= 520:
             order.append((x, y, p))
