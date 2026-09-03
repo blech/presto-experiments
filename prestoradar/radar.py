@@ -689,7 +689,7 @@ def draw_scene(planes):
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
     display.set_pen(TEXT_COLOR)
     display.text(_status_text(planes), 5, 10, WIDTH, 2)
-    if COLOUR_MODE == "alt":
+    if COLOUR_MODE == "alt" and _selected is None:
         draw_legend_alt()
     draw_planes(planes)
     if _selected is not None:
