@@ -1,14 +1,12 @@
 import asyncio
-import json
 import re
-import socket
-import sys
 import time
 from random import random
 
 import machine
-import network
 from presto import Presto
+
+import netlog  # shared UDP telemetry; source in lib/netlog.py, deploy to :lib/
 
 
 FULL_RES    = False
@@ -19,9 +17,6 @@ MAX_CYCLES  = 6 # set 0 to disable cycle detection
 FILENAME    = 'dart-synthesis'
 LOG_COUNT   = True
 CHANCE      = 0.05 # chance of an initial cell being populated
-
-MCAST_GRP   = '239.255.255.250'
-MCAST_PORT  = 32301
 
 
 class Life:
@@ -39,8 +34,7 @@ class Life:
         self.born = [3]
         self.survive = [2, 3]
 
-        self.socket = False
-        self.socket_setup_task =  asyncio.create_task(self.setup_socket())
+        self._netlog_task = asyncio.create_task(self._setup_netlog())
 
         self.start_tick = 0
         self.end_tick = 0
@@ -48,58 +42,37 @@ class Life:
         self.cycle_index = 0
 
 
-    ### UDP setup
-    async def setup_socket(self):
-
+    ### UDP telemetry
+    async def _setup_netlog(self):
+        # Bring up WiFi, then hand the socket to netlog. echo=DEBUG keeps the
+        # per-generation JSON off the serial console unless DEBUG is on; watch
+        # the stream with life/listener.py instead.
         self.presto.connect()
-        wlan = network.WLAN(network.STA_IF)
-        host = wlan.ifconfig()[0]
-        addr = socket.getaddrinfo(host, MCAST_PORT)[0][-1]
-
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(addr)
-        self.socket = s
+        netlog.init(echo=DEBUG)
 
     async def send_start(self):
-        if not self.socket:
-            return
-
-        info = {
-            'event': 'start',
-        }
-        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+        netlog.emit('start')
 
     async def send_generation(self):
-        if not self.socket:
-            return
         duration = self.end_tick - self.start_tick
         fps_raw = 1000/duration
         fps = f"{fps_raw:.2f}"
 
-        info = {
-            'event': 'generation',
+        fields = {
             'fps': fps,
             'fps_raw': fps_raw,
             'generation': self.generation,
         }
-
         if LOG_COUNT:
-            info['alive'] = sum([sum([cell for cell in row]) for row in self.grid])
-        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+            fields['alive'] = sum([sum([cell for cell in row]) for row in self.grid])
+        netlog.emit('generation', **fields)
 
     async def send_steady_state(self, matched: int=None):
-        if not self.socket:
-            return
-
-        info = {
-            'event': 'steady_state',
-            'generation': self.generation,
-        }
+        fields = {'generation': self.generation}
         if matched:
-            info['cycle_index'] = self.cycle_index
-            info['matched'] = matched
-        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+            fields['cycle_index'] = self.cycle_index
+            fields['matched'] = matched
+        netlog.emit('steady_state', **fields)
 
 
     ### New grid setup
