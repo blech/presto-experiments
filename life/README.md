@@ -10,7 +10,7 @@
 
 `life.py` and this directory provide a (currently non-interactive) display of Conway's [Game of Life](https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life).
 
-As currently configured, the Presto is run in high res mode (480x480 resolution), displaying an 80x80 grid of cells, with a repeating, mirrored 40x40 pattern that evolves from a random starting point.
+As currently configured, the Presto is run in low res mode (240x240 resolution), displaying an 80x80 grid of cells, with a repeating, mirrored 40x40 pattern that evolves from a random starting point.
 
 However, there is code to show a non-kaleidoscope version, and to initialise based on [run-length encoded](https://conwaylife.com/wiki/Run_Length_Encoded) patterns, which can be used to start the display.
 

@@ -17,7 +17,9 @@ fi
 echo "Creating :life/ ..."
 mpremote fs mkdir :life 2>/dev/null || true
 
-echo "Copying Life RLEs ..."
+echo "Copying Life library and RLEs ..."
+mpremote fs cp -r life/life.py :life/
+mpremote fs cp -r life/__init__.py :life/
 mpremote fs cp -r life/rles :life/
 
 echo "Copying life.py (root entry shim) ..."

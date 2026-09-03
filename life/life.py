@@ -167,6 +167,8 @@ class Life:
 
     ### Life grid setup
     def initialise_everything(self, kind, filename='spaceship'):
+        grid = False
+
         if kind == 'soup':
             grid = self.initialize_soup(chance=0.15, border=20)
         if kind == 'kaleidosoup':
@@ -403,12 +405,3 @@ class Life:
 
             await self.send_generation()
             await asyncio.sleep(0)
-
-
-### Go!
-if __name__ == "__main__":
-    life = Life()
-    # life.setup(kind="rle", filename="blinkers")
-    life.setup(kind="kaleidoscope")
-
-    asyncio.run(life._app_loop())
