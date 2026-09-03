@@ -143,6 +143,11 @@ radius until it is regenerated and redeployed.
 
 ## 3. Aircraft-type icons (research)
 
+**Category ladder done.** `fetch_planes` keeps `category`; map mode draws a
+helicopter glyph (`_draw_rotor`) for `A7` and scales the fixed-wing icon by
+`_CAT_SCALE` for `A1`..`A5` (light .. heavy). The engine-count / type-table part
+below is still open.
+
 Question: is there data to distinguish helicopter / private / twin light / twin
 heavy / four-engine heavy?
 
@@ -370,8 +375,8 @@ track, no callsign). `radar.py`:
 **Still open:**
 
 - **Callsign on selection.** With 2a, show the tag for the tapped plane only.
-- **Type-driven icon (item 3).** Give `_icon_pass()` a `size`/`kind` arg: heavy
-  bigger, GA smaller, rotorcraft its own glyph. Currently one fixed shape.
+- **Type-driven icon.** Emitter-`category` size ladder + `A7` rotor glyph are
+  done (item 3). Still want the twin/quad distinction from a baked `t` table.
 - **Speed cue.** Optional thin line off the nose, length proportional to `gs`.
 - **Tuning.** `_ICON_TRIS` coords and the on-ground fallback are easy to adjust;
   the shape is spiky at 45-degree headings and merges badly below ~1 px/plane

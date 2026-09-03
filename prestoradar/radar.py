@@ -181,6 +181,24 @@ def _icon_pass(x, y, ca, sa, scale):
             int(x + (cx * ca + cy * sa) * scale), int(y + (cx * sa - cy * ca) * scale),
         )
 
+# Emitter-category (ADS-B "category") -> fixed-wing icon scale. A1 light .. A5
+# heavy; anything not listed (incl. not broadcast) draws at 1.0.
+_CAT_SCALE = {"A1": 0.72, "A2": 0.88, "A3": 1.0, "A4": 1.2, "A5": 1.35}
+
+def _draw_rotor(x, y, heading_deg, scale):
+    # Top-down helicopter for category A7: hub, a tail boom pointing aft, and a
+    # two-blade rotor set 45 degrees off the heading so it doesn't read as a
+    # fixed wing. Caller has set the pen.
+    display.circle(x, y, max(2, int(2 * scale)))
+    ba = math.radians(heading_deg + 180)
+    boom = int(8 * scale)
+    display.line(x, y, int(x + math.sin(ba) * boom), int(y - math.cos(ba) * boom))
+    blade = int(7 * scale)
+    for off in (45, 135):
+        a = math.radians(heading_deg + off)
+        bx, by = math.sin(a) * blade, -math.cos(a) * blade
+        display.line(int(x - bx), int(y - by), int(x + bx), int(y + by))
+
 def ring(cx, cy, r, thickness=3):
     # PicoGraphics circles are filled, so draw an outline as an outer disc with
     # a background-coloured disc punched out of the middle.
@@ -437,6 +455,7 @@ async def fetch_planes():
         planes.append({
             "callsign": callsign, "e": east, "n": north,
             "ve": ve, "vn": vn, "heading": heading, "gs": gs, "vstate": vstate,
+            "cat": aircraft.get("category"),   # ADS-B emitter category, e.g. "A5", "A7"
             # Detail fields for the tap-to-inspect panel (item 2a).
             "hex": aircraft.get("hex", ""),
             "reg": aircraft.get("r"),
@@ -553,17 +572,23 @@ def _draw_planes_radar(order):
         display.text(p["callsign"], x + 8, y - 8, WIDTH, 2)
 
 def _draw_planes_map(order):
-    # Map style: a plane icon along the track, no label; a plain blip when there
-    # is no usable heading. Nearest is drawn last (order is pre-sorted), so a
-    # dense in-trail stream on an approach reads as an overlapping line of
-    # aircraft rather than a pile of text.
+    # Map style: an icon along the track, no label; a plain blip when there's no
+    # usable heading. Shape/size come from the ADS-B emitter category -- A7 is a
+    # helicopter, A1..A5 scale the fixed-wing icon light..heavy. Nearest is drawn
+    # last (order is pre-sorted) so a dense in-trail stream reads as an
+    # overlapping line rather than a pile of text.
     for x, y, p in order:
         display.set_pen(plane_pen(p))
-        if p["heading"] is not None and p["gs"] > 20:
-            a = math.radians(p["heading"])
-            _icon_pass(x, y, math.cos(a), math.sin(a), 1.0)
-        else:
+        heading = p["heading"]
+        if heading is None or p["gs"] <= 20:
             display.circle(x, y, 3)
+            continue
+        cat = p["cat"]
+        if cat == "A7":
+            _draw_rotor(x, y, heading, 1.0)
+        else:
+            a = math.radians(heading)
+            _icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
 
 def draw_planes(planes):
     global _last_drawn
