@@ -4,11 +4,6 @@ Experimental / sample / in development MicroPython code for the
 [Pimoroni Presto](https://shop.pimoroni.com/products/presto)
 microcontroller-powered 4" display.
 
-## Presto Radar
-
-Displays flights near a location, styled like a radar scope. Full information is in
-[its own README](prestoradar/README.md).
-
 ## Life
 
 An implementation of Conway's classic Game Of Life, with a series of RLE files
