@@ -408,6 +408,7 @@ class Life:
 ### Go!
 if __name__ == "__main__":
     life = Life()
-    life.setup(kind='rle', filename='blinkers')
+    # life.setup(kind="rle", filename="blinkers")
+    life.setup(kind="kaleidoscope")
 
     asyncio.run(life._app_loop())
