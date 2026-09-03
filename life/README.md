@@ -4,11 +4,11 @@
 
 * `pip install mpremote` - if it's not already available
 * From the root of the repo, run `./life_deploy.sh`
-* `mpremote run life.py`, or use the Presto launcher to run Game of Life
+* `mpremote run game_of_life.py`, or use the Presto launcher to run Game of Life
 
 ## Description
 
-`life.py` and this directory provide a (currently non-interactive) display of Conway's [Game of Life](https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life).
+`game_of_life.py` and this directory provide a (currently non-interactive) display of Conway's [Game of Life](https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life).
 
 As currently configured, the Presto is run in low res mode (240x240 resolution), displaying an 80x80 grid of cells, with a repeating, mirrored 40x40 pattern that evolves from a random starting point.
 
@@ -20,7 +20,7 @@ Meanwhile, there are two files in this directory for computer terminals, not the
 
 These are things I'd like to get to, in theory.
 
-* Allow configuration, either from `listener.py` sending commands back a Presto UI, passing to `mpremote life.py` or some combination
+* Allow configuration, either from `listener.py` sending commands back a Presto UI, passing to `mpremote game_of_life.py` or some combination
   - Enable/disable kaleidoscope (at startup, or even instantly?)
   - Colours / style options - currently black, white, grey, grid lines
   - Tweak startup probabilities (currently hardcoded and maybe broken?)
@@ -28,7 +28,7 @@ These are things I'd like to get to, in theory.
   - General ruleset (ie allow variations from 23/3)
 * Refactor UDP logging; add screenshot (see the `adsb-radar` branch)
 * Add colours for cell state (born, survived?)
-* Move Life class into life/life.py; keep launcher small
+* ~Move Life class into life/life.py; keep launcher small~
 
 ## Notes
 

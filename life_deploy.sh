@@ -4,7 +4,6 @@
 # This also copies the required RLEs (Life initialisation patterns).
 #
 # Usage:  ./life-deploy.sh
-# Then:   mpremote run life.py      (or reset and use the launcher)
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -22,10 +21,10 @@ mpremote fs cp -r life/life.py :life/
 mpremote fs cp -r life/__init__.py :life/
 mpremote fs cp -r life/rles :life/
 
-echo "Copying life.py (root entry shim) ..."
-mpremote fs cp life.py :life.py
+echo "Copying game_of_life.py (root entry shim) ..."
+mpremote fs cp game_of_life.py :game_of_life.py
 
 echo
 echo "Done. Start it with:"
-echo "    mpremote run life.py"
+echo "    mpremote run game_of_life.py"
 echo "or reset the Presto and choose 'Game of Life' in the launcher."
