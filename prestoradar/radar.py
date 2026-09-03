@@ -131,6 +131,29 @@ SELECT_PEN = display.create_pen(255, 235, 90)      # ring: distinct from vstate 
 EMERG_PEN = display.create_pen(255, 70, 70)
 HIT_RADIUS = 26                                    # px; generous finger target
 
+# Panel text: try the on-device vector font (Roboto-Medium.af), fall back to the
+# built-in bitmap font if PicoVector or the .af file isn't there.
+try:
+    from picovector import PicoVector, ANTIALIAS_FAST
+    _vector = PicoVector(display)
+    _vector.set_antialiasing(ANTIALIAS_FAST)
+    _vector.set_font("Roboto-Medium.af", 22)
+    _vector.set_font_letter_spacing(95)
+    print("radar.py: panel font = Roboto-Medium.af")
+except Exception as _fe:  # noqa: BLE001
+    _vector = None
+    print("radar.py: vector font unavailable (%r); panel uses bitmap8" % _fe)
+
+def _ptext(s, x, y_top, size, pen):
+    # One line of panel text with its top edge at y_top. Vector text anchors on
+    # the baseline, so drop it by ~0.8 * size.
+    display.set_pen(pen)
+    if _vector is not None:
+        _vector.set_font_size(size)
+        _vector.text(str(s), x, y_top + (size * 4) // 5)
+    else:
+        display.text(str(s), x, y_top, WIDTH, max(1, size // 8))
+
 def draw_track_arrow(x, y, heading_deg, speed_kt, pen):
     # heading_deg is degrees clockwise from north (the aircraft's track over the
     # ground). Screen y grows downwards, so north maps to -y.
@@ -602,39 +625,36 @@ def draw_panel(p):
 
     tx = PANEL_X + 8
     vx = tx + _VAL_DX
-    vwrap = WIDTH - vx - 2
-    y = [10]
+    rh = 26 if _vector is not None else 22
+    y = 8
 
-    display.set_pen(TEXT_COLOR)
-    display.text(p["callsign"] or p["hex"] or "?", tx, y[0], WIDTH - tx, 2)
-    y[0] += 28
+    _ptext(p["callsign"] or p["hex"] or "?", tx, y, 30, TEXT_COLOR)
+    y += 38
 
     em = p["emergency"]
     if em and em != "none":
-        display.set_pen(EMERG_PEN)
-        display.text("! " + str(em).upper(), tx, y[0], WIDTH - tx, 2)
-        y[0] += 24
-
-    def row(label, value):
-        display.set_pen(PANEL_LABEL)
-        display.text(label, tx, y[0], _VAL_DX, 2)
-        display.set_pen(TEXT_COLOR)
-        display.text(str(value), vx, y[0], vwrap, 2)
-        y[0] += 22
+        _ptext("! " + str(em).upper(), tx, y, 22, EMERG_PEN)
+        y += rh
 
     hdg = p["heading"]
     vr = p["vrate"]
-    row("REG", p["reg"] or "-")
-    row("TYPE", p["type"] or "-")
-    row("RTE", _fmt_route((p["callsign"] or "").strip()))
-    row("ALT", _fmt_alt(p["alt"]))
-    row("VS", ("%+d" % vr) if vr else "level")
-    row("SPEED", "%d kt" % (p["gs"] or 0))
-    row("TRACK", ("%d" % round(hdg)) if hdg is not None else "-")
-    row("DIST", ("%dnm %s" % (round(p["dst"]), _compass(p["dir"])))
-        if p["dst"] is not None else "-")
-    row("SQWK", p["squawk"] or "-")
-    row("ICAO", (p["hex"] or "-").upper())
+    rows = (
+        ("REG", p["reg"] or "-"),
+        ("TYPE", p["type"] or "-"),
+        ("RTE", _fmt_route((p["callsign"] or "").strip())),
+        ("ALT", _fmt_alt(p["alt"])),
+        ("VS", ("%+d" % vr) if vr else "level"),
+        ("SPEED", "%d kt" % (p["gs"] or 0)),
+        ("TRACK", ("%d" % round(hdg)) if hdg is not None else "-"),
+        ("DIST", ("%dnm %s" % (round(p["dst"]), _compass(p["dir"])))
+                 if p["dst"] is not None else "-"),
+        ("SQWK", p["squawk"] or "-"),
+        ("ICAO", (p["hex"] or "-").upper()),
+    )
+    for label, value in rows:
+        _ptext(label, tx, y, 20, PANEL_LABEL)
+        _ptext(value, vx, y, 20, TEXT_COLOR)
+        y += rh
 
 def _status_text(planes):
     if _fetch_count == 0:
