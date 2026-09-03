@@ -26,7 +26,7 @@ These are things I'd like to get to, in theory.
   - Tweak startup probabilities (currently hardcoded and maybe broken?)
   - Starting pattern
   - General ruleset (ie allow variations from 23/3)
-* Refactor UDP logging; add screenshot (see the `flight-radar` branch)
+* Refactor UDP logging; add screenshot (see the `adsb-radar` branch)
 * Add colours for cell state (born, survived?)
 * Move Life class into life/life.py; keep launcher small
 
