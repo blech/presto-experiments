@@ -16,8 +16,9 @@ WIDTH       = 80
 HEIGHT      = 80
 DEBUG       = False
 MAX_CYCLES  = 6 # set 0 to disable cycle detection
-FILENAME    = 'boss-synthesis'
+FILENAME    = 'dart-synthesis'
 LOG_COUNT   = True
+CHANCE      = 0.05 # chance of an initial cell being populated
 
 MCAST_GRP   = '239.255.255.250'
 MCAST_PORT  = 32301
@@ -147,7 +148,7 @@ class Life:
 
     def change_cell(self, x, y, state):
         WHITE = self.display.create_pen(255, 255, 255)
-        GREY = self.display.create_pen(51, 51, 51)
+        GREY = self.display.create_pen(32, 32, 32)
 
         if state:
             self.display.set_pen(WHITE)
@@ -166,19 +167,24 @@ class Life:
 
 
     ### Life grid setup
-    def initialise_everything(self, kind, filename='spaceship'):
+    def initialise_everything(self, kind, filename='spaceship', align=None):
         grid = False
 
         if kind == 'soup':
-            grid = self.initialize_soup(chance=0.15, border=20)
+            grid = self.initialize_soup(chance=CHANCE, border=20)
         if kind == 'kaleidosoup':
-            grid = self.initialize_kaleidosoup(chance=0.15, border=5)
+            grid = self.initialize_kaleidosoup(chance=CHANCE, border=5)
         if kind == 'rle':
             try:
                 with open(f'life/rles/{filename}.rle') as f:
                     lines = f.readlines()
                 width, height, born, survive, line_data = self.parse_rle(lines)
-                x_offset = int((self.width - width)/2)
+                if align == 'left':
+                    x_offset = 0
+                elif align == 'right':
+                    x_offset = width
+                else:
+                    x_offset = int((self.width - width)/2)
                 y_offset = int((self.height - height)/2)
                 grid = self.build_grid(line_data, x_offset=x_offset, y_offset=y_offset)
             except Exception as e:
@@ -371,13 +377,13 @@ class Life:
 
 
     ### New grid setup
-    def setup(self, kind="rle", filename=None):
+    def setup(self, kind="rle", filename=None, align='centre'):
         if DEBUG:
             print(str(time.ticks_ms())+" - started")
 
         if kind == 'rle' and not filename:
             filename = FILENAME
-        self.grid, self.neighbours = self.initialise_everything(kind, filename)
+        self.grid, self.neighbours = self.initialise_everything(kind, filename, align=align)
 
         self.draw_grid()
         if DEBUG:

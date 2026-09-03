@@ -1,6 +1,16 @@
 # Draw a grid of 4096 seven-pixel squares based on a shuffled RGB colour cube
 # Named in reference to Gerhard Richter's painting
-# See https://www.gerhard-richter.com/en/art/paintings/abstracts/colour-charts-12/4096-colours-6089
+# https://www.gerhard-richter.com/en/art/paintings/abstracts/colour-charts-12/4096-colours-6089
+# https://www.sothebys.com/en/articles/4096-farben
+#
+# In order to make this a more interesting script, it doesn't just draw a single
+# rendition of 4096 uniquely-coloured pixels and then stop. Instead, it will swap
+# pairs of neighbouring pixels. Initially it will only do this for one pair; then
+# two; until it's swapping 256 pairs, at which point it resets down to one again.
+#
+# NAME 4096 Farben
+# DESC Draw a grid of 4096 seven-pixel squares based on a shuffled RGB colour cube
+# ICON deployed_code
 
 import time
 from random import randrange, randint
@@ -35,7 +45,7 @@ def main():
     presto = Presto(full_res=True)
     display = presto.display
     display.clear()
-    presto.set_backlight(0.25)
+    presto.set_backlight(0.5)
     pens = get_pens(display)
     shuffle(pens)
 
@@ -73,6 +83,4 @@ def main():
         time.sleep(TICK)
 
 
-
-if __name__ == "__main__":
-    main()
+main()
