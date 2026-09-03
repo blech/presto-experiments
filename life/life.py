@@ -4,19 +4,22 @@ import time
 from random import random
 
 import machine
+import network
 from presto import Presto
 
-import netlog  # shared UDP telemetry; source in lib/netlog.py, deploy to :lib/
+import netlog      # shared UDP telemetry;   source in lib/netlog.py,     deploy to :lib/
+import screenshot  # shared TCP frame server; source in lib/screenshot.py, deploy to :lib/
 
 
-FULL_RES    = False
-WIDTH       = 80
-HEIGHT      = 80
-DEBUG       = False
-MAX_CYCLES  = 6 # set 0 to disable cycle detection
-FILENAME    = 'dart-synthesis'
-LOG_COUNT   = True
-CHANCE      = 0.15 # chance of an initial cell being populated
+FULL_RES        = False
+WIDTH           = 80
+HEIGHT          = 80
+DEBUG           = False
+MAX_CYCLES      = 6 # set 0 to disable cycle detection
+FILENAME        = 'dart-synthesis'
+LOG_COUNT       = True
+CHANCE          = 0.15 # chance of an initial cell being populated
+SCREENSHOT_PORT = 8011 # TCP port for screenshot.py; 0 disables it
 
 
 class Life:
@@ -34,7 +37,7 @@ class Life:
         self.born = [3]
         self.survive = [2, 3]
 
-        self._netlog_task = asyncio.create_task(self._setup_netlog())
+        self._net_task = asyncio.create_task(self._setup_net())
 
         self.start_tick = 0
         self.end_tick = 0
@@ -42,13 +45,17 @@ class Life:
         self.cycle_index = 0
 
 
-    ### UDP telemetry
-    async def _setup_netlog(self):
-        # Bring up WiFi, then hand the socket to netlog. echo=DEBUG keeps the
-        # per-generation JSON off the serial console unless DEBUG is on; watch
-        # the stream with life/listener.py instead.
+    ### Networking: telemetry + screenshot server
+    async def _setup_net(self):
+        # Bring up WiFi, then start the off-device services. echo=DEBUG keeps
+        # the per-generation JSON off the serial console unless DEBUG is on;
+        # watch the stream with life/listener.py instead.
         self.presto.connect()
         netlog.init(echo=DEBUG)
+        screenshot.serve_init(SCREENSHOT_PORT)
+        if SCREENSHOT_PORT:
+            ip = network.WLAN(network.STA_IF).ifconfig()[0]
+            print("screenshot: pull with  python3 life/screenshot_pull.py", ip)
 
     async def send_start(self):
         netlog.emit('start')
@@ -377,6 +384,9 @@ class Life:
             self.start_tick = time.ticks_ms()
             await self.update_grid()
             self.presto.update()
+
+            # Serve one waiting screenshot client, if any (fast no-op otherwise).
+            screenshot.serve_poll(self.display, self.presto.buffer)
 
             if MAX_CYCLES:
                 await self.handle_cycles()
