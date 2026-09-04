@@ -102,6 +102,11 @@ RADAR_GREEN = display.create_pen(0, 230, 70)
 TEXT_COLOR = display.create_pen(200, 255, 200)
 COAST_PEN = display.create_pen(60, 90, 120)     # muted blue-grey coastline
 AIRPORT_PEN = display.create_pen(150, 130, 170)  # muted violet airport marks
+# TEXT_COLOR's pale green is tuned for the dark scope background and washes out
+# over the map-mode raster; use this near-black instead there. NOT pure black
+# -- that's TRANSPARENT_PEN's value (0x0000) on layer 1, which layer 0 (the
+# map) would show through instead of drawing over.
+MAP_TEXT_PEN = display.create_pen(20, 20, 20)
 
 # Vertical-state colours: level / cruising, climbing (departing), descending
 # (approaching). Keyed by the "vstate" string set in fetch_planes().
@@ -656,13 +661,20 @@ def handle_tap(tx, ty):
 
 
 def draw_legend_alt():
+    # Over the map-mode raster, VSTATE_PENS' pale "level" dot and TEXT_COLOR's
+    # pale green both lose contrast against light map colours; add a dark halo
+    # behind each dot and swap to MAP_TEXT_PEN for the labels there.
+    text_pen = MAP_TEXT_PEN if _map_layers else TEXT_COLOR
     for i, (state, label) in enumerate((("level", "level"),
                                         ("climb", "climb"),
                                         ("descent", "descent"))):
         row_y = 414 + i * 20
+        if _map_layers:
+            display.set_pen(MAP_TEXT_PEN)
+            display.circle(14, row_y + 6, 4)      # halo so a light dot still reads
         display.set_pen(VSTATE_PENS[state])
         display.circle(14, row_y + 6, 3)
-        display.set_pen(TEXT_COLOR)
+        display.set_pen(text_pen)
         display.text(label, 24, row_y, WIDTH, 2)
 
 
@@ -841,7 +853,7 @@ def draw_scene(planes):
         draw_radar_grid()                 # clears + draws the scope grid
         draw_basemap()
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
-    display.set_pen(TEXT_COLOR)
+    display.set_pen(MAP_TEXT_PEN if _map_layers else TEXT_COLOR)
     display.text(_status_text(planes), 5, 10, WIDTH, 2)
     if COLOUR_MODE == "alt" and _selected is None:
         draw_legend_alt()

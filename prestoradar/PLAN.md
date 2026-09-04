@@ -517,6 +517,15 @@ flicker. The 240x240 fallback was not needed.
   screen edge (near the `-40..520` draw-cull boundary) can ask for more shift
   than `_MIN_VIEW_CX` allows and still land partly under the panel -- rare in
   practice, and no worse than before this pass.
+- **Legend/status contrast in map mode.** `TEXT_COLOR` (pale green, tuned for
+  the dark scope background) washed out over light map colours. `MAP_TEXT_PEN`
+  (near-black -- deliberately not pure black, which is `TRANSPARENT_PEN`'s
+  value and would show layer 0 through the text instead of drawing over it) is
+  used for the legend labels, a dark halo behind each legend dot, and the
+  status line whenever `_map_layers`. The detail/settings panels already have
+  their own opaque background so weren't affected. Not yet re-examined: the
+  callsign tag in `_draw_planes_radar` (scope-only, not reachable in map mode)
+  and any other bare text drawn straight onto the raster.
 
 **Still open:**
 
