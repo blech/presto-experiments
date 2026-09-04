@@ -108,31 +108,55 @@ display = presto.display
 WIDTH, HEIGHT = 480, 480
 print("radar.py: Presto display ready  (layers=%d)" % (2 if _RASTER_OK else 1))
 
-# Pen Colors (RGB)
+# Pen Colors (RGB). RADAR_* / MAP_* name the same three roles for each of the
+# two backdrops this can draw over -- the dark scope grid ("radar") and the
+# raster basemap ("map", REFACTORING.md #3) -- so a role and its counterpart
+# read as a pair instead of (as before this rename) one bare name and one
+# MAP_-prefixed name per role.
 BG_COLOR = display.create_pen(10, 20, 10)
 TRANSPARENT_PEN = display.create_pen(0, 0, 0)   # 0x0000 -- see-through on layer 1
-RADAR_GREEN = display.create_pen(0, 230, 70)
-TEXT_COLOR = display.create_pen(200, 255, 200)
+RADAR_ICON_COLOR = display.create_pen(0, 230, 70)   # mono-mode aircraft AND the
+#                                                      grid/crosshair pen (draw_radar_grid)
+#                                                      -- same value on purpose, both read
+#                                                      as "scope green"
+RADAR_TEXT_PEN = display.create_pen(200, 255, 200)
 COAST_PEN = display.create_pen(60, 90, 120)     # muted blue-grey coastline
 AIRPORT_PEN = display.create_pen(150, 130, 170)  # muted violet airport marks
-# TEXT_COLOR's pale green is tuned for the dark scope background and washes out
-# over the map-mode raster; use this near-black instead there. NOT pure black
-# -- that's TRANSPARENT_PEN's value (0x0000) on layer 1, which layer 0 (the
-# map) would show through instead of drawing over.
+# RADAR_TEXT_PEN's pale green is tuned for the dark scope background and
+# washes out over the map-mode raster; use this near-black instead there. NOT
+# pure black -- that's TRANSPARENT_PEN's value (0x0000) on layer 1, which
+# layer 0 (the map) would show through instead of drawing over.
 MAP_TEXT_PEN = display.create_pen(20, 20, 20)
+# No separate raster mono-aircraft colour exists yet -- mono mode over the
+# raster just reuses MAP_TEXT_PEN. Named on its own anyway so a future "give
+# mono-on-raster its own colour" is a one-line change here, not another pass
+# through plane_pen().
+MAP_ICON_COLOR = MAP_TEXT_PEN
 
 # Vertical-state colours: level / cruising, climbing (departing), descending
 # (approaching). Keyed by the "vstate" string set in fetch_planes().
-VSTATE_PENS = {
+RADAR_VSTATE_PENS = {
     "level": display.create_pen(235, 235, 235),   # white
     "climb": display.create_pen(60, 200, 255),    # cyan
     "descent": display.create_pen(255, 160, 40),  # amber
 }
 # In map mode, "level"'s near-white washes out over light map colours the same
-# way TEXT_COLOR did -- swap it for MAP_TEXT_PEN there (see plane_pen() and
-# draw_legend_alt()). climb/descent stay put: cyan and amber read fine on the
-# basemap styles tried so far.
-MAP_VSTATE_PENS = dict(VSTATE_PENS, level=MAP_TEXT_PEN)
+# way RADAR_TEXT_PEN did -- swap it for MAP_TEXT_PEN there (see THEMES below).
+# climb/descent stay put: cyan and amber read fine on the basemap styles
+# tried so far.
+MAP_VSTATE_PENS = dict(RADAR_VSTATE_PENS, level=MAP_TEXT_PEN)
+
+# What's actually behind the drawing decides which pens to use -- keyed by
+# _showing_raster (whether the raster backdrop is actually showing), NOT by
+# DISPLAY_MODE: the vector-grid fallback when a raster fails to decode is
+# still the dark "radar" look even while DISPLAY_MODE == "map". See _theme().
+THEMES = {
+    "radar": {"text": RADAR_TEXT_PEN, "icon": RADAR_ICON_COLOR, "vstate": RADAR_VSTATE_PENS},
+    "map":   {"text": MAP_TEXT_PEN,   "icon": MAP_ICON_COLOR,   "vstate": MAP_VSTATE_PENS},
+}
+
+def _theme():
+    return THEMES["map"] if _showing_raster else THEMES["radar"]
 
 # Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
 # selected aircraft.
@@ -219,7 +243,7 @@ def _draw_rotor(x, y, heading_deg, scale):
 def ring(cx, cy, r, thickness=3):
     # PicoGraphics circles are filled, so draw an outline as an outer disc with
     # a background-coloured disc punched out of the middle.
-    display.set_pen(RADAR_GREEN)
+    display.set_pen(RADAR_ICON_COLOR)
     display.circle(cx, cy, r)
     display.set_pen(BG_COLOR)
     display.circle(cx, cy, r - thickness)
@@ -232,7 +256,7 @@ def draw_radar_grid():
     ring(_view_cx, 240, int(RADIUS_KM * 0.5 * PX_PER_KM))
     # Crosshairs -- stop the horizontal one at the sidebar when it's open
     x_right = PANEL_X - 4 if _selected is not None else WIDTH - 10
-    display.set_pen(RADAR_GREEN)
+    display.set_pen(RADAR_ICON_COLOR)
     display.line(_view_cx, 10, _view_cx, 470)
     display.line(10, 240, x_right, 240)
 
@@ -415,7 +439,7 @@ def load_raster_basemap():
 def show_message(text):
     display.set_pen(BG_COLOR)
     display.clear()
-    display.set_pen(TEXT_COLOR)
+    display.set_pen(RADAR_TEXT_PEN)
     display.text(f"{text}", 5, 10, WIDTH, 2)
     presto.update()
 
@@ -732,41 +756,42 @@ def handle_tap(tx, ty):
 
 
 def draw_legend_alt():
-    # Over the raster, VSTATE_PENS' pale "level" dot and TEXT_COLOR's pale
-    # green both lose contrast against light map colours; swap to
-    # MAP_VSTATE_PENS/MAP_TEXT_PEN there (same pens plane_pen() draws aircraft
-    # with, so the legend still matches), plus a dark halo behind each dot.
+    # Over the raster, RADAR_VSTATE_PENS' pale "level" dot and RADAR_TEXT_PEN's
+    # pale green both lose contrast against light map colours; the "map" theme
+    # swaps both (same pens plane_pen() draws aircraft with, so the legend
+    # still matches), plus a dark halo behind each dot. _theme() keys off
     # _showing_raster, not _map_layers/DISPLAY_MODE: what's actually behind
     # this is what decides contrast, and the raster can be unavailable even in
     # "map" mode (see _draw_map_backdrop()'s fallback).
-    pens = MAP_VSTATE_PENS if _showing_raster else VSTATE_PENS
-    text_pen = MAP_TEXT_PEN if _showing_raster else TEXT_COLOR
+    theme = _theme()
     for i, (state, label) in enumerate((("level", "level"),
                                         ("climb", "climb"),
                                         ("descent", "descent"))):
         row_y = 414 + i * 20
         if _showing_raster:
-            display.set_pen(MAP_TEXT_PEN)
+            display.set_pen(theme["text"])
             display.circle(14, row_y + 6, 4)      # halo so a light dot still reads
-        display.set_pen(pens[state])
+        display.set_pen(theme["vstate"][state])
         display.circle(14, row_y + 6, 3)
-        display.set_pen(text_pen)
+        display.set_pen(theme["text"])
         display.text(label, 24, row_y, WIDTH, 2)
 
 
 _basemap_ms = 0
 
 def plane_pen(p):
-    # Pen for an aircraft mark under the current COLOUR_MODE. "mono" keeps the
-    # scope look (everything RADAR_GREEN) -- except RADAR_GREEN reads fine on
-    # a dark scope but washes out on the raster, so MAP_TEXT_PEN there instead,
-    # same call as "alt"'s vstate pens. "alt" colours by vertical state --
-    # MAP_VSTATE_PENS while the raster backdrop is actually showing (see
-    # draw_legend_alt()) so a "level" aircraft isn't drawn in the same
-    # washed-out white the legend fix moved away from. Extra schemes go here.
+    # Pen for an aircraft mark under the current COLOUR_MODE, themed by
+    # _theme() the same way draw_legend_alt() is. "mono" keeps the scope look
+    # (everything RADAR_ICON_COLOR) -- except that reads fine on a dark scope
+    # but washes out on the raster, so the "map" theme's icon colour instead.
+    # "alt" colours by vertical state -- the "map" theme's vstate pens while
+    # the raster backdrop is actually showing, so a "level" aircraft isn't
+    # drawn in the same washed-out white the legend fix moved away from.
+    # Extra schemes go here.
+    theme = _theme()
     if SETTINGS.COLOUR_MODE == "alt":
-        return (MAP_VSTATE_PENS if _showing_raster else VSTATE_PENS)[p["vstate"]]
-    return MAP_TEXT_PEN if _showing_raster else RADAR_GREEN
+        return theme["vstate"][p["vstate"]]
+    return theme["icon"]
 
 def _draw_planes_radar(order):
     # Scope style: blip, track arrow, callsign tag.
@@ -776,7 +801,7 @@ def _draw_planes_radar(order):
         display.circle(x, y, 3)
         if p["heading"] is not None and p["gs"] > 20:
             draw_track_arrow(x, y, p["heading"], p["gs"], pen)
-        display.set_pen(TEXT_COLOR)
+        display.set_pen(RADAR_TEXT_PEN)
         display.text(p["callsign"], x + 8, y - 8, WIDTH, 2)
 
 def _draw_planes_map(order):
@@ -870,7 +895,7 @@ def draw_panel(p):
     rh = 22
     y = 8
 
-    _ptext(p["callsign"] or p["hex"] or "?", tx, y, 16, TEXT_COLOR)
+    _ptext(p["callsign"] or p["hex"] or "?", tx, y, 16, RADAR_TEXT_PEN)
     y += 28
 
     em = p["emergency"]
@@ -895,7 +920,7 @@ def draw_panel(p):
     )
     for label, value in rows:
         _ptext(label, tx, y, 16, PANEL_LABEL)
-        _ptext(value, vx, y, 16, TEXT_COLOR)
+        _ptext(value, vx, y, 16, RADAR_TEXT_PEN)
         y += rh
 
 def _status_text(planes):
@@ -928,7 +953,7 @@ def draw_settings_panel():
     display.line(px, py, px, py + ph)
     display.line(px + pw, py, px + pw, py + ph)
 
-    _ptext("SETTINGS", px + 10, py + 10, 16, TEXT_COLOR)
+    _ptext("SETTINGS", px + 10, py + 10, 16, RADAR_TEXT_PEN)
     display.set_pen(PANEL_BORDER)
     display.line(px + 8, py + 36, px + pw - 8, py + 36)
 
@@ -938,7 +963,7 @@ def draw_settings_panel():
     y = _SP_ROW0
     for label, value in rows:
         _ptext(label, px + 10, y, 16, PANEL_LABEL)
-        _ptext(str(value).upper(), px + 10 + _SP_VALDX, y, 16, TEXT_COLOR)
+        _ptext(str(value).upper(), px + 10 + _SP_VALDX, y, 16, RADAR_TEXT_PEN)
         y += _SP_ROWH
     _ptext("tap away to close", px + 10, y + 6, 8, PANEL_LABEL)
 
@@ -953,7 +978,7 @@ def draw_scene(planes):
         draw_radar_grid()                 # clears + draws the scope grid
         draw_basemap()
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
-    display.set_pen(MAP_TEXT_PEN if _showing_raster else TEXT_COLOR)
+    display.set_pen(_theme()["text"])
     display.text(_status_text(planes), 5, 10, WIDTH, 2)
     if SETTINGS.COLOUR_MODE == "alt" and _selected is None:
         draw_legend_alt()

@@ -22,9 +22,9 @@ make the next PLAN items (5's layer model, 6's label culling, 2b's
 persistence) easier to land, plus two concrete bugs it happens to fix
 (colour-mode/theme duplication, live ground-toggle).
 
-**Progress:** §8 steps 1 (`Settings` object) and 2 (live ground-toggle) are
-done and verified on-device. §3 (theme table), §1 (file split) and §4 (touch
-latency) are still proposal only.
+**Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
+(theme table) are done and verified on-device. §1 (file split) and §4
+(touch latency) are still proposal only.
 
 ---
 
@@ -150,7 +150,15 @@ per-frame cost here is `jpegdec` decodes and coastline segment counts
 
 ## 3. Colour configuration vs map/scope mode
 
-Today "what colour is this thing" is decided by re-deriving the same
+**Done.** Landed close to as sketched below, with two differences worth
+recording: `_theme()` is a plain module function (`THEMES["map"] if
+_showing_raster else THEMES["radar"]`), not a `Renderer.theme` property --
+there's no `Renderer` object yet, that's still §1/§2's file split; and the
+grid-pen question resolved as "keep the same name" -- `draw_radar_grid()`
+references `RADAR_ICON_COLOR` directly rather than a separate
+`RADAR_GRID_PEN`, since nothing yet needs them to be distinct values.
+
+Before, "what colour is this thing" was decided by re-deriving the same
 ternary at every call site:
 
 - `plane_pen()` (742-752): `MAP_VSTATE_PENS if _showing_raster else
@@ -227,9 +235,11 @@ the ternary.
 
 The panel (`draw_panel`, 829-866) and settings overlay
 (`draw_settings_panel`, 884-906) are correctly *not* part of this — they
-paint their own opaque background first, so `TEXT_COLOR`/`PANEL_LABEL`
+paint their own opaque background first, so `RADAR_TEXT_PEN`/`PANEL_LABEL`
 always have the contrast they were tuned for regardless of what's behind
-the rest of the screen. Leave those alone.
+the rest of the screen. Left alone, beyond the mechanical `TEXT_COLOR` →
+`RADAR_TEXT_PEN` rename (they're always the dark-scope value, no ternary
+needed).
 
 ---
 
@@ -382,9 +392,11 @@ the next, the same way PLAN.md's items landed incrementally:
    mutable module globals).
 2. **Done.** §5's live ground-toggle, now that settings are shared state —
    small, testable by eye immediately (toggle, watch the next redraw).
-3. §3's theme table — mechanical, no behaviour change if done right (good
-   opportunity to add a quick "does mono-raster still look right" visual
-   check, since that's the one spot where intent was ambiguous).
+3. **Done.** §3's theme table, verified on-device including mono-mode over
+   the raster (booted with `DISPLAY_MODE = "map"`, not the on-device toggle
+   -- the toggle can't reach the raster from a `"radar"` boot at all, a
+   pre-existing hardware constraint unrelated to this step; see PLAN.md
+   item 8 and `_draw_map_backdrop()`'s docstring).
 4. §1's file split — the big one; do it after 1-3 so there's less state to
    carry across the split, and each new module can be dropped in with the
    old monolith still working as a fallback until the split module is
