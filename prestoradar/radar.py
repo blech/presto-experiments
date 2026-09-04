@@ -741,13 +741,15 @@ _basemap_ms = 0
 
 def plane_pen(p):
     # Pen for an aircraft mark under the current COLOUR_MODE. "mono" keeps the
-    # scope look (everything RADAR_GREEN); "alt" colours by vertical state --
+    # scope look (everything RADAR_GREEN) -- except RADAR_GREEN reads fine on
+    # a dark scope but washes out on the raster, so MAP_TEXT_PEN there instead,
+    # same call as "alt"'s vstate pens. "alt" colours by vertical state --
     # MAP_VSTATE_PENS while the raster backdrop is actually showing (see
     # draw_legend_alt()) so a "level" aircraft isn't drawn in the same
     # washed-out white the legend fix moved away from. Extra schemes go here.
     if COLOUR_MODE == "alt":
         return (MAP_VSTATE_PENS if _showing_raster else VSTATE_PENS)[p["vstate"]]
-    return RADAR_GREEN
+    return MAP_TEXT_PEN if _showing_raster else RADAR_GREEN
 
 def _draw_planes_radar(order):
     # Scope style: blip, track arrow, callsign tag.
