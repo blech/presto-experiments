@@ -51,7 +51,7 @@ def main():
                 text = json.dumps(json.loads(text), separators=(", ", ": "))
             except ValueError:
                 pass
-        print("%-15s %s" % (addr[0], text), flush=True)
+        print(text, flush=True)
 
 
 if __name__ == "__main__":
