@@ -511,12 +511,32 @@ flicker. The 240x240 fallback was not needed.
   left edge); a plane already under where the panel lands often stayed there
   after only a fixed 112 px move. `_target_view_cx(p)` replaces it: shift left
   only as far as needed to bring `p` to `_PANEL_MARGIN` (20 px) clear of
-  `PANEL_X` -- zero shift if it's already clear -- clamped to `_MIN_VIEW_CX`
-  (`PANEL_X - WIDTH/2`) so the map-mode raster (one 480 px decode starting at
-  the shift) still reaches `PANEL_X`. Residual gap: a plane at the extreme
-  screen edge (near the `-40..520` draw-cull boundary) can ask for more shift
-  than `_MIN_VIEW_CX` allows and still land partly under the panel -- rare in
-  practice, and no worse than before this pass.
+  `PANEL_X` -- zero shift if it's already clear.
+
+  Clamping this to the raster's theoretical limit (`PANEL_X - WIDTH`, so the
+  map-mode backdrop -- one 480 px `jpegdec` decode starting at the shift --
+  still reaches `PANEL_X`) instead made the backdrop **disappear** for a plane
+  far enough right to need close to that much shift, rather than just clip.
+  The magnitude involved (up to -224) was larger than the old flat shift ever
+  asked for (-112, confirmed working); something in `jpegdec.decode()`'s
+  negative-x handling likely breaks down somewhere in between, not yet pinned
+  down. `_MAX_SHIFT` now clamps to that smaller, previously-working magnitude
+  instead -- **mitigates, not confirmed fixed**: a plane needing more shift
+  than that still lands partly under the panel (the lesser failure), but the
+  backdrop itself should never vanish. Watch the device log
+  (`_draw_map_backdrop`'s `offset_x` print) if it does -- narrowing where it
+  actually breaks would let `_MAX_SHIFT` come back up.
+
+  A second, distinct bug turned up alongside it: `_target_view_cx()` did
+  float arithmetic (`p["e"] * PX_PER_KM`) and could return a `float` whenever
+  an actual shift was needed. `_view_cx` then fed uncast into
+  `jpegdec.decode()`'s `offset_x` and, via the vector-grid fallback,
+  `display.circle()`/`line()` -- both want ints, and MicroPython's C
+  extensions raise rather than coerce, surfacing as
+  `TypeError("can't convert float to int")` from the touch handler on
+  selection. The old flat-shift formula was pure integer arithmetic so this
+  only appeared with the adaptive rewrite; fixed with a single `int(...)` on
+  `_target_view_cx()`'s return.
 - **Legend/status contrast in map mode.** `TEXT_COLOR` (pale green, tuned for
   the dark scope background) and `VSTATE_PENS["level"]` (near-white) both
   washed out over light map colours. `MAP_TEXT_PEN` (near-black -- deliberately

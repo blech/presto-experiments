@@ -536,9 +536,19 @@ _route_cache = {}          # callsign -> (origin, dest) | None (unknown) | "" (p
 # where the panel lands, it often stayed there. _target_view_cx() instead shifts
 # left only as far as the *selected* plane needs to clear the panel.
 _PANEL_MARGIN = 20                    # clearance kept between the plane and PANEL_X
-_MIN_VIEW_CX = PANEL_X - WIDTH // 2   # shift no further than this: keeps the
-#                                       map-mode raster (one 480px decode
-#                                       starting at the shift) reaching PANEL_X
+# How far left the view is ever allowed to shift. The raster only strictly
+# needs offset_x >= PANEL_X - WIDTH (so the map-mode backdrop -- one 480px
+# jpegdec decode starting at the shift -- still reaches PANEL_X); with
+# PANEL_X=256 that's -224. In practice a plane far enough right to need close
+# to that made the backdrop disappear instead of just clipping, for a
+# selection that needed more shift than the original flat _PANEL_SHIFT (112px)
+# ever asked for -- something in jpegdec.decode()'s negative-x handling likely
+# breaks down somewhere between those two magnitudes. Until that's pinned down,
+# clamp to the smaller value known to work rather than the theoretical limit; a
+# plane past this point can still end up partly under the panel, which is the
+# lesser failure.
+_MAX_SHIFT = 112
+_MIN_VIEW_CX = WIDTH // 2 - _MAX_SHIFT
 
 
 def _target_view_cx(p):
@@ -546,13 +556,15 @@ def _target_view_cx(p):
     left only as far as needed to bring p to _PANEL_MARGIN clear of PANEL_X --
     zero shift if it's already clear, so a plane that didn't need moving is
     never pushed off the left edge by an unneeded shift -- then clamps to
-    _MIN_VIEW_CX so an extreme-edge plane can't ask for more shift than the
-    map-mode raster has pixels for."""
+    _MIN_VIEW_CX (see above) so an extreme-edge plane can't ask jpegdec for
+    more shift than is known to work. Always returns an int: _view_cx feeds
+    jpegdec.decode()'s offset_x (and, via the vector-grid fallback,
+    display.circle()/line()) uncast, and p["e"] * PX_PER_KM is a float."""
     if p is None:
         return WIDTH // 2
     x0 = WIDTH // 2 + p["e"] * PX_PER_KM        # p's unshifted screen x
     wanted = WIDTH // 2 - max(0, x0 - (PANEL_X - _PANEL_MARGIN))
-    return max(wanted, _MIN_VIEW_CX)
+    return int(max(wanted, _MIN_VIEW_CX))
 
 _COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
