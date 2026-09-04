@@ -1,6 +1,10 @@
 # presto-radar — planned work
 
 Running list of larger pieces not yet started. Smaller tweaks go straight in.
+For the shape of the code itself (splitting fetch/parse from drawing,
+encapsulating state in objects, colour/theme handling, touch latency, live
+settings toggles) see `REFACTORING.md` instead — that's a reorganisation
+proposal, not a new feature.
 
 ---
 
