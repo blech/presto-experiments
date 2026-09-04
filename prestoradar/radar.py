@@ -15,19 +15,32 @@ from presto import Presto
 if "/prestoradar" not in sys.path:
     sys.path.insert(0, "/prestoradar")
 
-# User-tunable configuration (centre, radius, intervals, flags, ...).
+# User-tunable configuration (centre, radius, intervals, flags, ...). Only
+# DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND ever change after boot (the
+# on-device settings overlay, _toggle_setting() below) -- everything else
+# here is read once at import time and stays a plain module-level name.
+import settings as _settings_module
 from settings import *  # noqa: F401,F403
 
-# Tolerate a settings.py that predates a newer setting (settings.py is
-# per-location and gitignored, so it can lag settings_example.py).
-try:
-    DISPLAY_MODE  # noqa: F821  "radar" (scope + callsign tags) or "map" (plane icons)
-except NameError:
-    DISPLAY_MODE = "radar"
-try:
-    COLOUR_MODE  # noqa: F821  "mono" (all radar-green) or "alt" (colour by vstate)
-except NameError:
-    COLOUR_MODE = "alt"
+
+class Settings:
+    """The runtime-mutable slice of settings.py. `_toggle_setting()` mutates
+    attributes on this one instance (`SETTINGS.DISPLAY_MODE = ...`) instead of
+    `global DISPLAY_MODE`, so any code holding a reference to SETTINGS --
+    including, eventually, a module that doesn't do its own `from settings
+    import *` -- sees a toggle immediately rather than a copy frozen at its
+    own import time. See REFACTORING.md #2."""
+
+    def __init__(self, module):
+        # getattr(..., default) tolerates a settings.py that predates a newer
+        # setting -- settings.py is per-location and gitignored, so it can lag
+        # settings_example.py.
+        self.DISPLAY_MODE = getattr(module, "DISPLAY_MODE", "radar")  # "radar" | "map"
+        self.COLOUR_MODE = getattr(module, "COLOUR_MODE", "alt")      # "mono" | "alt"
+        self.HIDE_ON_GROUND = getattr(module, "HIDE_ON_GROUND", 1)
+
+
+SETTINGS = Settings(_settings_module)
 
 import screenshot                       # shared, deployed to :lib/
 import netlog                           # shared UDP telemetry, deployed to :lib/
@@ -89,7 +102,7 @@ print("radar.py: importing done, basemap =", "loaded" if basemap_data else "none
 # restore left each icon erased for ~5% of every frame.) The layer count is
 # fixed at boot, so the raster wants DISPLAY_MODE = "map" set in settings.py;
 # toggling to map from the on-device overlay keeps the vector basemap.
-_RASTER_OK = DISPLAY_MODE == "map" and bool(DRAW_BASEMAP)
+_RASTER_OK = SETTINGS.DISPLAY_MODE == "map" and bool(DRAW_BASEMAP)
 presto = Presto(full_res=True, ambient_light=True, layers=2 if _RASTER_OK else 1)
 display = presto.display
 WIDTH, HEIGHT = 480, 480
@@ -366,7 +379,7 @@ def _draw_map_backdrop():
     display.set_pen(BG_COLOR)
     display.clear()
     _showing_raster = False
-    if DISPLAY_MODE == "map":
+    if SETTINGS.DISPLAY_MODE == "map":
         try:
             import jpegdec
             j = jpegdec.JPEG(display)
@@ -505,7 +518,7 @@ async def fetch_planes():
 
         altitude = aircraft.get("alt_baro")  # feet, or the string "ground"
         gs = aircraft.get("gs") or 0.0       # ground speed, knots
-        if HIDE_ON_GROUND and (altitude in (0, "ground") or gs == 0):
+        if SETTINGS.HIDE_ON_GROUND and (altitude in (0, "ground") or gs == 0):
             continue
 
         callsign = (aircraft.get("flight") or aircraft.get("hex", "")).strip()
@@ -666,9 +679,11 @@ def _in_rect(px, py, r):
     return r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]
 
 def _toggle_setting(row):
-    global DISPLAY_MODE, COLOUR_MODE, HIDE_ON_GROUND
+    # Mutate SETTINGS in place rather than `global`-reassigning a name --
+    # anything holding a reference to SETTINGS (not just this module) sees the
+    # new value immediately (see the Settings class docstring above).
     if row == 0:
-        DISPLAY_MODE = "radar" if DISPLAY_MODE == "map" else "map"
+        SETTINGS.DISPLAY_MODE = "radar" if SETTINGS.DISPLAY_MODE == "map" else "map"
         # Aircraft icons already follow DISPLAY_MODE every frame (draw_planes());
         # the backdrop is a static layer-0 draw and needs telling explicitly.
         # Only takes effect if we booted with 2 layers (a "map" boot) -- toggling
@@ -676,11 +691,11 @@ def _toggle_setting(row):
         # there's no layer 0 to draw it onto (PLAN item 8, "Runtime toggle").
         _draw_map_backdrop()
     elif row == 1:
-        COLOUR_MODE = "mono" if COLOUR_MODE == "alt" else "alt"
+        SETTINGS.COLOUR_MODE = "mono" if SETTINGS.COLOUR_MODE == "alt" else "alt"
     elif row == 2:
-        HIDE_ON_GROUND = 0 if HIDE_ON_GROUND else 1   # takes effect next fetch
-    log("settings:", DISPLAY_MODE, COLOUR_MODE,
-        "ground", "hide" if HIDE_ON_GROUND else "show")
+        SETTINGS.HIDE_ON_GROUND = 0 if SETTINGS.HIDE_ON_GROUND else 1  # takes effect next fetch
+    log("settings:", SETTINGS.DISPLAY_MODE, SETTINGS.COLOUR_MODE,
+        "ground", "hide" if SETTINGS.HIDE_ON_GROUND else "show")
 
 def _settings_tap(tx, ty):
     global _settings_open
@@ -747,7 +762,7 @@ def plane_pen(p):
     # MAP_VSTATE_PENS while the raster backdrop is actually showing (see
     # draw_legend_alt()) so a "level" aircraft isn't drawn in the same
     # washed-out white the legend fix moved away from. Extra schemes go here.
-    if COLOUR_MODE == "alt":
+    if SETTINGS.COLOUR_MODE == "alt":
         return (MAP_VSTATE_PENS if _showing_raster else VSTATE_PENS)[p["vstate"]]
     return MAP_TEXT_PEN if _showing_raster else RADAR_GREEN
 
@@ -794,7 +809,7 @@ def draw_planes(planes):
         x, y = to_screen(p["e"], p["n"])
         if -40 <= x <= 520 and -40 <= y <= 520:
             order.append((x, y, p))
-    (_draw_planes_map if DISPLAY_MODE == "map" else _draw_planes_radar)(order)
+    (_draw_planes_map if SETTINGS.DISPLAY_MODE == "map" else _draw_planes_radar)(order)
     _last_drawn = order
 
     # Ring the selected aircraft, on top of everything. Outer/inner discs make an
@@ -895,9 +910,9 @@ def draw_settings_panel():
     display.set_pen(PANEL_BORDER)
     display.line(px + 8, py + 36, px + pw - 8, py + 36)
 
-    rows = (("mode", DISPLAY_MODE),
-            ("colour", COLOUR_MODE),
-            ("ground", "hide" if HIDE_ON_GROUND else "show"))
+    rows = (("mode", SETTINGS.DISPLAY_MODE),
+            ("colour", SETTINGS.COLOUR_MODE),
+            ("ground", "hide" if SETTINGS.HIDE_ON_GROUND else "show"))
     y = _SP_ROW0
     for label, value in rows:
         _ptext(label, px + 10, y, 16, PANEL_LABEL)
@@ -918,7 +933,7 @@ def draw_scene(planes):
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
     display.set_pen(MAP_TEXT_PEN if _showing_raster else TEXT_COLOR)
     display.text(_status_text(planes), 5, 10, WIDTH, 2)
-    if COLOUR_MODE == "alt" and _selected is None:
+    if SETTINGS.COLOUR_MODE == "alt" and _selected is None:
         draw_legend_alt()
     draw_planes(planes)
     if _selected is not None:
@@ -1019,7 +1034,7 @@ async def _amain():
 
 
 def main():
-    print("main: start  display:", DISPLAY_MODE, " colour:", COLOUR_MODE)
+    print("main: start  display:", SETTINGS.DISPLAY_MODE, " colour:", SETTINGS.COLOUR_MODE)
 
     build_basemap_cache()
     load_raster_basemap()
