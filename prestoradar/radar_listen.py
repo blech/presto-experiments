@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Watch radar.py's log output from another machine on the same LAN.
 
