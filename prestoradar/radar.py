@@ -1,6 +1,5 @@
 import asyncio
 import gc
-import json
 import math
 import sys
 import network
@@ -17,6 +16,7 @@ if "/prestoradar" not in sys.path:
 import net                              # sibling module: async HTTPS GET (net.http_get)
 import geometry                         # sibling module: project/compass/alt_key
 import routes                           # sibling module: route lookup + cache
+import feed                             # sibling module: fetch/parse (feed.Feed)
 
 # User-tunable configuration (centre, radius, intervals, flags, ...). Only
 # DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND ever change after boot (the
@@ -68,8 +68,12 @@ RADAR_HOST = "api.adsb.lol"
 RADAR_PATH = f"/v2/point/{CENTER_LAT}/{CENTER_LON}/{RADIUS_NM}"
 RADAR_URL = f"https://{RADAR_HOST}{RADAR_PATH}"  # kept for logging / radar_debug.py
 
-KNOT_TO_KM_S = 1.852 / 3600.0        # knots -> km travelled per second
 PX_PER_KM = 230.0 / RADIUS_KM        # outer ring sits at RADIUS_KM
+
+# Fetch/parse lives in feed.py (REFACTORING.md #1); this instance is the one
+# mutable source of truth for the aircraft list, replacing the module
+# globals (_planes/_fetch_count/_fetch_ok) radar.py used to hold directly.
+_feed = feed.Feed(RADAR_HOST, RADAR_PATH, USER_AGENT, LEVEL_RATE_FPM, FETCH_INTERVAL_MS)
 
 def log_init():
     # Open netlog's multicast socket once the network is up. Best-effort; on
@@ -127,7 +131,7 @@ MAP_TEXT_PEN = display.create_pen(20, 20, 20)
 MAP_ICON_COLOR = MAP_TEXT_PEN
 
 # Vertical-state colours: level / cruising, climbing (departing), descending
-# (approaching). Keyed by the "vstate" string set in fetch_planes().
+# (approaching). Keyed by the "vstate" string feed.py's Feed sets per plane.
 RADAR_VSTATE_PENS = {
     "level": display.create_pen(235, 235, 235),   # white
     "climb": display.create_pen(60, 200, 255),    # cyan
@@ -437,96 +441,6 @@ def show_message(text):
     presto.update()
 
 
-async def fetch_planes():
-    """Pull the current aircraft list from adsb.lol.
-
-    Returns a list of plane dicts holding position in the metric frame (e, n)
-    and a per-second velocity (ve, vn) for dead reckoning between fetches, or
-    None if the fetch/parse failed (the caller keeps animating the old list).
-    """
-    gc.collect()
-    try:
-        status, body = await net.http_get(RADAR_HOST, RADAR_PATH, USER_AGENT)
-    except Exception as e:  # noqa: BLE001
-        log("fetch: request failed:", repr(e))
-        return None
-
-    log("fetch: HTTP", status, len(body), "bytes")
-    if status != 200:
-        log("fetch: HTTP", status, body[:200])
-        return None
-
-    try:
-        data = json.loads(body)
-    except ValueError as e:
-        log("fetch: bad JSON:", repr(e), len(body), "bytes")
-        return None
-    finally:
-        body = None
-        gc.collect()
-
-    planes = []
-    for aircraft in data.get("ac", []) or []:
-        lat = aircraft.get("lat")
-        lon = aircraft.get("lon")
-        if lat is None or lon is None:
-            continue
-
-        altitude = aircraft.get("alt_baro")  # feet, or the string "ground"
-        gs = aircraft.get("gs") or 0.0       # ground speed, knots
-        # HIDE_ON_GROUND used to be applied here, dropping a grounded aircraft
-        # before it ever reached `planes` -- which meant toggling it only took
-        # effect on the *next* fetch. Every aircraft is now kept; _hidden()
-        # applies the same check at draw time instead (REFACTORING.md #5).
-
-        callsign = (aircraft.get("flight") or aircraft.get("hex", "")).strip()
-
-        # "track" is the direction of travel over the ground; it's absent for
-        # stationary aircraft, so fall back to nose heading. ("dir" in the feed
-        # is the bearing from the radar centre to the aircraft, not where it's
-        # heading, so it isn't what we want here.)
-        heading = aircraft.get("track")
-        if heading is None:
-            heading = aircraft.get("true_heading")
-
-        # Vertical state from the reported climb/descent rate.
-        vrate = aircraft.get("baro_rate")
-        if vrate is None:
-            vrate = aircraft.get("geom_rate")
-        if vrate is None or abs(vrate) < LEVEL_RATE_FPM:
-            vstate = "level"
-        elif vrate > 0:
-            vstate = "climb"
-        else:
-            vstate = "descent"
-
-        east, north = geometry.project(lat, lon)
-        if heading is not None and gs:
-            hr = math.radians(heading)
-            speed = gs * KNOT_TO_KM_S
-            ve, vn = speed * math.sin(hr), speed * math.cos(hr)
-        else:
-            ve = vn = 0.0
-
-        planes.append({
-            "callsign": callsign, "e": east, "n": north,
-            "ve": ve, "vn": vn, "heading": heading, "gs": gs, "vstate": vstate,
-            "cat": aircraft.get("category"),   # ADS-B emitter category, e.g. "A5", "A7"
-            # Detail fields for the tap-to-inspect panel (item 2a).
-            "hex": aircraft.get("hex", ""),
-            "reg": aircraft.get("r"),
-            "type": aircraft.get("t"),
-            "desc": aircraft.get("desc"),
-            "alt": altitude,
-            "vrate": vrate,
-            "squawk": aircraft.get("squawk"),
-            "emergency": aircraft.get("emergency"),
-            "dst": aircraft.get("dst"),   # nm from centre
-            "dir": aircraft.get("dir"),   # bearing from centre, degrees
-        })
-    return planes
-
-
 # --- Tap to inspect (item 2a) --------------------------------------------------
 _selected = None          # the selected plane dict, or None
 _last_drawn = []           # [(x, y, plane), ...] from the last draw_planes()
@@ -722,9 +636,22 @@ def _draw_planes_map(order):
 def _hidden(p):
     # Applied at draw time, not fetch time, so toggling HIDE_ON_GROUND takes
     # effect on the next redraw (<= ANIM_INTERVAL) instead of the next fetch
-    # (<= FETCH_INTERVAL_MS). Same condition fetch_planes() used to filter
+    # (<= FETCH_INTERVAL_MS). Same condition feed.py's _fetch() used to filter
     # with (REFACTORING.md #5).
     return SETTINGS.HIDE_ON_GROUND and (p["alt"] in (0, "ground") or p["gs"] == 0)
+
+def _on_feed_update(fresh):
+    # _feed.on_update: called with the fresh list after every successful
+    # fetch. Re-point the selection at the same aircraft in it, or clear it
+    # (and un-shift the view) if that aircraft has dropped off -- or is now
+    # hidden by HIDE_ON_GROUND (draw_planes() would clear it on the next
+    # redraw anyway; doing it here skips that one extra tick of a stale
+    # selection).
+    if _selected is not None:
+        h = _selected["hex"]
+        _set_selected(next((q for q in fresh if q["hex"] == h and not _hidden(q)), None))
+
+_feed.on_update = _on_feed_update
 
 def draw_planes(planes):
     global _last_drawn
@@ -816,13 +743,13 @@ def draw_panel(p):
         y += rh
 
 def _status_text(planes):
-    if _fetch_count == 0:
+    if _feed.fetch_count == 0:
         return "Connecting..."          # nothing fetched yet
-    # `planes` (== _planes) now holds every fetched aircraft, ground-hidden
+    # `planes` (== _feed.planes) holds every fetched aircraft, ground-hidden
     # ones included (see _hidden(), REFACTORING.md #5) -- count only what's
     # actually shown, same as what draw_planes() puts on-screen.
     visible = sum(1 for p in planes if not _hidden(p))
-    if not _fetch_ok:                   # last fetch failed -- planes may be stale
+    if not _feed.fetch_ok:               # last fetch failed -- planes may be stale
         return ("Aircraft: %d (stale)" % visible) if planes else "Fetch failed"
     return "Aircraft: %d" % visible  # 0 is legitimate: a quiet sky
 
@@ -884,17 +811,9 @@ def draw_scene(planes):
     presto.update()
 
 
-# Shared between the two tasks below. asyncio on MicroPython is cooperative and
-# single-threaded, so _fetch_loop reassigning these and _render_loop reading them
-# can't tear -- no lock needed.
-_planes = []
-_fetch_count = 0     # completed fetch attempts, any outcome (0 == still loading)
-_fetch_ok = False    # did the most recent attempt succeed?
-
-
 async def _render_loop():
     # Dead-reckon each aircraft along its last velocity and redraw every
-    # ANIM_INTERVAL. Runs uninterrupted while _fetch_loop is awaiting the
+    # ANIM_INTERVAL. Runs uninterrupted while _feed.run() is awaiting the
     # network, so a fetch no longer freezes the animation.
     last = time.ticks_ms()
     frame = 0
@@ -903,12 +822,12 @@ async def _render_loop():
             now = time.ticks_ms()
             dt = time.ticks_diff(now, last) / 1000.0
             last = now
-            for p in _planes:
+            for p in _feed.planes:
                 p["e"] += p["ve"] * dt
                 p["n"] += p["vn"] * dt
 
             t = time.ticks_ms()
-            draw_scene(_planes)
+            draw_scene(_feed.planes)
             frame += 1
             if frame <= 3 or frame % 20 == 0:
                 log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
@@ -942,38 +861,8 @@ async def _touch_loop():
         await asyncio.sleep_ms(50)
 
 
-async def _fetch_loop():
-    global _planes, _fetch_count, _fetch_ok
-    while True:
-        log("fetch...")
-        t = time.ticks_ms()
-        try:
-            fresh = await fetch_planes()
-        except Exception as e:  # noqa: BLE001
-            log("FETCH ERROR:", repr(e))
-            if hasattr(sys, "print_exception"):
-                sys.print_exception(e)
-            fresh = None
-        _fetch_count += 1
-        _fetch_ok = fresh is not None
-        if fresh is not None:
-            _planes = fresh
-            # Re-point the selection at the same aircraft in the fresh list, or
-            # clear it (and un-shift the view) if that aircraft has dropped off
-            # -- or is now hidden by HIDE_ON_GROUND (draw_planes() would clear
-            # it on the next redraw anyway; doing it here skips that one extra
-            # tick of a stale selection).
-            if _selected is not None:
-                h = _selected["hex"]
-                _set_selected(next((q for q in fresh
-                                     if q["hex"] == h and not _hidden(q)), None))
-            log("fetch done:", len(_planes), "planes",
-                time.ticks_diff(time.ticks_ms(), t), "ms  mem", gc.mem_free())
-        await asyncio.sleep_ms(FETCH_INTERVAL_MS)
-
-
 async def _amain():
-    await asyncio.gather(_render_loop(), _fetch_loop(), _touch_loop())
+    await asyncio.gather(_render_loop(), _feed.run(), _touch_loop())
 
 
 def main():

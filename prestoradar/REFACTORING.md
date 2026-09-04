@@ -24,8 +24,8 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 
 **Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
 (theme table) are done and verified on-device. §1 (file split) is
-underway, module by module -- `net.py` and `geometry.py` are out and
-verified; `routes.py` is out, pending on-device verification; `feed.py`,
+underway, module by module -- `net.py`, `geometry.py` and `routes.py` are
+out and verified; `feed.py` is out, pending on-device verification;
 `backdrop.py`, `render.py` and `ui.py` are still proposal. §4 (touch
 latency) is still proposal only.
 
@@ -52,12 +52,21 @@ Proposed split:
   the split's pieces landed since it had no shared mutable state to
   untangle -- everything below still has `_view_cx`/`_selected`/etc. to
   sort out first.
-- **`feed.py`** — parsing (`fetch_planes()`'s per-aircraft dict-building,
-  474-556) and the plane list's lifecycle (`_planes`/`_fetch_count`/
-  `_fetch_ok`, 936-1014). Every field the feed produces is *data*: keep
-  `on_ground` as a stored bool instead of filtering it away at parse time,
-  and apply `HIDE_ON_GROUND` as a view filter at draw/hit-test time
-  instead (§5).
+- **`feed.py`** — **done.** A `Feed` class holds what were the
+  `_planes`/`_fetch_count`/`_fetch_ok` module globals as `.planes`/
+  `.fetch_count`/`.fetch_ok` attributes, parses exactly like the old
+  `fetch_planes()` did (§5 already covers `HIDE_ON_GROUND` -- every
+  aircraft is real data, not filtered at parse time), and runs the fetch
+  loop as an `async def run(self)` method radar.py's `_amain()` gathers
+  instead of a bare `_fetch_loop()`. One thing the original sketch didn't
+  anticipate: the fetch loop also used to re-point the UI's selection at
+  the same aircraft in the fresh list, which `feed.py` has no business
+  knowing about. Resolved with an `on_update(planes)` hook -- `Feed` calls
+  it (if set) after every successful fetch, and radar.py assigns its own
+  `_on_feed_update()` to it, keeping the selection-repointing logic exactly
+  where it always lived without `feed.py` needing to import anything about
+  selection or panels. `ui.py`, when it lands, just takes over that one
+  assignment.
 - **`routes.py`** — **done**, though landed as two calls rather than the
   single `resolve_route()` sketched originally: `request(callsign)`
   (fire off a lookup if one isn't cached or in flight yet -- what
@@ -108,19 +117,25 @@ reset, and read the serial log.
 
 ## 2. Encapsulate in objects — and why settings has to move first
 
-**Done so far: just the `Settings` slice below**, added in place in
-`radar.py` (still one file). The rest of this section -- `PlaneFeed`,
-`RouteCache`, `Backdrop`, `Renderer`, `UI` as actual classes in their own
-modules -- is still proposal, landing with §1's file split.
+**Done so far: the `Settings` slice below, plus `feed.py`'s `Feed` and
+`routes.py`.** Both landed a little differently than this section first
+sketched -- see the note after each in the table -- but the underlying
+shape held. `Backdrop`, `Renderer`, `UI` as actual classes in their own
+modules are still proposal, landing with the rest of §1's file split.
 
 The natural boundaries from §1 map onto a small number of classes rather
 than a pile of same-named functions in different files:
 
 ```
-Settings        # copied from settings.py at boot; the one mutable source
+Settings        # done: copied from settings.py at boot; the one mutable source
                 # of truth for DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND
-PlaneFeed       # owns _planes / _fetch_count / _fetch_ok; fetch_loop()
-RouteCache      # owns _route_cache; fetch_route()
+Feed            # done, as sketched but plainer: feed.py's Feed takes plain
+                # constructor args (host/path/user_agent/level_rate_fpm/
+                # fetch_interval_ms), not a Settings instance -- none of
+                # those change at runtime, so there was nothing live to read.
+                # request()/get() live at module scope in routes.py instead of
+                # a RouteCache class -- there's no per-instance state to justify
+                # one; a single shared cache is exactly what's wanted.
 Backdrop        # owns _map_layers / _showing_raster / the vector cache
 Renderer        # owns the Presto/display handle, the pens, draw_scene()
 UI              # owns _selected / _settings_open / _view_cx; handle_tap()
@@ -142,17 +157,26 @@ nothing happens.
 
 Fix: build one `Settings` object at boot (attributes copied from the
 `settings` module — a plain `for k in dir(settings_module)` walk, or an
-explicit field list), pass *that instance* to whatever needs it
-(`PlaneFeed(settings)`, `Renderer(settings)`, `UI(settings)`), and have
-`_toggle_setting()` mutate `settings.display_mode` etc. Every reader then
+explicit field list), pass *that instance* to whatever needs it, and have
+`_toggle_setting()` mutate `SETTINGS.DISPLAY_MODE` etc. Every reader then
 sees the live value because they're all holding the same object, not a
 `from module import *` snapshot. `settings.py` itself doesn't need to
 change shape — it's still the plain, gitignored, per-location constants
 file `deploy.sh` copies down; only how `radar.py` consumes it changes.
 
-This also directly enables §5 (live ground-toggle): once `PlaneFeed` holds
-the `Settings` instance instead of a name copied at import time, its filter
-can just read `self.settings.hide_on_ground` fresh on every draw.
+**How §5 and `feed.py` actually turned out:** the live ground-toggle (§5)
+landed before the file split, and the filter it added (`_hidden()`) stayed
+in `radar.py` reading `SETTINGS.HIDE_ON_GROUND` directly -- it was never
+`feed.py`'s concern, since "is this aircraft currently hidden" is a
+draw-time question, not a fetch-time one. So when `feed.py`'s `Feed` landed
+later, it turned out to need *no* live settings at all: `host`/`path`/
+`user_agent`/`level_rate_fpm`/`fetch_interval_ms` are all fixed at boot,
+so they're passed as plain constructor arguments rather than a `Settings`
+reference. The predicted trap (a second `from settings import *` freezing
+a stale copy) was avoided by design, just not the way this section
+originally guessed -- worth remembering that "does this module need a
+`Settings` reference" is a case-by-case question, not automatic for every
+split-out module.
 
 A note on cost: MicroPython attribute lookups (`self.x`) are marginally
 slower than a bare global, but the render loop runs at ~2 fps and touch at
@@ -389,7 +413,7 @@ prestoradar/
   net.py         # done: http_get()
   geometry.py    # done: project, compass, alt_key (to_screen stays in radar.py for now)
   routes.py      # done: request()/get()/is_hex_id(), adsbdb lookup + cache
-  feed.py        # PlaneFeed: fetch, parse, on_ground as data not a filter
+  feed.py        # done: Feed (fetch, parse, .run() loop, on_update hook)
   backdrop.py    # Backdrop: vector cache + raster layer-0 loading
   render.py      # Renderer: pens, theme table, all draw_* 
   ui.py          # UI: selection, tap handling, settings overlay
