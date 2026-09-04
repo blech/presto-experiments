@@ -530,9 +530,10 @@ def _set_selected(p):
 # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
 _settings_open = False
 SETTINGS_BTN = (WIDTH - 40, HEIGHT - 36, 36, 32)      # x, y, w, h  (bottom-right)
-_SPANEL = (WIDTH - 186, HEIGHT - 170, 182, 150)       # x, y, w, h
-_SP_ROW0 = _SPANEL[1] + 40                            # top y of the first value row
-_SP_ROWH = 26
+_SPANEL = (WIDTH - 288, HEIGHT - 172, 288, 168)       # x, y, w, h  (~60% wide)
+_SP_ROW0 = _SPANEL[1] + 44                            # top y of the first value row
+_SP_ROWH = 30
+_SP_VALDX = 120                                       # value column, px from label x
 
 def _in_rect(px, py, r):
     return r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]
@@ -741,19 +742,19 @@ def draw_settings_panel():
     display.line(px, py, px, py + ph)
     display.line(px + pw, py, px + pw, py + ph)
 
-    _ptext("SETTINGS", px + 8, py + 8, 16, TEXT_COLOR)
+    _ptext("SETTINGS", px + 10, py + 10, 16, TEXT_COLOR)
     display.set_pen(PANEL_BORDER)
-    display.line(px + 6, py + 32, px + pw - 6, py + 32)
+    display.line(px + 8, py + 36, px + pw - 8, py + 36)
 
     rows = (("mode", DISPLAY_MODE),
             ("colour", COLOUR_MODE),
             ("ground", "hide" if HIDE_ON_GROUND else "show"))
     y = _SP_ROW0
     for label, value in rows:
-        _ptext(label, px + 8, y, 16, PANEL_LABEL)
-        _ptext(str(value).upper(), px + 8 + 64, y, 16, TEXT_COLOR)
+        _ptext(label, px + 10, y, 16, PANEL_LABEL)
+        _ptext(str(value).upper(), px + 10 + _SP_VALDX, y, 16, TEXT_COLOR)
         y += _SP_ROWH
-    _ptext("tap away to close", px + 8, y + 4, 8, PANEL_LABEL)
+    _ptext("tap away to close", px + 10, y + 6, 8, PANEL_LABEL)
 
 def draw_scene(planes):
     global _basemap_ms
