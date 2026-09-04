@@ -6,7 +6,7 @@ logging the extent and draw time of each ring and calling presto.update() after
 every one so a hang or crash can be pinned to a specific ring. Then it just
 holds the image.
 
-    mpremote run prestoradar/basemap_test.py
+    mpremote run prestoradar/dev/basemap_test.py
 
 Every line segment is clipped to the 480x480 viewport with Cohen-Sutherland
 before it reaches display.line(), so off-screen coordinates (the coastline
