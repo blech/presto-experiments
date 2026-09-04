@@ -1,8 +1,5 @@
 import asyncio
-import json
 import re
-import socket
-import sys
 import time
 from random import random
 
@@ -10,18 +7,23 @@ import machine
 import network
 from presto import Presto
 
+import netlog      # shared UDP telemetry;   source in lib/netlog.py,     deploy to :lib/
+import screenshot  # shared TCP frame server; source in lib/screenshot.py, deploy to :lib/
 
-FULL_RES    = False
-WIDTH       = 80
-HEIGHT      = 80
-DEBUG       = False
-MAX_CYCLES  = 6 # set 0 to disable cycle detection
-FILENAME    = 'dart-synthesis'
-LOG_COUNT   = True
-CHANCE      = 0.05 # chance of an initial cell being populated
 
-MCAST_GRP   = '239.255.255.250'
-MCAST_PORT  = 32301
+FULL_RES        = False
+WIDTH           = 80
+HEIGHT          = 80
+DEBUG           = False
+MAX_CYCLES      = 6 # set 0 to disable cycle detection
+LOG_COUNT       = True
+CHANCE          = 0.15 # chance of an initial cell being populated
+SCREENSHOT_PORT = 8011 # TCP port for screenshot.py; 0 disables it
+
+# What to seed the grid with -- both the first grid and every steady-state reset.
+MODE            = 'kaleidosoup'     # 'soup' | 'kaleidosoup' | 'rle'
+FILENAME        = 'dart-synthesis'  # RLE stem, used when MODE == 'rle'
+ALIGN           = 'centre'          # 'left' | 'right' | 'centre', for MODE == 'rle'
 
 
 class Life:
@@ -35,90 +37,59 @@ class Life:
         self.width = WIDTH
         self.height = HEIGHT
 
+        # pattern - allows for runtime changes, later
+        self.kind = MODE
+        self.filename = FILENAME
+        self.align = ALIGN
+
         # rules
         self.born = [3]
         self.survive = [2, 3]
 
-        self.socket = False
-        self.socket_setup_task =  asyncio.create_task(self.setup_socket())
+        self._net_task = asyncio.create_task(self._setup_net())
 
         self.start_tick = 0
         self.end_tick = 0
-        self.generation = 0
-        self.cycle_index = 0
+
+        # seed the first grid (generation, cycle_index and cycles are set here too)
+        self.setup()
 
 
-    ### UDP setup
-    async def setup_socket(self):
-
+    ### Networking: telemetry + screenshot server
+    async def _setup_net(self):
+        # Bring up WiFi, then start the off-device services. echo=DEBUG keeps
+        # the per-generation JSON off the serial console unless DEBUG is on;
+        # watch the stream with life/listener.py instead.
         self.presto.connect()
-        wlan = network.WLAN(network.STA_IF)
-        host = wlan.ifconfig()[0]
-        addr = socket.getaddrinfo(host, MCAST_PORT)[0][-1]
-
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(addr)
-        self.socket = s
+        netlog.init(echo=DEBUG)
+        screenshot.serve_init(SCREENSHOT_PORT)
+        if SCREENSHOT_PORT:
+            ip = network.WLAN(network.STA_IF).ifconfig()[0]
+            print("screenshot: pull with  python3 life/screenshot_pull.py", ip)
 
     async def send_start(self):
-        if not self.socket:
-            return
-
-        info = {
-            'event': 'start',
-        }
-        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+        netlog.emit('start')
 
     async def send_generation(self):
-        if not self.socket:
-            return
         duration = self.end_tick - self.start_tick
         fps_raw = 1000/duration
         fps = f"{fps_raw:.2f}"
 
-        info = {
-            'event': 'generation',
+        fields = {
             'fps': fps,
             'fps_raw': fps_raw,
             'generation': self.generation,
         }
-
         if LOG_COUNT:
-            info['alive'] = sum([sum([cell for cell in row]) for row in self.grid])
-        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
+            fields['alive'] = sum([sum([cell for cell in row]) for row in self.grid])
+        netlog.emit('generation', **fields)
 
     async def send_steady_state(self, matched: int=None):
-        if not self.socket:
-            return
-
-        info = {
-            'event': 'steady_state',
-            'generation': self.generation,
-        }
+        fields = {'generation': self.generation}
         if matched:
-            info['cycle_index'] = self.cycle_index
-            info['matched'] = matched
-        self.socket.sendto(json.dumps(info), (MCAST_GRP, MCAST_PORT))
-
-
-    ### New grid setup
-    def setup(self, kind="rle", filename=None):
-        if DEBUG:
-            print(str(time.ticks_ms())+" - started")
-
-        if kind == 'rle' and not filename:
-            filename = FILENAME
-        self.grid, self.neighbours = self.initialise_everything(kind, filename)
-
-        self.draw_grid()
-        if DEBUG:
-            print(str(time.ticks_ms())+" - initialized grid, neighbours")
-
-        self.presto.update()
-
-        # capture up to MAX_CYCLES previous grids for comparison
-        self.cycles = [self.empty_grid() for _ in range(MAX_CYCLES)]
+            fields['cycle_index'] = self.cycle_index
+            fields['matched'] = matched
+        netlog.emit('steady_state', **fields)
 
 
     ### Presto display handling
@@ -166,33 +137,33 @@ class Life:
         buzzer.duty_u16(0)
 
 
-    ### Life grid setup
-    def initialise_everything(self, kind, filename='spaceship', align=None):
+    ### Generate the initial pattern of cells
+    def initialise_everything(self):
         grid = False
 
-        if kind == 'soup':
+        if self.kind == 'soup':
             grid = self.initialize_soup(chance=CHANCE, border=20)
-        if kind == 'kaleidosoup':
+        if self.kind == 'kaleidosoup':
             grid = self.initialize_kaleidosoup(chance=CHANCE, border=5)
-        if kind == 'rle':
+        if self.kind == 'rle':
             try:
-                with open(f'life/rles/{filename}.rle') as f:
+                with open(f'life/rles/{self.filename}.rle') as f:
                     lines = f.readlines()
                 width, height, born, survive, line_data = self.parse_rle(lines)
-                if align == 'left':
+                if self.align == 'left':
                     x_offset = 0
-                elif align == 'right':
+                elif self.align == 'right':
                     x_offset = width
                 else:
                     x_offset = int((self.width - width)/2)
                 y_offset = int((self.height - height)/2)
                 grid = self.build_grid(line_data, x_offset=x_offset, y_offset=y_offset)
             except Exception as e:
-                print(f"Specified filename {filename}.rle which didn't work: {e}")
+                print(f"Specified filename {self.filename}.rle which didn't work: {e}")
                 raise
 
         if not grid:
-            raise Exception(f"Didn't understand kind {kind}")
+            raise Exception(f"Didn't understand kind {self.kind}")
 
         neighbours = self.initialize_neighbours(grid)
         return (grid, neighbours)
@@ -373,17 +344,15 @@ class Life:
             if not self.countdown:
                 await self.send_steady_state(matched=self.matched_index)
                 # await self.make_sound(440, 0.4)
-                self.setup(kind="kaleidosoup")
+                self.setup()
 
 
     ### New grid setup
-    def setup(self, kind="rle", filename=None, align='centre'):
+    def setup(self):
         if DEBUG:
             print(str(time.ticks_ms())+" - started")
 
-        if kind == 'rle' and not filename:
-            filename = FILENAME
-        self.grid, self.neighbours = self.initialise_everything(kind, filename, align=align)
+        self.grid, self.neighbours = self.initialise_everything()
 
         self.draw_grid()
         if DEBUG:
@@ -404,6 +373,9 @@ class Life:
             self.start_tick = time.ticks_ms()
             await self.update_grid()
             self.presto.update()
+
+            # Serve one waiting screenshot client, if any (fast no-op otherwise).
+            screenshot.serve_poll(self.display, self.presto.buffer)
 
             if MAX_CYCLES:
                 await self.handle_cycles()

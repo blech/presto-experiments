@@ -13,8 +13,13 @@ if ! command -v mpremote >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Creating :life/ ..."
+echo "Creating :life/ and :lib/ ..."
 mpremote fs mkdir :life 2>/dev/null || true
+mpremote fs mkdir :lib 2>/dev/null || true
+
+echo "Copying shared lib (netlog telemetry, screenshot server) ..."
+mpremote fs cp lib/netlog.py :lib/netlog.py
+mpremote fs cp lib/screenshot.py :lib/screenshot.py
 
 echo "Copying Life library and RLEs ..."
 mpremote fs cp -r life/life.py :life/
