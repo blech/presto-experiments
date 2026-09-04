@@ -4,6 +4,8 @@
 #
 #   * application modules go into /prestoradar/ so the stock launcher ignores
 #     them (it only lists .py files at the root)
+#   * shared modules (netlog, screenshot) go into /lib/, which MicroPython puts
+#     on sys.path automatically -- imported by bare name
 #   * the entry shim presto_radar.py is left at the root so the radar can be
 #     started with `mpremote run presto_radar.py` or from the launcher
 #   * no main.py is deployed -- the stock Pimoroni launcher is left untouched
@@ -33,13 +35,19 @@ fi
 echo "Checking basemap matches settings.py ..."
 python3 prestoradar/make_basemap.py --if-stale
 
-echo "Creating :prestoradar/ ..."
+echo "Creating :prestoradar/ and :lib/ ..."
 mpremote mkdir :prestoradar 2>/dev/null || true
+mpremote mkdir :lib 2>/dev/null || true
 
-echo "Copying prestoradar/radar.py + settings.py + screenshot.py ..."
+echo "Copying shared modules to :lib/ (netlog.py, screenshot.py) ..."
+mpremote cp lib/netlog.py :lib/netlog.py
+mpremote cp lib/screenshot.py :lib/screenshot.py
+# Older deploys put screenshot.py in :prestoradar/, which would shadow :lib/.
+mpremote rm :prestoradar/screenshot.py 2>/dev/null || true
+
+echo "Copying prestoradar/radar.py + settings.py ..."
 mpremote cp prestoradar/radar.py :prestoradar/radar.py
 mpremote cp prestoradar/settings.py :prestoradar/settings.py
-mpremote cp prestoradar/screenshot.py :prestoradar/screenshot.py
 
 if [ -f prestoradar/basemap_data.py ]; then
     echo "Copying prestoradar/basemap_data.py ..."

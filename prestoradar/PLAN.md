@@ -6,11 +6,24 @@ Running list of larger pieces not yet started. Smaller tweaks go straight in.
 
 ## 1. Shared UDP logging / telemetry module
 
-**Why:** `radar.py` (`log()` + `radar_listen.py`) and the older `life.py`
-(`send_start` / `send_generation` / `send_steady_state` + `life-listener.py` /
-`life-listener-ncurses.py`) independently reinvent "spray visibility over UDP so
-a laptop can watch a headless Presto". Two implementations of the same idea in
-one repo — factor it out.
+**Radar side done.** `lib/netlog.py` (multicast `239.255.255.250:32301`,
+`init` / `log` / `emit` / `close`, echoes to serial, never raises) and
+`lib/screenshot.py` were brought across from the Life refactor. `radar.py` now
+does `import netlog` + `from netlog import log`; its own broadcast socket and
+`LOG_UDP_ADDR` are gone. `radar_listen.py` joins the group (importing `GROUP`
+from `netlog`) and pretty-passes JSON. `radar_deploy.sh` makes `:lib/` and
+copies `netlog.py` + `screenshot.py` there (and removes the stale
+`:prestoradar/screenshot.py` that would otherwise shadow it).
+`dev/udp.py` was the throwaway spike -- superseded, can be deleted.
+
+**Still open:** migrate `life.py` to `netlog.emit()`; fold `radar_listen.py` and
+`life-listener.py` into one `tools/udplisten.py`.
+
+**Why (original):** `radar.py` (`log()` + `radar_listen.py`) and the older
+`life.py` (`send_start` / `send_generation` / `send_steady_state` +
+`life-listener.py` / `life-listener-ncurses.py`) independently reinvent "spray
+visibility over UDP so a laptop can watch a headless Presto". Two implementations
+of the same idea in one repo — factor it out.
 
 **Differences to reconcile:**
 

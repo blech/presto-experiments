@@ -62,11 +62,10 @@ DISPLAY_MODE = "radar"
 COLOUR_MODE = "alt"
 
 # Logging: every log() line goes to the serial console, and -- once the network
-# is up -- is also broadcast as a UDP packet so another machine on the LAN can
-# watch with `python3 prestoradar/radar_listen.py`. Set LOG_UDP_PORT to 0 to
-# disable the broadcast.
-LOG_UDP_PORT = 47269
-LOG_UDP_ADDR = ("255.255.255.255", LOG_UDP_PORT)
+# is up -- is also sent as a UDP multicast datagram (via lib/netlog.py) so
+# another machine on the LAN can watch with `python3 prestoradar/radar_listen.py`.
+# This is the multicast port; 0 disables the network side (serial only).
+LOG_UDP_PORT = 32301
 
 # When 1, hide aircraft that are on the ground: altitude of 0 / "ground", or a
 # ground speed of 0. When 0, show everything.
