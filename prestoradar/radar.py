@@ -81,13 +81,23 @@ def to_screen(east_km, north_km):
 print("radar.py: importing done, basemap =", "loaded" if basemap_data else "none")
 
 # --- INITIALIZE PRESTO ---
-presto = Presto(full_res=True, ambient_light=True)
+# "map" mode draws a pre-rendered raster backdrop (PLAN item 8): the 480x480
+# image sits on PicoGraphics layer 0, the aircraft are redrawn on layer 1 every
+# frame, and presto.update() does its tear-free beam-raced composite of the two.
+# So map mode boots with 2 layers; the scope keeps 1. (An earlier single-layer
+# direct_to_fb blit of the backdrop strobed the moving icons -- the whole-frame
+# restore left each icon erased for ~5% of every frame.) The layer count is
+# fixed at boot, so the raster wants DISPLAY_MODE = "map" set in settings.py;
+# toggling to map from the on-device overlay keeps the vector basemap.
+_RASTER_OK = DISPLAY_MODE == "map" and bool(DRAW_BASEMAP)
+presto = Presto(full_res=True, ambient_light=True, layers=2 if _RASTER_OK else 1)
 display = presto.display
 WIDTH, HEIGHT = 480, 480
-print("radar.py: Presto display ready")
+print("radar.py: Presto display ready  (layers=%d)" % (2 if _RASTER_OK else 1))
 
 # Pen Colors (RGB)
 BG_COLOR = display.create_pen(10, 20, 10)
+TRANSPARENT_PEN = display.create_pen(0, 0, 0)   # 0x0000 -- see-through on layer 1
 RADAR_GREEN = display.create_pen(0, 230, 70)
 TEXT_COLOR = display.create_pen(200, 255, 200)
 COAST_PEN = display.create_pen(60, 90, 120)     # muted blue-grey coastline
@@ -298,6 +308,56 @@ def draw_basemap():
             display.circle(x, y, 3)
             display.text(name, x + 5, y - 4, WIDTH, 1)
 
+# --- Raster basemap (PLAN item 8) -------------------------------------------
+# In map mode a pre-rendered 480x480 backdrop stands in for the vector grid.
+# make_basemap.py --raster bakes prestoradar/basemap.jpg in the same
+# kilometres-east/north frame to_screen() projects into, radar_deploy.sh copies
+# it, and here jpegdec decodes it onto layer 0. draw_scene() then just clears
+# layer 1 and draws the aircraft; presto.update() composites the two. If
+# basemap.jpg is missing, the vector grid is drawn on layer 0 as the fallback.
+RASTER_PATH = "/prestoradar/basemap.jpg"
+_map_layers = False    # True once map mode's layer-0 backdrop is in place
+
+def _draw_map_backdrop():
+    """(Re)draw the map-mode layer-0 backdrop at the current view shift. Called
+    once at boot and again from _set_selected() whenever _view_cx changes (the
+    detail panel opening/closing, or the shift adjusting to keep the selected
+    plane clear of it -- see _target_view_cx()), so the raster stays registered
+    with the aircraft instead of drifting under it -- unlike the vector cache
+    rebuild, this costs one ~380 ms jpegdec decode, still only on selection
+    change, not per frame. offset_x is 0 unshifted, negative (image slides
+    left) once a plane needs clearing; _MIN_VIEW_CX keeps the gap that opens on
+    the right inside the panel's own footprint (PANEL_X..WIDTH), so the panel
+    painting over it on layer 1 every frame covers it -- no separate fill
+    needed here."""
+    offset_x = _view_cx - WIDTH // 2
+    display.set_layer(0)
+    display.set_pen(BG_COLOR)
+    display.clear()
+    try:
+        import jpegdec
+        j = jpegdec.JPEG(display)
+        j.open_file(RASTER_PATH)
+        j.decode(offset_x, 0, jpegdec.JPEG_SCALE_FULL)
+        j = None
+        gc.collect()
+        print("raster basemap: layer 0 <-", RASTER_PATH, " offset_x", offset_x,
+              " mem", gc.mem_free())
+    except OSError:
+        print("raster basemap:", RASTER_PATH, "missing -- vector grid on layer 0")
+        draw_radar_grid()
+    except Exception as e:  # noqa: BLE001 -- optional, never fatal
+        print("raster basemap: decode failed:", repr(e), "-- vector grid on layer 0")
+        draw_radar_grid()
+    display.set_layer(1)
+
+def load_raster_basemap():
+    global _map_layers
+    if not _RASTER_OK:
+        return
+    _map_layers = True                 # committed to the 2-layer composite
+    _draw_map_backdrop()
+
 def show_message(text):
     display.set_pen(BG_COLOR)
     display.clear()
@@ -460,9 +520,29 @@ _selected = None          # the selected plane dict, or None
 _last_drawn = []           # [(x, y, plane), ...] from the last draw_planes()
 _route_cache = {}          # callsign -> (origin, dest) | None (unknown) | "" (pending)
 
-# How far to shift the radar left while the sidebar is open, so the visible part
-# re-centres in the remaining width instead of just being cropped.
-_PANEL_SHIFT = (WIDTH - PANEL_X) // 2
+# Shifting the view while the sidebar is open used to be a flat offset, which
+# was wrong for anything except a plane that started near centre: already clear
+# of the panel, it got shifted anyway (risking the left edge); already under
+# where the panel lands, it often stayed there. _target_view_cx() instead shifts
+# left only as far as the *selected* plane needs to clear the panel.
+_PANEL_MARGIN = 20                    # clearance kept between the plane and PANEL_X
+_MIN_VIEW_CX = PANEL_X - WIDTH // 2   # shift no further than this: keeps the
+#                                       map-mode raster (one 480px decode
+#                                       starting at the shift) reaching PANEL_X
+
+
+def _target_view_cx(p):
+    """Where _view_cx should sit for the current selection p (or None). Shifts
+    left only as far as needed to bring p to _PANEL_MARGIN clear of PANEL_X --
+    zero shift if it's already clear, so a plane that didn't need moving is
+    never pushed off the left edge by an unneeded shift -- then clamps to
+    _MIN_VIEW_CX so an extreme-edge plane can't ask for more shift than the
+    map-mode raster has pixels for."""
+    if p is None:
+        return WIDTH // 2
+    x0 = WIDTH // 2 + p["e"] * PX_PER_KM        # p's unshifted screen x
+    wanted = WIDTH // 2 - max(0, x0 - (PANEL_X - _PANEL_MARGIN))
+    return max(wanted, _MIN_VIEW_CX)
 
 _COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
@@ -497,13 +577,20 @@ async def _fetch_route(callsign):
 
 
 def _set_selected(p):
-    # Select p (or None to dismiss), shift the view, and kick a route lookup.
+    # Select p (or None to dismiss), shift the view just enough to keep p clear
+    # of the panel, and kick a route lookup.
     global _selected, _view_cx
     _selected = p
-    cx = (WIDTH // 2) - (_PANEL_SHIFT if p is not None else 0)
+    cx = _target_view_cx(p)
     if cx != _view_cx:
         _view_cx = cx
-        build_basemap_cache()   # its segments are pre-projected through to_screen
+        # Both backdrops are pre-rendered through to_screen()/_view_cx, so both
+        # need a rebuild on a shift -- the vector cache re-projects its segments;
+        # the raster re-decodes onto layer 0 at the new offset (_draw_map_backdrop).
+        if _map_layers:
+            _draw_map_backdrop()
+        else:
+            build_basemap_cache()
     if p is not None:
         cs = (p["callsign"] or "").strip()
         if cs and not _is_hex_id(cs) and cs not in _route_cache:
@@ -745,9 +832,14 @@ def draw_settings_panel():
 
 def draw_scene(planes):
     global _basemap_ms
-    draw_radar_grid()
     t = time.ticks_ms()
-    draw_basemap()
+    if _map_layers:
+        display.set_layer(1)             # aircraft layer; layer 0 holds the backdrop
+        display.set_pen(TRANSPARENT_PEN)
+        display.clear()
+    else:
+        draw_radar_grid()                 # clears + draws the scope grid
+        draw_basemap()
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
     display.set_pen(TEXT_COLOR)
     display.text(_status_text(planes), 5, 10, WIDTH, 2)
@@ -855,8 +947,10 @@ def main():
     print("main: start  display:", DISPLAY_MODE, " colour:", COLOUR_MODE)
 
     build_basemap_cache()
+    load_raster_basemap()
     print("main: basemap cache:", len(_BASEMAP_SEGS or ()), "segments,",
-          len(_BASEMAP_MARKS), "marks")
+          len(_BASEMAP_MARKS), "marks; map layers",
+          "on" if _map_layers else "off")
 
     if SKIP_NETWORK:
         print("main: SKIP_NETWORK -- drawing grid + basemap only")
@@ -887,6 +981,7 @@ def main():
         log("basemap rings", len(basemap_data.COASTLINE),
             "airports", len(getattr(basemap_data, "AIRPORTS", ())),
             "cached segs", len(_BASEMAP_SEGS or ()), "marks", len(_BASEMAP_MARKS))
+    log("map layers", "on" if _map_layers else "off")
 
     try:
         ip = network.WLAN(network.STA_IF).ifconfig()[0]

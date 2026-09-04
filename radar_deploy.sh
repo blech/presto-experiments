@@ -11,7 +11,8 @@
 #   * no main.py is deployed -- the stock Pimoroni launcher is left untouched
 #
 # Desktop-only files (radar_debug.py, make_basemap.py, radar_listen.py,
-# basemap_test.py, screenshot_pull.py) are never copied.
+# dev/*, screenshot_pull.py) are never copied. basemap_data.py and, if built,
+# basemap.jpg (the map-mode raster backdrop) go into /prestoradar/.
 #
 # Usage:  ./radar_deploy.sh
 # Then:   mpremote run presto_radar.py      (or reset and use the launcher)
@@ -54,6 +55,14 @@ if [ -f prestoradar/basemap_data.py ]; then
     mpremote cp prestoradar/basemap_data.py :prestoradar/basemap_data.py
 else
     echo "Skipping basemap_data.py (not generated yet -- run make_basemap.py)"
+fi
+
+# Raster backdrop for DISPLAY_MODE = "map" (PLAN item 8). Built out-of-band with
+# `make_basemap.py --raster <image>`; regenerate it by hand when the centre or
+# radius changes -- this script only copies whatever is present.
+if [ -f prestoradar/basemap.jpg ]; then
+    echo "Copying prestoradar/basemap.jpg (raster map-mode backdrop) ..."
+    mpremote cp prestoradar/basemap.jpg :prestoradar/basemap.jpg
 fi
 
 echo "Copying presto_radar.py (root entry shim) ..."

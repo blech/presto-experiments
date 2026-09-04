@@ -21,6 +21,25 @@ https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-bin-2.3.7.zip and pass its path
 
 OurAirports' airports.csv (~13 MB) is cached in ~/.cache/ourairports/. --download
 fetches it too; --airports-csv points at an existing copy.
+
+Raster mode (PLAN item 8): also skips all of the above, in one of two ways --
+producing prestoradar/basemap.jpg, which radar.py decodes onto a background
+layer at boot for the "map" display mode.
+
+    python3 prestoradar/make_basemap.py --raster-fetch             # fetch it
+    python3 prestoradar/make_basemap.py --raster mymap.png         # or bring one
+
+--raster-fetch needs no API key: it asks an ArcGIS World MapServer's public
+`export` endpoint for exactly the box CENTER_LAT/LON +/- RADIUS_KM covers, in
+the same flat lat/lon frame radar.py projects into (bboxSR=imageSR=4326), at
+480x480, as a JPEG -- so the result lines up with the radar with no reprojection
+needed on this end. Standard library only. --raster-style picks the basemap
+(topo/street/imagery).
+
+--raster SRC instead packages an image you already have: resized so its short
+side is 480 px, centre-cropped to 480x480, saved as baseline JPEG. The source
+must already cover CENTER_LAT/LON +/- RADIUS_KM in radar.py's frame -- this
+tool only conforms it to size. Needs Pillow.
 """
 
 import argparse
@@ -30,6 +49,7 @@ import math
 import os
 import struct
 import sys
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -40,6 +60,11 @@ try:
     from settings import BASEMAP_AIRPORTS  # airport size tier; --airports overrides
 except ImportError:
     BASEMAP_AIRPORTS = "medium"
+
+try:
+    from settings import USER_AGENT  # sent with the ArcGIS --raster-fetch request
+except ImportError:
+    USER_AGENT = "presto-radar/1.0 (+https://github.com/blech/presto-experiments)"
 
 KM_PER_DEG_LAT = 60.0 * 1.852
 KM_PER_DEG_LON = KM_PER_DEG_LAT * math.cos(math.radians(CENTER_LAT))
@@ -355,6 +380,190 @@ def stamped_params(path):
     return None
 
 
+def raster_params(src, out_px, quality):
+    """Everything that, if changed, means basemap.jpg needs rebuilding: the
+    centre and radar radius it is meant to match, plus the source file (path +
+    mtime) and the output settings."""
+    return {
+        "center": [CENTER_LAT, CENTER_LON],
+        "radius_km": RADIUS_KM,
+        "src": os.path.abspath(src),
+        "src_mtime": int(os.path.getmtime(src)),
+        "px": out_px,
+        "quality": quality,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Raster mode: fetch (no key) from an ArcGIS World MapServer
+# --------------------------------------------------------------------------- #
+ARCGIS_STYLES = {
+    "topo": "World_Topo_Map",
+    "street": "World_Street_Map",
+    "imagery": "World_Imagery",
+}
+ARCGIS_ATTRIBUTION = {
+    "topo": "Esri, HERE, Garmin, FAO, NOAA, USGS, © OpenStreetMap contributors, "
+            "and the GIS user community",
+    "street": "Esri, HERE, Garmin, USGS, EPA, NPS, US Census Bureau, USDA",
+    "imagery": "Esri, Maxar, Earthstar Geographics, and the GIS user community",
+}
+
+
+EARTH_RADIUS_M = 6378137.0   # WGS84 semi-major axis; also Web Mercator's sphere radius
+
+
+def frame_bbox_deg():
+    """The radar frame's lat/lon box -- (west, south, east, north) -- matching
+    radar.py's flat projection exactly. to_screen() puts RADIUS_KM at 230 px of
+    the 480x480 screen's 240 px half-width, so the screen edge (and this box)
+    reaches HALF_KM = RADIUS_KM * 240/230, not RADIUS_KM itself. Degrees only,
+    for display/sidecar purposes -- the actual fetch uses frame_bbox_3857()."""
+    half_km = RADIUS_KM * 240.0 / 230.0
+    dlat = half_km / KM_PER_DEG_LAT
+    dlon = half_km / KM_PER_DEG_LON
+    return (CENTER_LON - dlon, CENTER_LAT - dlat, CENTER_LON + dlon, CENTER_LAT + dlat)
+
+
+def frame_bbox_3857():
+    """The radar frame as a Web Mercator (EPSG:3857) bbox -- (west, south, east,
+    north) in metres -- built to be square in true ground km around the centre.
+
+    A first cut fetched bboxSR=imageSR=4326 (plain lat/lon) on the assumption
+    that these ArcGIS World MapServer services would render it as a linear
+    equirectangular raster, matching radar.py's own projection exactly. On
+    device the result was visibly stretched vertically: the services are
+    Web-Mercator-tiled, and reprojecting their cache to 4326 on the fly does
+    its own aspect handling in the *native* SR, which doesn't line up with a
+    bbox that was only made square in degrees-of-latitude-scaled-by-cos(lat).
+
+    Fetching in the service's native SR sidesteps that reprojection entirely.
+    Web Mercator is locally conformal (the same scale factor applies in both
+    directions at a point), so a bbox built by applying the single local scale
+    factor sec(lat) to a ground distance is square in Mercator metres too --
+    and over a radar-sized extent (tens of km) that factor barely changes
+    across the bbox, so the small-extent approximation this relies on holds.
+    """
+    half_km = RADIUS_KM * 240.0 / 230.0
+    lat_rad = math.radians(CENTER_LAT)
+    lon_rad = math.radians(CENTER_LON)
+    cx = EARTH_RADIUS_M * lon_rad
+    cy = EARTH_RADIUS_M * math.log(math.tan(math.pi / 4 + lat_rad / 2))
+    half_m = half_km * 1000.0 / math.cos(lat_rad)   # local Mercator scale: sec(lat)
+    return (cx - half_m, cy - half_m, cx + half_m, cy + half_m)
+
+
+def fetch_raster_params(style, out_px):
+    return {
+        "center": [CENTER_LAT, CENTER_LON],
+        "radius_km": RADIUS_KM,
+        "provider": "arcgis",
+        "style": style,
+        "px": out_px,
+    }
+
+
+def build_raster_fetch(args):
+    """Fetch prestoradar/basemap.jpg from an ArcGIS World MapServer's public
+    export endpoint -- no API key, one HTTP GET, standard library only. Fetches
+    in the service's native Web Mercator SR (see frame_bbox_3857()) rather than
+    asking it to reproject to plain lat/lon, which visibly distorted the image."""
+    service = ARCGIS_STYLES[args.raster_style]
+    out = args.raster_out or os.path.join(os.path.dirname(__file__), "basemap.jpg")
+    side = args.raster_px
+    sidecar = out + ".json"
+    params = fetch_raster_params(args.raster_style, side)
+
+    if args.if_stale:
+        try:
+            with open(sidecar) as fh:
+                if json.load(fh) == params and os.path.isfile(out):
+                    print("basemap.jpg already current for %.2f, %.2f  radius %g km "
+                          "-- skipping" % (CENTER_LAT, CENTER_LON, RADIUS_KM))
+                    return
+        except (OSError, ValueError):
+            pass
+
+    w, s, e, n = frame_bbox_3857()
+    url = ("https://services.arcgisonline.com/arcgis/rest/services/%s/MapServer/export"
+          "?bbox=%.3f,%.3f,%.3f,%.3f&bboxSR=3857&imageSR=3857&size=%d,%d&format=jpg&f=image"
+          % (service, w, s, e, n, side, side))
+    dw, ds, de, dn = frame_bbox_deg()
+    print("centre  : %.2f, %.2f   radar radius %g km" % (CENTER_LAT, CENTER_LON, RADIUS_KM))
+    print("bbox    : W %.4f  S %.4f  E %.4f  N %.4f  (deg, for reference)"
+          % (dw, ds, de, dn))
+    print("GET %s" % url)
+
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read()
+            content_type = resp.headers.get("Content-Type", "")
+    except urllib.error.URLError as e:
+        sys.exit("fetch failed: %r" % e)
+
+    if not content_type.startswith("image/"):
+        # ArcGIS answers a bad request with a 200 OK and a JSON error body.
+        sys.exit("ArcGIS did not return an image (Content-Type: %s):\n%s"
+                 % (content_type, body[:500].decode("utf-8", "replace")))
+
+    with open(out, "wb") as fh:
+        fh.write(body)
+    with open(sidecar, "w") as fh:
+        json.dump(params, fh, separators=(",", ":"))
+    print("wrote %s  (%dx%d, %d bytes)  + %s"
+          % (out, side, side, len(body), os.path.basename(sidecar)))
+    print("attribution: %s" % ARCGIS_ATTRIBUTION[args.raster_style])
+
+
+def build_raster(args):
+    """Package an already-rendered map image into prestoradar/basemap.jpg."""
+    try:
+        from PIL import Image
+    except ImportError:
+        sys.exit("--raster needs Pillow:  uv sync --extra raster   "
+                 "(or: pip install pillow)")
+
+    src = args.raster
+    if not os.path.isfile(src):
+        sys.exit("--raster %s: not found" % src)
+    out = args.raster_out or os.path.join(os.path.dirname(__file__), "basemap.jpg")
+    side = args.raster_px
+    sidecar = out + ".json"
+    params = raster_params(src, side, args.raster_quality)
+
+    if args.if_stale:
+        try:
+            with open(sidecar) as fh:
+                if json.load(fh) == params and os.path.isfile(out):
+                    print("basemap.jpg already current for %.2f, %.2f  radius %g km "
+                          "-- skipping" % (CENTER_LAT, CENTER_LON, RADIUS_KM))
+                    return
+        except (OSError, ValueError):
+            pass
+
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    im = Image.open(src).convert("RGB")
+    src_w, src_h = im.size
+    w, h = im.size
+    scale = side / min(w, h)
+    if scale != 1.0:
+        im = im.resize((max(round(w * scale), side), max(round(h * scale), side)),
+                       resample)
+    w, h = im.size
+    left, top = (w - side) // 2, (h - side) // 2
+    im = im.crop((left, top, left + side, top + side))
+    # Baseline (non-progressive) JPEG: the device's jpegdec needs it.
+    im.save(out, "JPEG", quality=args.raster_quality, optimize=True, progressive=False)
+
+    with open(sidecar, "w") as fh:
+        json.dump(params, fh, separators=(",", ":"))
+    print("centre  : %.2f, %.2f   radar radius %g km" % (CENTER_LAT, CENTER_LON, RADIUS_KM))
+    print("source  : %s  (%dx%d)" % (src, src_w, src_h))
+    print("wrote %s  (%dx%d, %d bytes)  + %s"
+          % (out, side, side, os.path.getsize(out), os.path.basename(sidecar)))
+
+
 def format_rings(name, rings, per_line=8):
     """One ring per list, coordinates wrapped every `per_line` pairs -- long
     single-line list literals can choke MicroPython's compiler on the device."""
@@ -401,11 +610,34 @@ def main():
                     help="download + cache the GSHHG zip and airports.csv if missing")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "basemap_data.py"),
                     help="output module path (default prestoradar/basemap_data.py)")
+    ap.add_argument("--raster", metavar="SRC",
+                    help="raster mode: package the already-rendered map image SRC "
+                         "into basemap.jpg for radar.py's map-mode backdrop, then "
+                         "exit (ignores every option above; needs Pillow)")
+    ap.add_argument("--raster-fetch", action="store_true",
+                    help="raster mode: fetch basemap.jpg from an ArcGIS World "
+                         "MapServer's public export endpoint -- no API key, exact "
+                         "radar-frame bbox, then exit (ignores every option above)")
+    ap.add_argument("--raster-style", choices=tuple(ARCGIS_STYLES), default="topo",
+                    help="--raster-fetch basemap style (default topo)")
+    ap.add_argument("--raster-out", metavar="PATH",
+                    help="raster mode output (default prestoradar/basemap.jpg)")
+    ap.add_argument("--raster-px", type=int, default=480,
+                    help="raster mode: output side length in px (default 480)")
+    ap.add_argument("--raster-quality", type=int, default=85,
+                    help="--raster (not --raster-fetch): JPEG quality 1..95 (default 85)")
     ap.add_argument("--if-stale", action="store_true",
                     help="do nothing if --out already matches settings + these args "
                          "(centre, radar radius, clip radius, simplify, min-ring, "
                          "resolution, levels, airports)")
     args = ap.parse_args()
+
+    if args.raster and args.raster_fetch:
+        ap.error("--raster and --raster-fetch are mutually exclusive")
+    if args.raster:
+        return build_raster(args)
+    if args.raster_fetch:
+        return build_raster_fetch(args)
 
     clip_radius_km = (args.clip_radius_km if args.clip_radius_km is not None
                       else round(RADIUS_KM * CLIP_MARGIN, 1))
