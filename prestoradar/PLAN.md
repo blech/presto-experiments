@@ -561,10 +561,37 @@ flicker. The 240x240 fallback was not needed.
   source's own bounds + projection and reprojecting, would close it. A visual
   overlay check (raster + vector coastline on top) would catch a mis-scaled or
   off-centre source either way.
-- **Runtime toggle.** Switching to `"map"` from the on-device overlay can't get
-  the raster -- the layer count is fixed at boot. Needs a second `Presto`
-  bring-up, or always booting `layers=2` (and paying the extra buffer in scope
-  mode too).
+- **Runtime toggle restores the whole look, not just the icons.** Toggling
+  `DISPLAY_MODE` from the on-device settings overlay always changed the
+  aircraft icon shape (`draw_planes()` already read it every frame), but nothing
+  else followed along, in two separate ways found back to back:
+
+  1. The **backdrop** stayed on whatever it booted with -- `_draw_map_backdrop()`
+     only ever ran from boot and from the panel-shift path, never from the
+     toggle itself, and even when it did run for `"radar"` it only drew
+     `draw_radar_grid()` (rings), not `draw_basemap()` (coastline/airports) --
+     so toggling to `"radar"` showed rings on a blank field instead of the full
+     scope look. Fixed: `_toggle_setting()` now calls `_draw_map_backdrop()`
+     too, and both its branches draw the *complete* look for their mode
+     (raster, or `draw_radar_grid()` + `draw_basemap()` together) -- the same
+     pairing `draw_scene()`'s non-2-layer path already draws every frame.  This
+     only works from a **`"map"` boot** (2 layers): a **`"radar"` boot** (1
+     layer) has no layer 0 to redraw into, so toggling into `"map"` from there
+     still can't get the raster -- that half needs a second `Presto` bring-up,
+     or always booting `layers=2` (and paying the extra buffer in scope mode
+     too).
+
+  2. Separately, `plane_pen()`, `draw_legend_alt()` and the status line all
+     picked their pens off `_map_layers` -- true forever once booted with 2
+     layers, regardless of which mode was *currently* showing -- so toggling to
+     `"radar"` from a `"map"` boot kept the near-black `MAP_TEXT_PEN`/
+     `MAP_VSTATE_PENS` meant for a light raster, now sitting on a dark scope
+     background (illegible). `_showing_raster`, a new flag `_draw_map_backdrop()`
+     sets to reflect what it actually just drew (true only after a successful
+     raster decode, false for the vector-grid fallback, `"radar"`, or no `"map"`
+     boot at all), replaces `_map_layers` at all three call sites -- contrast
+     now tracks what's actually behind the text/dots/icons rather than what the
+     hardware is capable of.
 - **Regen on centre/radius change.** `deploy.sh` copies `basemap.jpg` but cannot
   rebuild it. `--raster-fetch` makes this a one-line re-run, no state needed;
   `--raster`'s sidecar records the source path so a `--raster-refresh` that

@@ -326,39 +326,70 @@ def draw_basemap():
 # layer 1 and draws the aircraft; presto.update() composites the two. If
 # basemap.jpg is missing, the vector grid is drawn on layer 0 as the fallback.
 RASTER_PATH = "/prestoradar/basemap.jpg"
-_map_layers = False    # True once map mode's layer-0 backdrop is in place
+_map_layers = False    # True once boot committed to the 2-layer composite (fixed
+#                         at boot -- whether layer 0 exists at all, not what's on it)
+_showing_raster = False    # True only while layer 0 currently holds the decoded
+#                             raster. Tracks what _draw_map_backdrop() actually put
+#                             there (can lag DISPLAY_MODE if the raster is missing
+#                             or fails to decode) -- plane_pen(), draw_legend_alt()
+#                             and draw_scene()'s status line read this, not
+#                             _map_layers or DISPLAY_MODE, to pick contrast-
+#                             appropriate pens for whatever is actually behind them.
 
 def _draw_map_backdrop():
-    """(Re)draw the map-mode layer-0 backdrop at the current view shift. Called
-    once at boot and again from _set_selected() whenever _view_cx changes (the
-    detail panel opening/closing, or the shift adjusting to keep the selected
-    plane clear of it -- see _target_view_cx()), so the raster stays registered
-    with the aircraft instead of drifting under it -- unlike the vector cache
-    rebuild, this costs one ~380 ms jpegdec decode, still only on selection
-    change, not per frame. offset_x is 0 unshifted, negative (image slides
-    left) once a plane needs clearing; _MIN_VIEW_CX keeps the gap that opens on
-    the right inside the panel's own footprint (PANEL_X..WIDTH), so the panel
-    painting over it on layer 1 every frame covers it -- no separate fill
-    needed here."""
+    """(Re)draw layer 0 to match DISPLAY_MODE at the current view shift: the
+    raster if "map" (falling back to the vector grid + coastline if
+    basemap.jpg is missing or fails to decode), the vector grid + coastline if
+    "radar" -- the same two components draw_scene()'s non-2-layer path draws
+    every frame, so toggling between modes restores the *whole* look, not just
+    the grid. Called once at boot, again from _set_selected() whenever
+    _view_cx changes (the detail panel opening/closing, or the shift adjusting
+    to keep the selected plane clear of it -- see _target_view_cx()), and again
+    from _toggle_setting() when DISPLAY_MODE itself changes, so the backdrop
+    actually follows the on-device toggle instead of only the aircraft icons
+    and pens. Only meaningful once the boot layer count is 2 (_map_layers) --
+    that's fixed by DISPLAY_MODE *at boot*, so toggling into "map" from a
+    "radar" boot still can't get the raster (no layer 0 to draw it onto);
+    toggling between them after a "map" boot works both ways, using this same
+    layer-0 redraw either direction. The raster path costs one ~380 ms jpegdec
+    decode -- same as the panel-shift redraw, only on a mode/selection change,
+    not per frame. offset_x is 0 unshifted, negative (image slides left) once a
+    plane needs clearing; _MIN_VIEW_CX keeps the gap that opens on the right
+    inside the panel's own footprint (PANEL_X..WIDTH), so the panel painting
+    over it on layer 1 every frame covers it -- no separate fill needed here."""
+    global _showing_raster
+    if not _map_layers:
+        _showing_raster = False
+        return
     offset_x = _view_cx - WIDTH // 2
     display.set_layer(0)
     display.set_pen(BG_COLOR)
     display.clear()
-    try:
-        import jpegdec
-        j = jpegdec.JPEG(display)
-        j.open_file(RASTER_PATH)
-        j.decode(offset_x, 0, jpegdec.JPEG_SCALE_FULL)
-        j = None
-        gc.collect()
-        print("raster basemap: layer 0 <-", RASTER_PATH, " offset_x", offset_x,
-              " mem", gc.mem_free())
-    except OSError:
-        print("raster basemap:", RASTER_PATH, "missing -- vector grid on layer 0")
+    _showing_raster = False
+    if DISPLAY_MODE == "map":
+        try:
+            import jpegdec
+            j = jpegdec.JPEG(display)
+            j.open_file(RASTER_PATH)
+            j.decode(offset_x, 0, jpegdec.JPEG_SCALE_FULL)
+            j = None
+            gc.collect()
+            _showing_raster = True
+            print("raster basemap: layer 0 <-", RASTER_PATH, " offset_x", offset_x,
+                  " mem", gc.mem_free())
+        except OSError:
+            print("raster basemap:", RASTER_PATH, "missing -- vector grid on layer 0")
+            draw_radar_grid()
+            draw_basemap()
+        except Exception as e:  # noqa: BLE001 -- optional, never fatal
+            print("raster basemap: decode failed:", repr(e), "-- vector grid on layer 0")
+            draw_radar_grid()
+            draw_basemap()
+    else:
+        # DISPLAY_MODE == "radar": the same grid + coastline scope mode always
+        # draws, just on layer 0 instead of redrawn fresh every frame.
         draw_radar_grid()
-    except Exception as e:  # noqa: BLE001 -- optional, never fatal
-        print("raster basemap: decode failed:", repr(e), "-- vector grid on layer 0")
-        draw_radar_grid()
+        draw_basemap()
     display.set_layer(1)
 
 def load_raster_basemap():
@@ -638,6 +669,12 @@ def _toggle_setting(row):
     global DISPLAY_MODE, COLOUR_MODE, HIDE_ON_GROUND
     if row == 0:
         DISPLAY_MODE = "radar" if DISPLAY_MODE == "map" else "map"
+        # Aircraft icons already follow DISPLAY_MODE every frame (draw_planes());
+        # the backdrop is a static layer-0 draw and needs telling explicitly.
+        # Only takes effect if we booted with 2 layers (a "map" boot) -- toggling
+        # *into* "map" from a "radar" boot still can't get the raster, since
+        # there's no layer 0 to draw it onto (PLAN item 8, "Runtime toggle").
+        _draw_map_backdrop()
     elif row == 1:
         COLOUR_MODE = "mono" if COLOUR_MODE == "alt" else "alt"
     elif row == 2:
@@ -678,17 +715,20 @@ def handle_tap(tx, ty):
 
 
 def draw_legend_alt():
-    # Over the map-mode raster, VSTATE_PENS' pale "level" dot and TEXT_COLOR's
-    # pale green both lose contrast against light map colours; swap to
+    # Over the raster, VSTATE_PENS' pale "level" dot and TEXT_COLOR's pale
+    # green both lose contrast against light map colours; swap to
     # MAP_VSTATE_PENS/MAP_TEXT_PEN there (same pens plane_pen() draws aircraft
     # with, so the legend still matches), plus a dark halo behind each dot.
-    pens = MAP_VSTATE_PENS if _map_layers else VSTATE_PENS
-    text_pen = MAP_TEXT_PEN if _map_layers else TEXT_COLOR
+    # _showing_raster, not _map_layers/DISPLAY_MODE: what's actually behind
+    # this is what decides contrast, and the raster can be unavailable even in
+    # "map" mode (see _draw_map_backdrop()'s fallback).
+    pens = MAP_VSTATE_PENS if _showing_raster else VSTATE_PENS
+    text_pen = MAP_TEXT_PEN if _showing_raster else TEXT_COLOR
     for i, (state, label) in enumerate((("level", "level"),
                                         ("climb", "climb"),
                                         ("descent", "descent"))):
         row_y = 414 + i * 20
-        if _map_layers:
+        if _showing_raster:
             display.set_pen(MAP_TEXT_PEN)
             display.circle(14, row_y + 6, 4)      # halo so a light dot still reads
         display.set_pen(pens[state])
@@ -702,10 +742,11 @@ _basemap_ms = 0
 def plane_pen(p):
     # Pen for an aircraft mark under the current COLOUR_MODE. "mono" keeps the
     # scope look (everything RADAR_GREEN); "alt" colours by vertical state --
-    # MAP_VSTATE_PENS in map mode so a "level" aircraft isn't drawn in the same
+    # MAP_VSTATE_PENS while the raster backdrop is actually showing (see
+    # draw_legend_alt()) so a "level" aircraft isn't drawn in the same
     # washed-out white the legend fix moved away from. Extra schemes go here.
     if COLOUR_MODE == "alt":
-        return (MAP_VSTATE_PENS if _map_layers else VSTATE_PENS)[p["vstate"]]
+        return (MAP_VSTATE_PENS if _showing_raster else VSTATE_PENS)[p["vstate"]]
     return RADAR_GREEN
 
 def _draw_planes_radar(order):
@@ -873,7 +914,7 @@ def draw_scene(planes):
         draw_radar_grid()                 # clears + draws the scope grid
         draw_basemap()
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
-    display.set_pen(MAP_TEXT_PEN if _map_layers else TEXT_COLOR)
+    display.set_pen(MAP_TEXT_PEN if _showing_raster else TEXT_COLOR)
     display.text(_status_text(planes), 5, 10, WIDTH, 2)
     if COLOUR_MODE == "alt" and _selected is None:
         draw_legend_alt()
