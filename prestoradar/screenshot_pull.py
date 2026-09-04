@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Pull a screenshot from the running radar over TCP and save a PNG.
 
