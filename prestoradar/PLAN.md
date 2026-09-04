@@ -16,8 +16,17 @@ copies `netlog.py` + `screenshot.py` there (and removes the stale
 `:prestoradar/screenshot.py` that would otherwise shadow it).
 `dev/udp.py` was the throwaway spike -- superseded, can be deleted.
 
-**Still open:** migrate `life.py` to `netlog.emit()`; fold `radar_listen.py` and
-`life-listener.py` into one `tools/udplisten.py`.
+**Still open:** migrate `life.py` to `netlog.emit()` (sender side; the receiver
+choice below is settled).
+
+**Receivers stay per-app -- decided.** The earlier idea of one
+`tools/udplisten.py` replacing every listener is dropped: they present the same
+stream very differently and merging them would just add a mode switch.
+`radar_listen.py` tails arbitrary timestamped text; life's `life-listener.py`
+pretty-prints JSONL; `life-listener-ncurses.py` is a live dashboard keyed on
+`event`. They already share the wire format and the multicast group via
+`netlog`; that's the right amount of sharing. If a generic "join + dump"
+helper is ever wanted it can be a tiny shared function, not a replacement.
 
 **Why (original):** `radar.py` (`log()` + `radar_listen.py`) and the older
 `life.py` (`send_start` / `send_generation` / `send_steady_state` +
@@ -46,13 +55,12 @@ of the same idea in one repo — factor it out.
     JSON.
   - Fix the `str` vs `bytes` bug from `life.py:70` (`sendto(json.dumps(...))`
     with no `.encode()`).
-- `tools/udplisten.py` (desktop). Generic subscriber: join group, print text
-  lines, pretty-print JSON. Replaces `radar_listen.py` and `life-listener.py`.
+- ~~`tools/udplisten.py` (desktop). Generic subscriber replacing every
+  listener.~~ Dropped -- see "Receivers stay per-app" above.
 - `radar.py`: `log()` → `netlog.log()`; `deploy.sh` copies `lib/netlog.py` to
-  `:lib/`.
-- Optional / bigger: migrate `life.py` to `netlog.emit()` and move
-  `life-listener-ncurses.py` into `tools/` as an app-specific renderer that
-  imports the shared recv helper. Decide scope before starting.
+  `:lib/`. **Done.**
+- Optional / bigger: migrate `life.py` to `netlog.emit()`. Its receivers keep
+  their own presentation.
 
 ---
 
