@@ -150,10 +150,11 @@ re-tapping the same plane; airline name / `desc` wrapping could be nicer.
 
 **Phase 1 done (in-memory).** A hamburger button bottom-right opens a small
 overlay (`draw_settings_panel` / `_settings_tap`) with tap-to-cycle rows for
-`DISPLAY_MODE`, `COLOUR_MODE` and `HIDE_ON_GROUND` — display-only tunables that
-just change the next `draw_scene` (ground filter applies on the next fetch).
-Reuses the item 2a touch plumbing; mutually exclusive with the detail panel.
-Changes are lost on reboot.
+`DISPLAY_MODE`, `COLOUR_MODE` and `HIDE_ON_GROUND` — all three now take effect
+on the next `draw_scene`, including the ground filter (moved from `fetch_planes`
+to a draw-time `_hidden()` check, REFACTORING.md #5 -- it used to wait for the
+next fetch). Reuses the item 2a touch plumbing; mutually exclusive with the
+detail panel. Changes are lost on reboot.
 
 **Phase 2 (persistence) is blocked.** `settings.py` is still edit-and-redeploy
 for anything that must survive a reboot. The plan was a JSON overrides file, but

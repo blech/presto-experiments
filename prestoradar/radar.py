@@ -518,8 +518,10 @@ async def fetch_planes():
 
         altitude = aircraft.get("alt_baro")  # feet, or the string "ground"
         gs = aircraft.get("gs") or 0.0       # ground speed, knots
-        if SETTINGS.HIDE_ON_GROUND and (altitude in (0, "ground") or gs == 0):
-            continue
+        # HIDE_ON_GROUND used to be applied here, dropping a grounded aircraft
+        # before it ever reached `planes` -- which meant toggling it only took
+        # effect on the *next* fetch. Every aircraft is now kept; _hidden()
+        # applies the same check at draw time instead (REFACTORING.md #5).
 
         callsign = (aircraft.get("flight") or aircraft.get("hex", "")).strip()
 
@@ -693,7 +695,7 @@ def _toggle_setting(row):
     elif row == 1:
         SETTINGS.COLOUR_MODE = "mono" if SETTINGS.COLOUR_MODE == "alt" else "alt"
     elif row == 2:
-        SETTINGS.HIDE_ON_GROUND = 0 if SETTINGS.HIDE_ON_GROUND else 1  # takes effect next fetch
+        SETTINGS.HIDE_ON_GROUND = 0 if SETTINGS.HIDE_ON_GROUND else 1  # takes effect next redraw
     log("settings:", SETTINGS.DISPLAY_MODE, SETTINGS.COLOUR_MODE,
         "ground", "hide" if SETTINGS.HIDE_ON_GROUND else "show")
 
@@ -800,17 +802,33 @@ def _alt_key(p):
     a = p["alt"]
     return a if isinstance(a, (int, float)) else -1   # "ground" / None sort lowest
 
+def _hidden(p):
+    # Applied at draw time, not fetch time, so toggling HIDE_ON_GROUND takes
+    # effect on the next redraw (<= ANIM_INTERVAL) instead of the next fetch
+    # (<= FETCH_INTERVAL_MS). Same condition fetch_planes() used to filter
+    # with (REFACTORING.md #5).
+    return SETTINGS.HIDE_ON_GROUND and (p["alt"] in (0, "ground") or p["gs"] == 0)
+
 def draw_planes(planes):
     global _last_drawn
     # Lowest altitude first, so where two overlap the higher aircraft is drawn on
     # top -- it's the one nearer the viewer looking down.
     order = []
     for p in sorted(planes, key=_alt_key):
+        if _hidden(p):
+            continue
         x, y = to_screen(p["e"], p["n"])
         if -40 <= x <= 520 and -40 <= y <= 520:
             order.append((x, y, p))
     (_draw_planes_map if SETTINGS.DISPLAY_MODE == "map" else _draw_planes_radar)(order)
     _last_drawn = order
+
+    if _selected is not None and _hidden(_selected):
+        # The selection just became hidden -- it landed while HIDE_ON_GROUND
+        # was on, or the setting was flipped on while it was already on the
+        # ground. Dismiss rather than leave the panel open with no ring/dot
+        # on-screen to match it.
+        _set_selected(None)
 
     # Ring the selected aircraft, on top of everything. Outer/inner discs make an
     # outline; kept small (r 7) so it doesn't reach the callsign tag at (x+8, y-8).
@@ -883,9 +901,13 @@ def draw_panel(p):
 def _status_text(planes):
     if _fetch_count == 0:
         return "Connecting..."          # nothing fetched yet
+    # `planes` (== _planes) now holds every fetched aircraft, ground-hidden
+    # ones included (see _hidden(), REFACTORING.md #5) -- count only what's
+    # actually shown, same as what draw_planes() puts on-screen.
+    visible = sum(1 for p in planes if not _hidden(p))
     if not _fetch_ok:                   # last fetch failed -- planes may be stale
-        return ("Aircraft: %d (stale)" % len(planes)) if planes else "Fetch failed"
-    return "Aircraft: %d" % len(planes)  # 0 is legitimate: a quiet sky
+        return ("Aircraft: %d (stale)" % visible) if planes else "Fetch failed"
+    return "Aircraft: %d" % visible  # 0 is legitimate: a quiet sky
 
 def draw_settings_btn():
     bx, by, bw, bh = SETTINGS_BTN
@@ -1020,10 +1042,14 @@ async def _fetch_loop():
         if fresh is not None:
             _planes = fresh
             # Re-point the selection at the same aircraft in the fresh list, or
-            # clear it (and un-shift the view) if that aircraft has dropped off.
+            # clear it (and un-shift the view) if that aircraft has dropped off
+            # -- or is now hidden by HIDE_ON_GROUND (draw_planes() would clear
+            # it on the next redraw anyway; doing it here skips that one extra
+            # tick of a stale selection).
             if _selected is not None:
                 h = _selected["hex"]
-                _set_selected(next((q for q in fresh if q["hex"] == h), None))
+                _set_selected(next((q for q in fresh
+                                     if q["hex"] == h and not _hidden(q)), None))
             log("fetch done:", len(_planes), "planes",
                 time.ticks_diff(time.ticks_ms(), t), "ms  mem", gc.mem_free())
         await asyncio.sleep_ms(FETCH_INTERVAL_MS)

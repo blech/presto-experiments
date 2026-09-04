@@ -12,25 +12,28 @@ imported from `settings.py`). This works — MicroPython's cooperative
 other function's state, which makes the file hard to hold in your head and
 impossible to unit-test off-device.
 
-This is a proposal, not started work. PLAN.md keeps the feature backlog;
-this is about the *shape* of the code carrying those features. Where a PLAN
-item already tracks something below, it's cross-referenced rather than
-duplicated.
+This is a proposal, landing incrementally per §8's order. PLAN.md keeps the
+feature backlog; this is about the *shape* of the code carrying those
+features. Where a PLAN item already tracks something below, it's
+cross-referenced rather than duplicated.
 
 Nothing here should change behaviour on its own — it's a reorganisation to
 make the next PLAN items (5's layer model, 6's label culling, 2b's
 persistence) easier to land, plus two concrete bugs it happens to fix
 (colour-mode/theme duplication, live ground-toggle).
 
+**Progress:** §8 steps 1 (`Settings` object) and 2 (live ground-toggle) are
+done and verified on-device. §3 (theme table), §1 (file split) and §4 (touch
+latency) are still proposal only.
+
 ---
 
 ## 1. Split fetch/parse from draw/display
 
-Right now `fetch_planes()` (radar.py:471-556) does three jobs at once: HTTP,
-JSON parsing, *and* presentation filtering (`HIDE_ON_GROUND`, line 508) —
-the on-ground check throws data away before it ever reaches a `_planes`
-list, which is exactly why toggling it can't take effect until the next
-fetch (see §5). Drawing (`draw_scene`, `draw_planes`, `draw_panel`,
+Right now `fetch_planes()` (radar.py:471-556) does two jobs at once: HTTP and
+JSON parsing (the on-ground presentation filter it also used to apply,
+`HIDE_ON_GROUND`, is done -- see §5, now a draw-time `_hidden()` check
+instead). Drawing (`draw_scene`, `draw_planes`, `draw_panel`,
 `draw_legend_alt`, `draw_basemap`, the settings overlay) is a second,
 separate concern that happens to currently sit in the same file, same
 globals, same namespace.
@@ -90,6 +93,11 @@ reset, and read the serial log.
 ---
 
 ## 2. Encapsulate in objects — and why settings has to move first
+
+**Done so far: just the `Settings` slice below**, added in place in
+`radar.py` (still one file). The rest of this section -- `PlaneFeed`,
+`RouteCache`, `Backdrop`, `Renderer`, `UI` as actual classes in their own
+modules -- is still proposal, landing with §1's file split.
 
 The natural boundaries from §1 map onto a small number of classes rather
 than a pile of same-named functions in different files:
@@ -268,37 +276,44 @@ remaining latency is downstream of a successful tap:
 
 ## 5. Live-toggle hide-on-ground
 
-Root cause: `HIDE_ON_GROUND` is applied inside `fetch_planes()` (line 508)
-as a parse-time filter — a hidden aircraft is simply never added to the
-list `_planes` becomes. Toggling the setting changes nothing about the
-list already in memory, so the display doesn't change until the next
-`_fetch_loop` iteration (up to `FETCH_INTERVAL_MS` = 30 s) produces a fresh
-list built under the new setting.
+**Done.** Root cause was `HIDE_ON_GROUND` applied inside `fetch_planes()` as
+a parse-time filter — a hidden aircraft was simply never added to the list
+`_planes` became, so toggling the setting changed nothing about the list
+already in memory until the next `_fetch_loop` iteration (up to
+`FETCH_INTERVAL_MS` = 30 s) produced a fresh list built under the new
+setting.
 
-Fix (falls out of §1's split): keep every aircraft in `PlaneFeed`'s list,
-storing `on_ground` as a field (already derivable from the same
-`altitude`/`gs` check, just don't act on it at parse time) instead of using
-it to skip the `planes.append(...)`. Apply `HIDE_ON_GROUND` as a filter at
-the two places that currently consume the *filtered* list:
+Shipped simpler than originally sketched here: rather than a stored
+`on_ground` field, a `_hidden(p)` predicate re-derives the same check
+(`p["alt"] in (0, "ground") or p["gs"] == 0`) on demand from the `alt`/`gs`
+fields `fetch_planes()` already stores — no new field needed, it's the exact
+expression that used to live in `fetch_planes()`, just moved. `_hidden()` is
+applied at the two places that used to consume the *filtered* list:
 
-- `draw_planes()` (788-810) — filter (or skip) grounded aircraft when
-  building `order`, reading the live `self.settings.hide_on_ground` value.
-- `handle_tap()`'s hit-test (709-714) — should skip grounded aircraft the
-  same way `draw_planes()` does, so a hidden plane's dot can't still be
-  tapped.
+- `draw_planes()` — skips a hidden aircraft when building `order` (which
+  also feeds `_last_drawn`, so `handle_tap()`'s hit-test can't select a
+  hidden aircraft either, with no separate change needed there).
+- `_fetch_loop()`'s selection re-pointing — a selection landing on `_hidden`
+  is treated the same as one that dropped off the feed entirely.
 
-This makes the toggle take effect on the very next redraw (≤`ANIM_INTERVAL`
-= 0.5 s) instead of the next fetch (≤30 s), and — combined with §4's
-out-of-cycle redraw — effectively instant. It also needs §2's fix (settings
-as a shared object) to actually reach `feed.py`/`render.py` once the filter
-moves there; see §2's explanation of why `from settings import *` would
-otherwise silently freeze the value at import time.
+This makes the toggle take effect on the next redraw (≤`ANIM_INTERVAL` =
+0.5 s) instead of the next fetch (≤30 s). It needed §2's `Settings` object
+first, exactly as predicted: `_hidden()` reads `SETTINGS.HIDE_ON_GROUND`
+live, which is the whole point of that fix.
 
-One behavioural knock-on to decide: if the *selected* aircraft touches down
-while `HIDE_ON_GROUND` is on, should the panel auto-dismiss (consistent
-with it no longer being drawn) or stay open (you tapped it on purpose)?
-Worth picking deliberately rather than letting it fall out of
-implementation order.
+**Behavioural call made:** if the *selected* aircraft becomes hidden (lands
+while `HIDE_ON_GROUND` is on, or the setting is flipped on while it's
+already down), the panel now auto-dismisses -- `draw_planes()` calls
+`_set_selected(None)` when it notices `_selected` is now `_hidden()`, rather
+than leaving a panel open with no matching ring/dot on-screen.
+
+**Caught in the same pass:** `_status_text()`'s "Aircraft: N" count had the
+same bug one level up -- it counted `len(planes)` on the same now-unfiltered
+list, which would have silently started counting hidden aircraft. Fixed
+alongside this (counts `sum(1 for p in planes if not _hidden(p))` instead),
+while leaving the stale/no-data branch condition on the raw list's
+truthiness, since that's asking a different question ("do we have *any*
+carried-over data") than the display count is.
 
 ---
 
@@ -361,12 +376,12 @@ copying the directory doesn't change.
 Each step should be independently deployable and verified on-device before
 the next, the same way PLAN.md's items landed incrementally:
 
-1. §2's `Settings` object first — it's the prerequisite the others quietly
-   depend on, and is a small, low-risk change on its own (radar.py keeps
-   every other global as-is, just stops treating settings names as mutable
-   module globals).
-2. §5's live ground-toggle, now that settings are shared state — small,
-   testable by eye immediately (toggle, watch the next redraw).
+1. **Done.** §2's `Settings` object first — it's the prerequisite the others
+   quietly depend on, and is a small, low-risk change on its own (radar.py
+   keeps every other global as-is, just stops treating settings names as
+   mutable module globals).
+2. **Done.** §5's live ground-toggle, now that settings are shared state —
+   small, testable by eye immediately (toggle, watch the next redraw).
 3. §3's theme table — mechanical, no behaviour change if done right (good
    opportunity to add a quick "does mono-raster still look right" visual
    check, since that's the one spot where intent was ambiguous).
