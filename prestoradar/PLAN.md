@@ -518,13 +518,18 @@ flicker. The 240x240 fallback was not needed.
   than `_MIN_VIEW_CX` allows and still land partly under the panel -- rare in
   practice, and no worse than before this pass.
 - **Legend/status contrast in map mode.** `TEXT_COLOR` (pale green, tuned for
-  the dark scope background) washed out over light map colours. `MAP_TEXT_PEN`
-  (near-black -- deliberately not pure black, which is `TRANSPARENT_PEN`'s
-  value and would show layer 0 through the text instead of drawing over it) is
-  used for the legend labels, a dark halo behind each legend dot, and the
-  status line whenever `_map_layers`. The detail/settings panels already have
-  their own opaque background so weren't affected. Not yet re-examined: the
-  callsign tag in `_draw_planes_radar` (scope-only, not reachable in map mode)
+  the dark scope background) and `VSTATE_PENS["level"]` (near-white) both
+  washed out over light map colours. `MAP_TEXT_PEN` (near-black -- deliberately
+  not pure black, which is `TRANSPARENT_PEN`'s value and would show layer 0
+  through the mark instead of drawing over it) is used for the legend labels,
+  the status line, and (via `MAP_VSTATE_PENS`, which reuses `VSTATE_PENS` for
+  climb/descent) the "level" dot -- in the legend *and* on the aircraft itself,
+  via `plane_pen()`, so the swatch keeps matching what's drawn. A dark halo
+  behind each legend dot besides. climb/descent (cyan/amber) weren't touched --
+  saturated enough to read on the basemap styles tried so far. The
+  detail/settings panels already have their own opaque background so weren't
+  affected. Not yet re-examined: the callsign tag in `_draw_planes_radar`
+  (scope-only, not reachable in map mode)
   and any other bare text drawn straight onto the raster.
 
 **Still open:**

@@ -115,6 +115,11 @@ VSTATE_PENS = {
     "climb": display.create_pen(60, 200, 255),    # cyan
     "descent": display.create_pen(255, 160, 40),  # amber
 }
+# In map mode, "level"'s near-white washes out over light map colours the same
+# way TEXT_COLOR did -- swap it for MAP_TEXT_PEN there (see plane_pen() and
+# draw_legend_alt()). climb/descent stay put: cyan and amber read fine on the
+# basemap styles tried so far.
+MAP_VSTATE_PENS = dict(VSTATE_PENS, level=MAP_TEXT_PEN)
 
 # Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
 # selected aircraft.
@@ -662,8 +667,10 @@ def handle_tap(tx, ty):
 
 def draw_legend_alt():
     # Over the map-mode raster, VSTATE_PENS' pale "level" dot and TEXT_COLOR's
-    # pale green both lose contrast against light map colours; add a dark halo
-    # behind each dot and swap to MAP_TEXT_PEN for the labels there.
+    # pale green both lose contrast against light map colours; swap to
+    # MAP_VSTATE_PENS/MAP_TEXT_PEN there (same pens plane_pen() draws aircraft
+    # with, so the legend still matches), plus a dark halo behind each dot.
+    pens = MAP_VSTATE_PENS if _map_layers else VSTATE_PENS
     text_pen = MAP_TEXT_PEN if _map_layers else TEXT_COLOR
     for i, (state, label) in enumerate((("level", "level"),
                                         ("climb", "climb"),
@@ -672,7 +679,7 @@ def draw_legend_alt():
         if _map_layers:
             display.set_pen(MAP_TEXT_PEN)
             display.circle(14, row_y + 6, 4)      # halo so a light dot still reads
-        display.set_pen(VSTATE_PENS[state])
+        display.set_pen(pens[state])
         display.circle(14, row_y + 6, 3)
         display.set_pen(text_pen)
         display.text(label, 24, row_y, WIDTH, 2)
@@ -682,10 +689,11 @@ _basemap_ms = 0
 
 def plane_pen(p):
     # Pen for an aircraft mark under the current COLOUR_MODE. "mono" keeps the
-    # scope look (everything RADAR_GREEN); "alt" colours by vertical state.
-    # Extra schemes go here.
+    # scope look (everything RADAR_GREEN); "alt" colours by vertical state --
+    # MAP_VSTATE_PENS in map mode so a "level" aircraft isn't drawn in the same
+    # washed-out white the legend fix moved away from. Extra schemes go here.
     if COLOUR_MODE == "alt":
-        return VSTATE_PENS[p["vstate"]]
+        return (MAP_VSTATE_PENS if _map_layers else VSTATE_PENS)[p["vstate"]]
     return RADAR_GREEN
 
 def _draw_planes_radar(order):
