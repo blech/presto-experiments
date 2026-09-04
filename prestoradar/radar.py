@@ -15,6 +15,7 @@ if "/prestoradar" not in sys.path:
     sys.path.insert(0, "/prestoradar")
 
 import net                              # sibling module: async HTTPS GET (net.http_get)
+import geometry                         # sibling module: project/compass/alt_key
 
 # User-tunable configuration (centre, radius, intervals, flags, ...). Only
 # DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND ever change after boot (the
@@ -66,10 +67,6 @@ RADAR_HOST = "api.adsb.lol"
 RADAR_PATH = f"/v2/point/{CENTER_LAT}/{CENTER_LON}/{RADIUS_NM}"
 RADAR_URL = f"https://{RADAR_HOST}{RADAR_PATH}"  # kept for logging / radar_debug.py
 
-# Flat local frame: 1 degree of latitude is 60 nm; a degree of longitude shrinks
-# by cos(latitude).
-KM_PER_DEG_LAT = 60.0 * 1.852
-KM_PER_DEG_LON = KM_PER_DEG_LAT * math.cos(math.radians(CENTER_LAT))
 KNOT_TO_KM_S = 1.852 / 3600.0        # knots -> km travelled per second
 PX_PER_KM = 230.0 / RADIUS_KM        # outer ring sits at RADIUS_KM
 
@@ -79,12 +76,6 @@ def log_init():
     if LOG_UDP_PORT:
         netlog.init(port=LOG_UDP_PORT)
 
-
-def project(lat, lon):
-    # Geographic position -> kilometres east / north of the centre.
-    east = (lon - CENTER_LON) * KM_PER_DEG_LON
-    north = (lat - CENTER_LAT) * KM_PER_DEG_LAT
-    return east, north
 
 def to_screen(east_km, north_km):
     # Metric frame -> 480x480 pixels; north is up. _view_cx is the x-pixel that
@@ -508,7 +499,7 @@ async def fetch_planes():
         else:
             vstate = "descent"
 
-        east, north = project(lat, lon)
+        east, north = geometry.project(lat, lon)
         if heading is not None and gs:
             hr = math.radians(heading)
             speed = gs * KNOT_TO_KM_S
@@ -575,15 +566,6 @@ def _target_view_cx(p):
     x0 = WIDTH // 2 + p["e"] * PX_PER_KM        # p's unshifted screen x
     wanted = WIDTH // 2 - max(0, x0 - (PANEL_X - _PANEL_MARGIN))
     return int(max(wanted, _MIN_VIEW_CX))
-
-_COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-
-
-def _compass(deg):
-    if deg is None:
-        return "?"
-    return _COMPASS[int((deg % 360) / 45 + 0.5) % 8]
-
 
 def _is_hex_id(cs):
     return len(cs) == 6 and all(c in "0123456789abcdefABCDEF" for c in cs)
@@ -763,10 +745,6 @@ def _draw_planes_map(order):
             a = math.radians(heading)
             _icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
 
-def _alt_key(p):
-    a = p["alt"]
-    return a if isinstance(a, (int, float)) else -1   # "ground" / None sort lowest
-
 def _hidden(p):
     # Applied at draw time, not fetch time, so toggling HIDE_ON_GROUND takes
     # effect on the next redraw (<= ANIM_INTERVAL) instead of the next fetch
@@ -779,7 +757,7 @@ def draw_planes(planes):
     # Lowest altitude first, so where two overlap the higher aircraft is drawn on
     # top -- it's the one nearer the viewer looking down.
     order = []
-    for p in sorted(planes, key=_alt_key):
+    for p in sorted(planes, key=geometry.alt_key):
         if _hidden(p):
             continue
         x, y = to_screen(p["e"], p["n"])
@@ -853,7 +831,7 @@ def draw_panel(p):
         ("VS", ("%+d" % vr) if vr else "level"),
         ("SPEED", "%d kt" % (p["gs"] or 0)),
         ("TRACK", ("%d" % round(hdg)) if hdg is not None else "-"),
-        ("DIST", ("%dnm %s" % (round(p["dst"]), _compass(p["dir"])))
+        ("DIST", ("%dnm %s" % (round(p["dst"]), geometry.compass(p["dir"])))
                  if p["dst"] is not None else "-"),
         ("SQWK", p["squawk"] or "-"),
         ("ICAO", (p["hex"] or "-").upper()),

@@ -24,8 +24,8 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 
 **Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
 (theme table) are done and verified on-device. §1 (file split) is
-underway, module by module -- `net.py` is out, pending on-device
-verification; the rest (`geometry.py`, `routes.py`, `feed.py`,
+underway, module by module -- `net.py` and `geometry.py` are out, `net.py`
+verified, `geometry.py` pending; the rest (`routes.py`, `feed.py`,
 `backdrop.py`, `render.py`, `ui.py`) are still proposal. §4 (touch
 latency) is still proposal only.
 
@@ -358,14 +358,18 @@ Not asked for, but adjacent enough to flag:
   `_safe_loop(name, body_coro)` wrapper (or a small decorator) would remove
   three copies of the same boilerplate and make it impossible for a fourth
   loop to forget it.
-- **Pure math/formatting functions are already dependency-free** —
-  `project`, `to_screen`, `_compass`, `_alt_key`, `_fmt_alt`, `_fmt_route`,
-  `_target_view_cx` touch no `display`/`presto` state (`to_screen` and
-  `_target_view_cx` only need `_view_cx`, which becomes constructor state
-  under §2). Pulling these into a small `geometry.py` alongside §1's split
-  means they can be unit-tested with plain `pytest` on a laptop, which is
-  otherwise impossible for anything in this codebase — the only test loop
-  today is flash, reset, eyeball the screen.
+- **Pure math/formatting functions are already dependency-free** — **partly
+  done.** `project`, `compass` (was `_compass`) and `alt_key` (was
+  `_alt_key`) touch no `display`/`presto` state and are out in `geometry.py`
+  now, meaning they can be unit-tested with plain `pytest` on a laptop --
+  otherwise impossible for anything in this codebase, since the only test
+  loop today is flash, reset, eyeball the screen. `to_screen` and
+  `_target_view_cx` stay in `radar.py` for now -- both need `_view_cx`,
+  which doesn't have a home yet (it becomes constructor state once §2's
+  `Backdrop`/`UI` classes exist); moving them now would just relocate the
+  coupling, not resolve it. `_fmt_alt`/`_fmt_route` stay too -- they're
+  panel presentation, not geometry, and belong with `render.py`/`ui.py`
+  when those land.
 
 ---
 
@@ -375,8 +379,8 @@ Not asked for, but adjacent enough to flag:
 prestoradar/
   radar.py       # entry point: build Settings + the objects below, run asyncio.gather
   settings.py    # unchanged shape; gitignored, per-location (settings_example.py template)
-  net.py         # http_get()
-  geometry.py    # project, to_screen, compass, etc. -- no display/presto deps
+  net.py         # done: http_get()
+  geometry.py    # done: project, compass, alt_key (to_screen stays in radar.py for now)
   feed.py        # PlaneFeed: fetch, parse, on_ground as data not a filter
   routes.py       # RouteCache: adsbdb lookup, capped
   backdrop.py    # Backdrop: vector cache + raster layer-0 loading
