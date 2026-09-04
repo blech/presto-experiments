@@ -238,8 +238,9 @@ Prior art in the sibling repos:
   (`/shot.bmp`), which you pull with `mpremote fs cp :shot.bmp .` and view via
   `sips -s format png`. Zero protocol, zero listener; not live / not remotely
   triggered. (Carries a `FLASH_WRITES_HANG` firmware caveat.)
-- **`../compresto`** (`compresto/util.py:handle_screenshot_request` +
-  `tools/take-screenshot.py`) — **TCP**, `asyncio.start_server` on port 11. On
+- **`../compresto`** ([kmohrf/compresto](https://git.hack-hro.de/kmohrf/compresto);
+  `compresto/util.py:handle_screenshot_request` + `tools/take-screenshot.py`) —
+  **TCP**, `asyncio.start_server` on port 11. On
   connect it writes `"{w}x{h}\n"` then the raw RGB565 `presto.buffer` and
   closes. The host tool reads the dims line, reads the rest as `array("H")`,
   `byteswap()`s, and hands it to ImageMagick/Wand as `rgb565` → PNG with an
