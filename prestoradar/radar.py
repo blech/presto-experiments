@@ -530,7 +530,10 @@ def _set_selected(p):
 # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
 _settings_open = False
 SETTINGS_BTN = (WIDTH - 40, HEIGHT - 36, 36, 32)      # x, y, w, h  (bottom-right)
-_SPANEL = (WIDTH - 288, HEIGHT - 172, 288, 168)       # x, y, w, h  (~60% wide)
+_SPANEL = (WIDTH - 288, HEIGHT - 172, 284, 168)       # x, y, w, h  (~60% wide;
+#                                                       right/bottom edges kept
+#                                                       inside 0..479 so their
+#                                                       border lines draw)
 _SP_ROW0 = _SPANEL[1] + 44                            # top y of the first value row
 _SP_ROWH = 30
 _SP_VALDX = 120                                       # value column, px from label x
