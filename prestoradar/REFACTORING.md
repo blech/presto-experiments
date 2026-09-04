@@ -23,8 +23,11 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 (colour-mode/theme duplication, live ground-toggle).
 
 **Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
-(theme table) are done and verified on-device. §1 (file split) and §4
-(touch latency) are still proposal only.
+(theme table) are done and verified on-device. §1 (file split) is
+underway, module by module -- `net.py` is out, pending on-device
+verification; the rest (`geometry.py`, `routes.py`, `feed.py`,
+`backdrop.py`, `render.py`, `ui.py`) are still proposal. §4 (touch
+latency) is still proposal only.
 
 ---
 
@@ -40,10 +43,15 @@ globals, same namespace.
 
 Proposed split:
 
-- **`net.py`** — `http_get()` (radar.py:410-468), the minimal async HTTPS
-  GET. Nothing radar-specific except `USER_AGENT`; both `fetch_planes()`
-  and `_fetch_route()` (613-651) already share it, this just gives that
-  sharing a home.
+- **`net.py`** — **done.** `http_get()` (was `_http_get()`, radar.py:410-468),
+  the minimal async HTTPS GET. Landed as sketched: `net.py` takes
+  `user_agent` as a parameter rather than importing `settings` itself, so
+  it stays a plain, dependency-free module (only `asyncio`/`ssl`); both
+  `fetch_planes()` and `_fetch_route()` now call `net.http_get(...,
+  USER_AGENT)`. `radar_deploy.sh` copies it alongside `radar.py`. First of
+  the split's pieces landed since it had no shared mutable state to
+  untangle -- everything below still has `_view_cx`/`_selected`/etc. to
+  sort out first.
 - **`feed.py`** — parsing (`fetch_planes()`'s per-aircraft dict-building,
   474-556) and the plane list's lifecycle (`_planes`/`_fetch_count`/
   `_fetch_ok`, 936-1014). Every field the feed produces is *data*: keep
