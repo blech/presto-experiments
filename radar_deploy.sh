@@ -46,10 +46,11 @@ mpremote cp lib/screenshot.py :lib/screenshot.py
 # Older deploys put screenshot.py in :prestoradar/, which would shadow :lib/.
 mpremote rm :prestoradar/screenshot.py 2>/dev/null || true
 
-echo "Copying prestoradar/radar.py + net.py + geometry.py + settings.py ..."
+echo "Copying prestoradar/radar.py + net.py + geometry.py + routes.py + settings.py ..."
 mpremote cp prestoradar/radar.py :prestoradar/radar.py
 mpremote cp prestoradar/net.py :prestoradar/net.py
 mpremote cp prestoradar/geometry.py :prestoradar/geometry.py
+mpremote cp prestoradar/routes.py :prestoradar/routes.py
 mpremote cp prestoradar/settings.py :prestoradar/settings.py
 
 if [ -f prestoradar/basemap_data.py ]; then

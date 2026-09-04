@@ -24,9 +24,9 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 
 **Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
 (theme table) are done and verified on-device. §1 (file split) is
-underway, module by module -- `net.py` and `geometry.py` are out, `net.py`
-verified, `geometry.py` pending; the rest (`routes.py`, `feed.py`,
-`backdrop.py`, `render.py`, `ui.py`) are still proposal. §4 (touch
+underway, module by module -- `net.py` and `geometry.py` are out and
+verified; `routes.py` is out, pending on-device verification; `feed.py`,
+`backdrop.py`, `render.py` and `ui.py` are still proposal. §4 (touch
 latency) is still proposal only.
 
 ---
@@ -58,21 +58,27 @@ Proposed split:
   `on_ground` as a stored bool instead of filtering it away at parse time,
   and apply `HIDE_ON_GROUND` as a view filter at draw/hit-test time
   instead (§5).
-- **`routes.py`** — `_fetch_route`/`_route_cache` (613-651), today's single
-  adsbdb GET per callsign. This one is worth calling out on its own: the
-  route lookup is a known-naive placeholder (a single, unverified adsbdb
-  hit — no cross-check, no fallback if adsbdb's callsign→route mapping is
-  stale or just wrong for a shared/renumbered flight number), and a
-  smarter replacement is planned. So `routes.py` should expose exactly one
-  entry point the rest of the app calls — e.g. `resolve_route(callsign) ->
-  (origin, dest) | None | "pending"` — with the cache, the `_is_hex_id`
-  skip, and whatever fetch/scoring logic sits behind it entirely private
-  to the module. `ui.py`/`render.py` only ever call `resolve_route()` and
-  format whatever tuple comes back (`_fmt_route`, 819-827 stays put in
-  render/ui, since it's presentation, not resolution). That means swapping
-  the naive single-GET for a more sophisticated algorithm — multiple
-  sources, scoring, whatever the design from your other conversation turns
-  out to need — is a change entirely inside `routes.py`: same call
+- **`routes.py`** — **done**, though landed as two calls rather than the
+  single `resolve_route()` sketched originally: `request(callsign)`
+  (fire off a lookup if one isn't cached or in flight yet -- what
+  `_set_selected()` used to do inline) and `get(callsign)` (read the
+  current cached state, called every panel redraw by `_fmt_route()`).
+  Splitting them avoids a naive `resolve_route()` accidentally
+  re-triggering a fetch every time the panel reads it for display, which a
+  single combined call would risk. The route lookup itself is a
+  known-naive placeholder (a single, unverified adsbdb hit — no
+  cross-check, no fallback if adsbdb's callsign→route mapping is stale or
+  just wrong for a shared/renumbered flight number), and a smarter
+  replacement is planned — the point of the split holds regardless of
+  which shape won: `is_hex_id()`, the cache, and all fetch/scoring logic
+  are private to the module (`_fetch()`, `_cache`); `radar.py` only ever
+  calls `routes.request()`/`routes.get()`/`routes.is_hex_id()` and formats
+  whatever comes back (`_fmt_route`, still in `radar.py` for now --
+  presentation, not resolution, moves to `render.py`/`ui.py` when those
+  land). That means swapping the naive single-GET for a more sophisticated
+  algorithm — multiple sources, scoring, whatever the design from your
+  other conversation turns out to need — is a change entirely inside
+  `routes.py`: same call
   signature, same cache shape, zero ripple into the panel drawing or touch
   handling that currently sit next to it in radar.py. Also the natural
   place to cap the cache (see §6).
@@ -339,11 +345,12 @@ carried-over data") than the display count is.
 
 Not asked for, but adjacent enough to flag:
 
-- **`_route_cache` is unbounded** (already noted as open in PLAN item 2a) —
-  one entry per distinct callsign ever tapped, for the life of the process.
-  Harmless over a normal session, but worth a simple cap (e.g. drop the
-  oldest entry past N) once it has its own module (§1's `routes.py`)
-  rather than letting it grow forever on a display left running for days.
+- **`routes.py`'s cache is still unbounded** (already noted as open in PLAN
+  item 2a, before the module existed) — one entry per distinct callsign
+  ever tapped, for the life of the process. Harmless over a normal
+  session, but worth a simple cap (e.g. drop the oldest entry past N) now
+  that it's contained to `routes.py`'s own `_cache` rather than letting it
+  grow forever on a display left running for days. Still open.
 - **`SKIP_NETWORK` runs a separate, hand-duplicated loop** (`main()`,
   1030-1039): a plain `while True: draw_scene([]); time.sleep(1)` with no
   touch handling at all, instead of the real `asyncio.gather` path with an
@@ -381,8 +388,8 @@ prestoradar/
   settings.py    # unchanged shape; gitignored, per-location (settings_example.py template)
   net.py         # done: http_get()
   geometry.py    # done: project, compass, alt_key (to_screen stays in radar.py for now)
+  routes.py      # done: request()/get()/is_hex_id(), adsbdb lookup + cache
   feed.py        # PlaneFeed: fetch, parse, on_ground as data not a filter
-  routes.py       # RouteCache: adsbdb lookup, capped
   backdrop.py    # Backdrop: vector cache + raster layer-0 loading
   render.py      # Renderer: pens, theme table, all draw_* 
   ui.py          # UI: selection, tap handling, settings overlay

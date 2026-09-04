@@ -16,6 +16,7 @@ if "/prestoradar" not in sys.path:
 
 import net                              # sibling module: async HTTPS GET (net.http_get)
 import geometry                         # sibling module: project/compass/alt_key
+import routes                           # sibling module: route lookup + cache
 
 # User-tunable configuration (centre, radius, intervals, flags, ...). Only
 # DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND ever change after boot (the
@@ -529,7 +530,6 @@ async def fetch_planes():
 # --- Tap to inspect (item 2a) --------------------------------------------------
 _selected = None          # the selected plane dict, or None
 _last_drawn = []           # [(x, y, plane), ...] from the last draw_planes()
-_route_cache = {}          # callsign -> (origin, dest) | None (unknown) | "" (pending)
 
 # Shifting the view while the sidebar is open used to be a flat offset, which
 # was wrong for anything except a plane that started near centre: already clear
@@ -567,29 +567,6 @@ def _target_view_cx(p):
     wanted = WIDTH // 2 - max(0, x0 - (PANEL_X - _PANEL_MARGIN))
     return int(max(wanted, _MIN_VIEW_CX))
 
-def _is_hex_id(cs):
-    return len(cs) == 6 and all(c in "0123456789abcdefABCDEF" for c in cs)
-
-
-async def _fetch_route(callsign):
-    try:
-        status, body = await net.http_get("api.adsbdb.com", "/v0/callsign/" + callsign, USER_AGENT)
-        route = None
-        if status == 200:
-            resp = json.loads(body).get("response")
-            fr = resp.get("flightroute") if isinstance(resp, dict) else None
-            if fr:
-                o = (fr.get("origin") or {})
-                d = (fr.get("destination") or {})
-                route = (o.get("iata_code") or o.get("icao_code") or "?",
-                         d.get("iata_code") or d.get("icao_code") or "?")
-        _route_cache[callsign] = route
-        log("route", callsign, "->", route)
-    except Exception as e:  # noqa: BLE001
-        log("route lookup failed:", callsign, repr(e))
-        _route_cache[callsign] = None
-
-
 def _set_selected(p):
     # Select p (or None to dismiss), shift the view just enough to keep p clear
     # of the panel, and kick a route lookup.
@@ -606,10 +583,7 @@ def _set_selected(p):
         else:
             build_basemap_cache()
     if p is not None:
-        cs = (p["callsign"] or "").strip()
-        if cs and not _is_hex_id(cs) and cs not in _route_cache:
-            _route_cache[cs] = ""            # pending
-            asyncio.create_task(_fetch_route(cs))
+        routes.request(p["callsign"])
 
 
 # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
@@ -793,12 +767,12 @@ def _fmt_alt(alt):
     return "%sft" % alt
 
 def _fmt_route(cs):
-    rc = _route_cache.get(cs, "absent")
+    rc = routes.get(cs)
     if rc == "":
         return "..."
     if isinstance(rc, tuple):
         return "%s-%s" % rc
-    if cs and not _is_hex_id(cs):
+    if cs and not routes.is_hex_id(cs):
         return "unknown"
     return "-"
 
