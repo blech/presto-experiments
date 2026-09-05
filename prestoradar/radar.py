@@ -123,15 +123,21 @@ _PANEL_MARGIN = 20                    # clearance kept between the plane and PAN
 # How far left the view is ever allowed to shift. The raster only strictly
 # needs offset_x >= PANEL_X - WIDTH (so the map-mode backdrop -- one 480px
 # jpegdec decode starting at the shift -- still reaches PANEL_X); with
-# PANEL_X=256 that's -224. In practice a plane far enough right to need close
-# to that made the backdrop disappear instead of just clipping, for a
-# selection that needed more shift than the original flat _PANEL_SHIFT (112px)
-# ever asked for -- something in jpegdec.decode()'s negative-x handling likely
-# breaks down somewhere between those two magnitudes. Until that's pinned down,
-# clamp to the smaller value known to work rather than the theoretical limit; a
-# plane past this point can still end up partly under the panel, which is the
-# lesser failure.
-_MAX_SHIFT = 112
+# PANEL_X=256 that's -224, so this is set to the theoretical limit rather
+# than clamped short of it.
+#
+# This used to be capped at 112: a plane needing more shift than that made
+# the backdrop disappear instead of just clipping, and the cause was never
+# pinned down further than "something in jpegdec.decode()'s negative-x
+# handling, somewhere between 112 and 224". That was diagnosed before
+# UI._target_view_cx() existed, back when the shift was applied as a flat,
+# hand-written offset rather than always going through one int()-casting
+# choke point -- plausibly the same float-related freeze seen elsewhere in
+# this app during development, not a real jpegdec magnitude limit. Worth
+# re-verifying on-device at the full 224 before reintroducing a clamp; if
+# the backdrop still disappears well short of it, put the cap back with
+# whatever value this testing finds, not blindly back at 112.
+_MAX_SHIFT = 224
 _MIN_VIEW_CX = WIDTH // 2 - _MAX_SHIFT
 
 # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
@@ -205,7 +211,7 @@ async def _render_loop():
             _ui.dismiss_if_hidden()
 
             t = time.ticks_ms()
-            _renderer.draw_scene(_feed.planes, _ui.selected, _ui.settings_open, _ui.view_cx)
+            _renderer.draw_scene(_feed.planes, _ui.selected, _ui.settings_open)
             frame += 1
             if frame <= 3 or frame % 20 == 0:
                 log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
@@ -276,7 +282,7 @@ def main():
         frame = 0
         while True:
             t = time.ticks_ms()
-            _renderer.draw_scene([], _ui.selected, _ui.settings_open, _ui.view_cx)
+            _renderer.draw_scene([], _ui.selected, _ui.settings_open)
             frame += 1
             print("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
                   "ms  basemap", _renderer.basemap_ms, "ms")

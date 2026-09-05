@@ -109,6 +109,12 @@ class UI:
             self.backdrop.redraw(self.view_cx, self.selected)
         else:
             self.backdrop.build_vector_cache()
+            # Only advanced once the cache it describes is actually ready --
+            # draw_scene()'s non-map_layers path draws the radar grid at this
+            # value too, so the grid and the coastline it's drawn on top of
+            # always agree on which view_cx they're at (never one shifted and
+            # the other not).
+            self.backdrop.vector_view_cx = self.view_cx
         self.request_redraw()   # show the corrected backdrop as soon as it's ready
 
     def dismiss_if_hidden(self):

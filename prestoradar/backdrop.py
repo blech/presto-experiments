@@ -90,6 +90,14 @@ class Backdrop:
         #                              actually behind them.
         self.segs = None    # [(x0, y0, x1, y1), ...] ints, clipped to the viewport
         self.marks = ()     # [(x, y, name), ...] airports inside the viewport
+        # view_cx self.segs/marks are currently projected for -- not necessarily
+        # the live view_cx, since a shift's rebuild is backgrounded (ui.py's
+        # UI._rebuild_backdrop, REFACTORING.md #4). draw_scene() draws the
+        # per-frame radar grid (rings/crosshairs) at this value too, in the
+        # single-layer (not map_layers) case, rather than the live view_cx --
+        # otherwise the grid would jump immediately while the coastline (this
+        # cache) still lagged a frame or two behind it.
+        self.vector_view_cx = WIDTH // 2
 
     # --- Vector basemap (coastline/airports cache) --------------------------
     # The basemap never changes shape at runtime -- fixed centre, fixed

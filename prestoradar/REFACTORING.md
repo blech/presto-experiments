@@ -432,6 +432,33 @@ this refers to the current module names:
   the task is even created, regardless of how the scheduler orders ready
   tasks afterwards.
 
+  **Second on-device finding: the backdrop's two pieces disagreed with each
+  other, not just with the aircraft.** In the single-layer (no raster)
+  case, `draw_scene()` calls `draw_radar_grid()` (rings/crosshairs) fresh
+  every frame at the live `view_cx`, but `Backdrop.draw_vector()` replays a
+  coastline cache (`segs`) that's only re-projected when
+  `build_vector_cache()` runs -- now backgrounded, same as the raster
+  rebuild. Closing the panel in vector mode showed the two catching up on
+  different frames: `Backdrop` now tracks `vector_view_cx`, the `view_cx`
+  its current cache is actually projected for, set by
+  `UI._rebuild_backdrop()` only once `build_vector_cache()` returns; the
+  grid draws at `backdrop.vector_view_cx` instead of the live value, so it
+  and the coastline always agree, both lagging the aircraft by the same up
+  -to-a-frame window rather than lagging each other. `Renderer.draw_scene()`
+  dropped its now-unused `view_cx` parameter as part of this (aircraft
+  positioning goes through `to_screen()`, which reads the live value
+  directly and was never affected).
+
+  **`_MAX_SHIFT` raised from 112 to the theoretical 224, to retest.** The
+  112 cap dated from before `UI._target_view_cx()` -- and its `int()` cast
+  on every returned `view_cx` -- existed; the original diagnosis ("jpegdec
+  breaks somewhere between 112 and 224") was never pinned down further and
+  may actually have been the float-related freeze seen elsewhere in this
+  app's development, now structurally impossible here. Set to the
+  theoretical limit to find out on real hardware rather than staying
+  clamped on an untested guess; if the backdrop still breaks well short of
+  224, the cap goes back at whatever value that testing finds.
+
 ---
 
 ## 5. Live-toggle hide-on-ground
