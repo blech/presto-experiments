@@ -173,7 +173,15 @@ _renderer.backdrop = _backdrop
 # everywhere else precisely because nothing else was), so they become real
 # instance state here instead of module globals. Built last since it holds
 # references to both _backdrop and _renderer.
-_ui = ui.UI(SETTINGS, _backdrop, _renderer, _hidden,
+#
+# _redraw: set by UI whenever a tap actually changes something, so
+# _render_loop can wake up immediately instead of waiting out ANIM_INTERVAL
+# (REFACTORING.md #4). Owned here, not by UI, since it's what lets two
+# independent tasks (_touch_loop, _render_loop) hand off across radar.py's
+# asyncio.gather -- same reason on_update is wired up as a callback rather
+# than UI reaching into feed.py directly.
+_redraw = asyncio.Event()
+_ui = ui.UI(SETTINGS, _backdrop, _renderer, _hidden, _redraw.set,
             PX_PER_KM, PANEL_X, HIT_RADIUS, _PANEL_MARGIN, _MAX_SHIFT, _MIN_VIEW_CX,
             SETTINGS_BTN, _SPANEL, _SP_ROW0, _SP_ROWH)
 _feed.on_update = _ui.on_feed_update
@@ -208,12 +216,27 @@ async def _render_loop():
             log("RENDER ERROR:", repr(e))
             if hasattr(sys, "print_exception"):
                 sys.print_exception(e)
-        await asyncio.sleep(ANIM_INTERVAL)
+        # Redraw on the next ANIM_INTERVAL tick as before, or as soon as
+        # _touch_loop sets _redraw -- whichever comes first -- instead of
+        # always waiting out the full interval after a tap (REFACTORING.md
+        # #4). wait_for is already relied on elsewhere on this firmware
+        # (net.py's http_get); Event itself is new here and worth confirming
+        # on-device.
+        try:
+            await asyncio.wait_for(_redraw.wait(), ANIM_INTERVAL)
+        except Exception:  # noqa: BLE001 -- timeout is the expected/common case
+            pass
+        _redraw.clear()
 
 
 async def _touch_loop():
     # Polled faster than the redraw so a quick tap isn't missed; acts on the
-    # rising edge (untouched -> touched).
+    # rising edge (untouched -> touched). The 250 ms debounce is on top of,
+    # not instead of, that edge check -- was/touched already stops a held
+    # finger from re-firing, so this was only ever costing latency on a
+    # legitimate quick second tap. Shortened rather than removed outright:
+    # worth confirming on-device that no spurious double-fires come back
+    # before cutting it further (REFACTORING.md #4).
     was = False
     last_ms = 0
     while True:
@@ -222,7 +245,7 @@ async def _touch_loop():
             touched = presto.touch.state
             if touched and not was:
                 now = time.ticks_ms()
-                if time.ticks_diff(now, last_ms) > 250:   # debounce
+                if time.ticks_diff(now, last_ms) > 80:   # debounce
                     last_ms = now
                     _ui.handle_tap(presto.touch.x, presto.touch.y)
             was = touched

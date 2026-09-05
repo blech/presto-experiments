@@ -1,3 +1,5 @@
+import asyncio
+
 import routes
 from netlog import log
 
@@ -17,16 +19,20 @@ class UI:
     class, in radar.py) -- normal composition, not a global reach-around.
     `hidden` (the HIDE_ON_GROUND draw-time filter) stays injected rather than
     owned here even though this class uses it too: it's also `Renderer`'s,
-    and neither owns the underlying settings check.
+    and neither owns the underlying settings check. `request_redraw` is
+    injected for the same kind of reason -- it's radar.py's asyncio.Event
+    across the render/touch task split (REFACTORING.md #4), and UI has no
+    business owning that.
     """
 
-    def __init__(self, settings, backdrop, renderer, hidden,
+    def __init__(self, settings, backdrop, renderer, hidden, request_redraw,
                  px_per_km, panel_x, hit_radius, panel_margin, max_shift, min_view_cx,
                  settings_btn, spanel, sp_row0, sp_rowh):
         self.settings = settings
         self.backdrop = backdrop
         self.renderer = renderer
         self.hidden = hidden
+        self.request_redraw = request_redraw
         self.px_per_km = px_per_km
         self.panel_x = panel_x
         self.hit_radius = hit_radius
@@ -71,13 +77,21 @@ class UI:
             # Both backdrops are pre-rendered through to_screen()/view_cx, so
             # both need a rebuild on a shift -- the vector cache re-projects
             # its segments; the raster re-decodes onto layer 0 at the new
-            # offset (Backdrop.redraw).
-            if self.backdrop.map_layers:
-                self.backdrop.redraw(self.view_cx, self.selected)
-            else:
-                self.backdrop.build_vector_cache()
+            # offset (Backdrop.redraw). That decode is ~380ms (PLAN item 8);
+            # backgrounding it as a task, rather than calling it inline here,
+            # means the ring/panel redraw already queued below isn't held up
+            # by it -- the backdrop just lags the shift by up to a frame,
+            # then self-corrects once the task finishes (REFACTORING.md #4).
+            asyncio.create_task(self._rebuild_backdrop())
         if p is not None:
             routes.request(p)
+
+    async def _rebuild_backdrop(self):
+        if self.backdrop.map_layers:
+            self.backdrop.redraw(self.view_cx, self.selected)
+        else:
+            self.backdrop.build_vector_cache()
+        self.request_redraw()   # show the corrected backdrop as soon as it's ready
 
     def dismiss_if_hidden(self):
         """Called once per frame, before drawing (radar.py's _render_loop):
@@ -139,6 +153,15 @@ class UI:
             self.settings_open = False                        # title / footer taps close
 
     def handle_tap(self, tx, ty):
+        # Every reachable path below is a real edge-triggered tap that's
+        # meant to change something on screen (select/dismiss, open/close
+        # settings, toggle a setting) -- request_redraw() unconditionally
+        # here rather than threading a "did this actually change anything"
+        # check through each branch (REFACTORING.md #4). Worst case, a
+        # genuine no-op tap costs one redraw no earlier than it would have
+        # happened anyway; that's negligible against the latency this is
+        # fixing.
+        self.request_redraw()
         if self.settings_open:
             self._settings_tap(tx, ty)
             return

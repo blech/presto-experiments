@@ -394,6 +394,36 @@ remaining latency is downstream of a successful tap:
 - Hit-testing itself (`handle_tap`'s linear scan over `_last_drawn`,
   ~30-50 entries, at 20 Hz) is not a bottleneck and doesn't need touching.
 
+**Implemented, not yet verified on-device.** All three fixes landed as
+sketched above, post-file-split so this refers to the current module names:
+
+- `radar.py` owns an `asyncio.Event` (`_redraw`), passed into `ui.UI` as
+  `request_redraw`. `_render_loop` now does
+  `asyncio.wait_for(_redraw.wait(), ANIM_INTERVAL)` instead of a plain
+  `asyncio.sleep`; `UI.handle_tap()` sets it unconditionally rather than
+  threading a per-branch "did this actually change anything" check through
+  select/dismiss/settings-toggle -- every reachable path through
+  `handle_tap()` is a real tap meant to change something, so the cost of an
+  occasional no-op redraw is negligible against the latency this fixes.
+- The fixed debounce is cut from 250 ms to 80 ms, not removed outright --
+  same reasoning as before (the rising-edge check already does the real
+  work), but shortened rather than deleted since there was no way to
+  confirm from off-device that spurious double-fires stay gone.
+- `UI.set_selected()` now backgrounds the backdrop rebuild
+  (`asyncio.create_task(self._rebuild_backdrop())`) instead of calling
+  `Backdrop.redraw()`/`build_vector_cache()` inline, so the immediate
+  ring/panel redraw isn't held up by the ~380 ms raster decode; the
+  backdrop lags the shift by up to a frame and self-corrects (calling
+  `request_redraw()` again) once the task finishes.
+
+This was written without hardware access, so the two things this section
+originally flagged for an on-device check are both still open: whether
+`asyncio.Event` is actually available on this firmware (the rest of the
+app's `asyncio` usage -- `wait_for`, `create_task`, `gather` -- is already
+proven on-device per PLAN item 2's probe and net.py; `Event` specifically
+hasn't been), and whether 80 ms still avoids spurious double-fires, or
+needs to move (either direction) once someone can feel it.
+
 ---
 
 ## 5. Live-toggle hide-on-ground
@@ -521,10 +551,10 @@ the next, the same way PLAN.md's items landed incrementally:
    `geometry.py`, `routes.py`, `feed.py`, `backdrop.py`, `render.py`,
    `ui.py` -- `radar.py` went from 753 lines to 288 across the whole
    sequence, all verified on-device.
-5. §4's redraw-on-tap and debounce tuning — the one item left from the
-   original split, and the one change that needs on-device feel rather
-   than a log line to judge. §9 (below) is a separate, later proposal --
-   not part of this ordering.
+5. **Implemented, not yet verified on-device.** §4's redraw-on-tap and
+   debounce tuning — the one item left from the original split, and the
+   one change that needs on-device feel rather than a log line to judge.
+   §9 (below) is a separate, later proposal -- not part of this ordering.
 
 ---
 
