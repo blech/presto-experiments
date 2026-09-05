@@ -254,10 +254,15 @@ async def _touch_loop():
             presto.touch.poll()
             touched = presto.touch.state
             if touched and not was:
+                log("touch: down at", presto.touch.x, presto.touch.y)
                 now = time.ticks_ms()
-                if time.ticks_diff(now, last_ms) > 80:   # debounce
+                since = time.ticks_diff(now, last_ms)
+                if since > 80:   # debounce
                     last_ms = now
+                    log("touch: debounce passed, dispatching")
                     _ui.handle_tap(presto.touch.x, presto.touch.y)
+                else:
+                    log("touch: debounced,", since, "ms since last accepted tap")
             was = touched
         except Exception as e:  # noqa: BLE001
             log("TOUCH ERROR:", repr(e))

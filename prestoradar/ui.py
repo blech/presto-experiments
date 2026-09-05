@@ -75,6 +75,10 @@ class UI:
         self.selected = p
         cx = self._target_view_cx(p)
         if cx != self.view_cx:
+            mode = self.settings.DISPLAY_MODE
+            direction = "left" if cx < self.view_cx else "right"
+            log("ui: shifting", mode, "by", abs(cx - self.view_cx), "pixels", direction,
+                "(view_cx", self.view_cx, "->", cx, ")")
             self.view_cx = cx
             # Both backdrops are pre-rendered through to_screen()/view_cx, so
             # both need a rebuild on a shift -- the vector cache re-projects
@@ -106,15 +110,21 @@ class UI:
 
     async def _rebuild_backdrop(self):
         if self.backdrop.map_layers:
+            log("ui: updating background")
             self.backdrop.redraw(self.view_cx, self.selected)
+            log("ui: background updated")
         else:
+            log("ui: updating coast vector")
             self.backdrop.build_vector_cache()
+            log("ui: coast vector updated")
             # Only advanced once the cache it describes is actually ready --
             # draw_scene()'s non-map_layers path draws the radar grid at this
             # value too, so the grid and the coastline it's drawn on top of
             # always agree on which view_cx they're at (never one shifted and
             # the other not).
+            log("ui: updating reticle")
             self.backdrop.vector_view_cx = self.view_cx
+            log("ui: reticle updated")
         self.request_redraw()   # show the corrected backdrop as soon as it's ready
 
     def dismiss_if_hidden(self):
@@ -169,12 +179,14 @@ class UI:
     def _settings_tap(self, tx, ty):
         if not self._in_rect(tx, ty, self.spanel):
             self.settings_open = False                        # tap outside closes
+            log("ui: settings dismissed (tap outside panel)")
             return
         row = (ty - self.sp_row0) // self.sp_rowh
         if 0 <= row <= 2:
             self.toggle_setting(row)                          # cycle value, stay open
         else:
             self.settings_open = False                        # title / footer taps close
+            log("ui: settings dismissed (title/footer tap)")
 
     def handle_tap(self, tx, ty):
         # Every reachable path below is a real edge-triggered tap that's
@@ -190,6 +202,7 @@ class UI:
             self._settings_tap(tx, ty)
             return
         if self._in_rect(tx, ty, self.settings_btn):
+            log("ui: settings opened")
             self.settings_open = True
             self.set_selected(None)      # settings and the detail panel are exclusive
             return
@@ -201,4 +214,10 @@ class UI:
             d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
             if d < best_d:
                 best, best_d = p, d
+        if best is not None:
+            log("ui: plane tapped", best["callsign"] or best["hex"])
+        elif self.selected is not None:
+            log("ui: panel dismissed (background tap)")
+        else:
+            log("ui: background tapped, nothing selected")
         self.set_selected(best)      # None => tapped empty space => dismiss
