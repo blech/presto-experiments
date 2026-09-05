@@ -77,7 +77,7 @@ class UI:
             else:
                 self.backdrop.build_vector_cache()
         if p is not None:
-            routes.request(p["callsign"])
+            routes.request(p)
 
     def dismiss_if_hidden(self):
         """Called once per frame, before drawing (radar.py's _render_loop):

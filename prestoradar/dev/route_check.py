@@ -105,7 +105,8 @@ def score_leg(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon):
     d13 = _gc_distance_km(a_lat, a_lon, pos_lat, pos_lon) / EARTH_RADIUS_KM
     theta13 = radians(_bearing_deg(a_lat, a_lon, pos_lat, pos_lon))
     theta12 = radians(_bearing_deg(a_lat, a_lon, b_lat, b_lon))
-    cross_track = asin(sin(d13) * sin(theta13 - theta12)) * EARTH_RADIUS_KM
+    xt = max(-1.0, min(1.0, sin(d13) * sin(theta13 - theta12)))
+    cross_track = asin(xt) * EARTH_RADIUS_KM
     c = max(-1.0, min(1.0, cos(d13) / cos(cross_track / EARTH_RADIUS_KM)))
     along_track = acos(c) * EARTH_RADIUS_KM
     if _angle_diff(degrees(theta13), degrees(theta12)) > 90:

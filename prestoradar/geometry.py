@@ -16,6 +16,15 @@ def project(lat, lon):
     return east, north
 
 
+def unproject(east, north):
+    # Inverse of project() -- a plane dict only keeps the projected (e, n)
+    # frame (routes.py needs real lat/lon for its plausibility check against
+    # candidate routes' airports).
+    lat = settings.CENTER_LAT + north / _KM_PER_DEG_LAT
+    lon = settings.CENTER_LON + east / _KM_PER_DEG_LON
+    return lat, lon
+
+
 _COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
 

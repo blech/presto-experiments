@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
 Desktop (CPython) smoke test for routes.py -- looks up an aircraft's route
-via api.adsbdb.com, the same lookup radar.py's tap-to-inspect panel does.
+the same way radar.py's tap-to-inspect panel does.
 
-adsbdb only indexes routes by callsign (the "flight" field in the adsb.lol
-feed, e.g. BAW123), not by ICAO24 hex id (the "hex" field, e.g. 4ca1b2 --
-also called icao24 elsewhere). If you only have the hex, pass --hex: this
-first fetches the live feed (settings.py's centre/radius) to find that
-aircraft's current callsign, then looks up the route for it.
+routes.py needs a live plane dict, not just a callsign: since it started
+cross-checking candidate routes against the aircraft's actual position and
+heading (adsbdb alone can hand back a stale or simply wrong route for a
+multi-leg rotation -- see prestoradar/dev/route_check.py, where this was
+prototyped), it needs to know where the plane actually is. So this always
+resolves --hex or --callsign against the live feed (settings.py's
+centre/radius) first, then hands the resulting plane dict to routes.request()
+exactly as ui.py does on a tap.
 
     python3 prestoradar/dev/route_lookup.py --callsign BAW123
     python3 prestoradar/dev/route_lookup.py --hex 4ca1b2
@@ -34,8 +37,8 @@ from settings import (  # noqa: E402
 RADAR_HOST = "api.adsb.lol"
 
 
-async def resolve_callsign(hex_id, radius_km):
-    """Find hex_id's current callsign in the live feed. Returns (callsign,
+async def find_plane(hex_id, callsign, radius_km):
+    """Find hex_id or callsign in the live local feed. Returns (plane,
     error) -- exactly one is set."""
     radius_nm = round(radius_km / 1.852)
     path = f"/v2/point/{CENTER_LAT}/{CENTER_LON}/{radius_nm}"
@@ -44,40 +47,38 @@ async def resolve_callsign(hex_id, radius_km):
     if planes is None:
         return None, "feed fetch failed -- see the log lines above"
 
-    hex_id = hex_id.lower()
+    hex_id = hex_id.lower() if hex_id else None
     for p in planes:
-        if p["hex"].lower() == hex_id:
-            cs = p["callsign"]
-            if not cs or routes.is_hex_id(cs):
-                return None, f"{hex_id} is in range but isn't broadcasting a callsign right now"
-            return cs, None
-    return None, (f"{hex_id} not in the current {radius_km:g} km feed around "
+        if (hex_id and p["hex"].lower() == hex_id) or (callsign and p["callsign"] == callsign):
+            if not p["callsign"] or routes.is_hex_id(p["callsign"]):
+                return None, f"{hex_id or callsign} is in range but isn't broadcasting a usable callsign right now"
+            return p, None
+    who = hex_id or callsign
+    return None, (f"{who} not in the current {radius_km:g} km feed around "
                    f"({CENTER_LAT}, {CENTER_LON}) -- try --radius, or check it's airborne")
 
 
-async def lookup_route(callsign):
-    routes.request(callsign)
-    while routes.get(callsign) == "":
+async def lookup_route(plane):
+    routes.request(plane)
+    while routes.get(plane["callsign"]) == "":
         await asyncio.sleep(0.25)
-    return routes.get(callsign)
+    return routes.get(plane["callsign"])
 
 
 async def run(args):
-    if args.hex:
-        callsign, err = await resolve_callsign(args.hex, args.radius)
-        if err:
-            print(err)
-            return 1
-        print(f"hex {args.hex} -> callsign {callsign}")
-    else:
-        callsign = args.callsign.strip()
+    plane, err = await find_plane(
+        args.hex, args.callsign.strip() if args.callsign else None, args.radius)
+    if err:
+        print(err)
+        return 1
 
-    route = await lookup_route(callsign)
+    print(f"{plane['callsign']} (hex {plane['hex']})")
+    route = await lookup_route(plane)
     if route is None:
-        print(f"{callsign}: no route on file for this callsign")
+        print(f"{plane['callsign']}: no route on file for this callsign")
     else:
         origin, dest = route
-        print(f"{callsign}: {origin} -> {dest}")
+        print(f"{plane['callsign']}: {origin} -> {dest}")
     return 0
 
 
@@ -86,12 +87,11 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--hex", metavar="ID",
-                    help="ICAO24 hex id (aka 'hex'/icao24), e.g. 4ca1b2 -- "
-                         "resolved to a live callsign first")
+                    help="ICAO24 hex id (aka 'hex'/icao24), e.g. 4ca1b2")
     g.add_argument("--callsign", metavar="CS",
                     help="flight callsign (aka 'flight'/ident), e.g. BAW123")
     ap.add_argument("--radius", type=float, default=RADIUS_KM,
-                    help="km to search when resolving --hex (default: settings.RADIUS_KM)")
+                    help="km to search the live feed (default: settings.RADIUS_KM)")
     args = ap.parse_args()
 
     if args.hex and not routes.is_hex_id(args.hex):
