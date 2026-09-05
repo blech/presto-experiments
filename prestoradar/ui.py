@@ -47,6 +47,8 @@ class UI:
         self.selected = None      # the selected plane dict, or None
         self.view_cx = WIDTH // 2  # x-pixel that km-east 0 maps to (see radar.py's to_screen)
         self.settings_open = False
+        self._backdrop_dirty = False  # set by set_selected() when view_cx changed; see
+                                       # maybe_rebuild_backdrop()
 
     # --- Tap to inspect (item 2a) -------------------------------------
 
@@ -77,14 +79,30 @@ class UI:
             # Both backdrops are pre-rendered through to_screen()/view_cx, so
             # both need a rebuild on a shift -- the vector cache re-projects
             # its segments; the raster re-decodes onto layer 0 at the new
-            # offset (Backdrop.redraw). That decode is ~380ms (PLAN item 8);
-            # backgrounding it as a task, rather than calling it inline here,
-            # means the ring/panel redraw already queued below isn't held up
-            # by it -- the backdrop just lags the shift by up to a frame,
-            # then self-corrects once the task finishes (REFACTORING.md #4).
-            asyncio.create_task(self._rebuild_backdrop())
+            # offset (Backdrop.redraw). That decode is ~380ms (PLAN item 8):
+            # flagged dirty here, not kicked off directly, so it can't ever
+            # run ahead of the redraw it would otherwise block. radar.py's
+            # _render_loop draws the immediate ring/panel at the (already
+            # updated) view_cx first, *then* calls maybe_rebuild_backdrop()
+            # -- scheduling the task any earlier than that left its actual
+            # start order relative to the render loop's own wake-up down to
+            # asyncio implementation details, which on-device turned out not
+            # to reliably favour the redraw (REFACTORING.md #4).
+            self._backdrop_dirty = True
         if p is not None:
             routes.request(p)
+
+    def maybe_rebuild_backdrop(self):
+        """Called once per frame by radar.py's _render_loop, right after
+        draw_scene() -- i.e. only after the current frame has already been
+        drawn at the current view_cx. Backgrounding the rebuild as a task
+        from here, rather than from set_selected() itself, is what
+        guarantees that ordering: this call is sequenced after draw_scene()
+        in the same uninterrupted turn, so the task's body can't possibly
+        run before this frame's draw does."""
+        if self._backdrop_dirty:
+            self._backdrop_dirty = False
+            asyncio.create_task(self._rebuild_backdrop())
 
     async def _rebuild_backdrop(self):
         if self.backdrop.map_layers:

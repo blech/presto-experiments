@@ -394,8 +394,10 @@ remaining latency is downstream of a successful tap:
 - Hit-testing itself (`handle_tap`'s linear scan over `_last_drawn`,
   ~30-50 entries, at 20 Hz) is not a bottleneck and doesn't need touching.
 
-**Implemented, not yet verified on-device.** All three fixes landed as
-sketched above, post-file-split so this refers to the current module names:
+**Done**, verified on-device: `asyncio.Event` works fine on this firmware,
+menu-tap timing feels right, and the debounce cut to 80 ms hasn't brought
+back spurious double-fires. Landed as sketched above, post-file-split so
+this refers to the current module names:
 
 - `radar.py` owns an `asyncio.Event` (`_redraw`), passed into `ui.UI` as
   `request_redraw`. `_render_loop` now does
@@ -409,20 +411,26 @@ sketched above, post-file-split so this refers to the current module names:
   same reasoning as before (the rising-edge check already does the real
   work), but shortened rather than deleted since there was no way to
   confirm from off-device that spurious double-fires stay gone.
-- `UI.set_selected()` now backgrounds the backdrop rebuild
-  (`asyncio.create_task(self._rebuild_backdrop())`) instead of calling
-  `Backdrop.redraw()`/`build_vector_cache()` inline, so the immediate
-  ring/panel redraw isn't held up by the ~380 ms raster decode; the
-  backdrop lags the shift by up to a frame and self-corrects (calling
-  `request_redraw()` again) once the task finishes.
+- `UI.set_selected()` flags the backdrop dirty (`self._backdrop_dirty =
+  True`) instead of rebuilding it inline or scheduling the task itself.
+  `_render_loop` calls the new `UI.maybe_rebuild_backdrop()` once per frame,
+  right after `draw_scene()` -- only then does it background the rebuild
+  (`asyncio.create_task(self._rebuild_backdrop())`).
 
-This was written without hardware access, so the two things this section
-originally flagged for an on-device check are both still open: whether
-`asyncio.Event` is actually available on this firmware (the rest of the
-app's `asyncio` usage -- `wait_for`, `create_task`, `gather` -- is already
-proven on-device per PLAN item 2's probe and net.py; `Event` specifically
-hasn't been), and whether 80 ms still avoids spurious double-fires, or
-needs to move (either direction) once someone can feel it.
+  **First cut got this wrong.** The original version had `set_selected()`
+  call `asyncio.create_task()` directly, on the reasoning that since
+  `request_redraw()` (which wakes `_render_loop`) always runs earlier in
+  the same `handle_tap()` call than the `create_task()` for the backdrop,
+  a FIFO ready-queue would run the render loop's resumption first. On
+  device this didn't hold: aircraft taps that needed a view shift felt
+  like the old blocking behaviour again (menu taps, which normally don't
+  need a shift, were fine) -- the two tasks' actual start order clearly
+  wasn't the simple queue-order story above. Moving the `create_task()`
+  call from `set_selected()` to a point strictly *after* `draw_scene()` in
+  `_render_loop`'s own body sidesteps the question entirely: within one
+  uninterrupted turn of that loop, the draw is guaranteed to happen before
+  the task is even created, regardless of how the scheduler orders ready
+  tasks afterwards.
 
 ---
 
@@ -551,10 +559,10 @@ the next, the same way PLAN.md's items landed incrementally:
    `geometry.py`, `routes.py`, `feed.py`, `backdrop.py`, `render.py`,
    `ui.py` -- `radar.py` went from 753 lines to 288 across the whole
    sequence, all verified on-device.
-5. **Implemented, not yet verified on-device.** §4's redraw-on-tap and
-   debounce tuning — the one item left from the original split, and the
-   one change that needs on-device feel rather than a log line to judge.
-   §9 (below) is a separate, later proposal -- not part of this ordering.
+5. **Done.** §4's redraw-on-tap and debounce tuning — the one item left
+   from the original split. Verified on-device, including a real bug the
+   initial off-device version got wrong (see §4's write-up). §9 (below) is
+   a separate, later proposal -- not part of this ordering.
 
 ---
 

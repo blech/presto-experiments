@@ -211,6 +211,10 @@ async def _render_loop():
                 log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
                     "ms  basemap", _renderer.basemap_ms, "ms")
 
+            # Only after this frame's own draw -- see maybe_rebuild_backdrop()'s
+            # docstring for why the ordering matters (REFACTORING.md #4).
+            _ui.maybe_rebuild_backdrop()
+
             screenshot.serve_poll(display, presto.presto)
         except Exception as e:  # noqa: BLE001
             log("RENDER ERROR:", repr(e))
