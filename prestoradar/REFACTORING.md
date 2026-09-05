@@ -24,10 +24,10 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 
 **Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
 (theme table) are done and verified on-device. §1 (file split) is
-underway, module by module -- `net.py`, `geometry.py`, `routes.py` and
-`feed.py` are out and verified; `backdrop.py` is out, pending on-device
-verification; `render.py` and `ui.py` are still proposal. §4 (touch
-latency) is still proposal only.
+underway, module by module -- `net.py`, `geometry.py`, `routes.py`,
+`feed.py` and `backdrop.py` are out and verified; `render.py` is out,
+pending on-device verification; `ui.py` is the last piece, still proposal.
+§4 (touch latency) is still proposal only.
 
 ---
 
@@ -91,8 +91,46 @@ Proposed split:
   signature, same cache shape, zero ripple into the panel drawing or touch
   handling that currently sit next to it in radar.py. Also the natural
   place to cap the cache (see §6).
-- **`render.py`** — every `draw_*` function, `plane_pen`, the icon/rotor
-  drawing helpers, and the pens themselves.
+- **`render.py`** — **done**, and the largest single piece of the whole
+  split (every `draw_*` function, `plane_pen`, the icon/rotor drawing
+  helpers, and every pen -- `radar.py` dropped from 753 to 388 lines,
+  `render.py` is 440). A `Renderer` class owns all of it, plus `theme()`
+  (was `_theme()`). As with `Backdrop`, several things it needs still have
+  no stable owner and are taken as method arguments instead of stored:
+  `selected`, `settings_open` and `view_cx` (all UI-driven), and `to_screen`/
+  `hidden` (`_hidden`, injected the same way `Backdrop` takes `to_screen` --
+  `hidden` is also used by radar.py's own selection-repointing, so it isn't
+  Renderer's alone to own). `Renderer` and `Backdrop` also need each other
+  -- `Renderer.theme()` reads `backdrop.showing_raster`, but `Backdrop`'s
+  constructor needs `Renderer`'s pens and its `draw_radar_grid` method.
+  Resolved the same way `_feed.on_update` was: `Renderer` is constructed
+  first with `backdrop` left unset, `Backdrop` is built from pieces off it,
+  then `renderer.backdrop = backdrop` closes the loop.
+
+  One real behavioural question came out of this move, not just relocation:
+  `draw_planes()` used to both draw *and* decide "is the selection still
+  valid" (dismissing it inline if the plane it pointed at had just become
+  hidden). A drawing function silently mutating the selection doesn't
+  belong in `Renderer` -- so that check moved to `_render_loop()` in
+  radar.py, run *before* calling `Renderer.draw_scene()` each frame rather
+  than partway through it. `Renderer.draw_planes()` now only ever draws
+  whatever `selected` it's handed; it never changes it. Net effect on
+  behaviour is a one-frame improvement, not a regression: previously, the
+  exact frame a selection became hidden could show a stale panel/legend
+  state for that one tick (the dismiss happened mid-draw, after the legend
+  visibility was already decided); now the dismiss happens before any of
+  that frame's drawing decisions are made, so they're consistent within the
+  same frame.
+
+  Also worth recording since it's the kind of bug only a cross-file check
+  catches, not `py_compile`: `Backdrop.redraw()`'s vector-grid fallback
+  calls the injected `draw_grid` callback -- which used to be a bare
+  zero-argument `draw_radar_grid()`, but became `Renderer.draw_radar_grid(view_cx,
+  selected)` in this same move. `Backdrop.redraw()`/`load()` gained a
+  `selected` parameter to thread through, or every path that falls back to
+  the vector grid (a missing/corrupt raster, or `DISPLAY_MODE == "radar"`)
+  would have raised `TypeError` on the device. Caught and fixed before
+  presenting this step for on-device testing.
 - **`backdrop.py`** — **done**, and turned out considerably more entangled
   than "only talks to `basemap_data` and `jpegdec`" suggested: `draw_basemap()`
   used pens (`COAST_PEN`/`AIRPORT_PEN`) and its raster-missing fallback called
@@ -437,7 +475,7 @@ prestoradar/
   routes.py      # done: request()/get()/is_hex_id(), adsbdb lookup + cache
   feed.py        # done: Feed (fetch, parse, .run() loop, on_update hook)
   backdrop.py    # done: Backdrop (vector cache + raster layer-0 loading)
-  render.py      # Renderer: pens, theme table, all draw_* 
+  render.py      # done: Renderer (pens, theme table, all draw_*)
   ui.py          # UI: selection, tap handling, settings overlay
   basemap_data.py  # unchanged: generated, gitignored
 ```
@@ -465,6 +503,9 @@ the next, the same way PLAN.md's items landed incrementally:
 4. §1's file split — the big one; do it after 1-3 so there's less state to
    carry across the split, and each new module can be dropped in with the
    old monolith still working as a fallback until the split module is
-   confirmed on-device.
+   confirmed on-device. **Underway, module by module: `net.py`,
+   `geometry.py`, `routes.py`, `feed.py`, `backdrop.py` and `render.py` are
+   done and verified except `render.py` (pending); `ui.py` is the last
+   piece left.**
 5. §4's redraw-on-tap and debounce tuning — do last, since it's the one
    change that needs on-device feel rather than a log line to judge.

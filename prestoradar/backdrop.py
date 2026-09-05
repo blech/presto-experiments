@@ -150,7 +150,7 @@ class Backdrop:
     # presto.update() composites the two. If basemap.jpg is missing, the
     # vector grid is drawn on layer 0 as the fallback.
 
-    def redraw(self, view_cx):
+    def redraw(self, view_cx, selected):
         """(Re)draw layer 0 to match DISPLAY_MODE at the current view shift:
         the raster if "map" (falling back to the vector grid + coastline if
         basemap.jpg is missing or fails to decode), the vector grid +
@@ -169,6 +169,9 @@ class Backdrop:
         both ways, using this same layer-0 redraw either direction. The
         raster path costs one ~380 ms jpegdec decode -- same as the
         panel-shift redraw, only on a mode/selection change, not per frame.
+        `selected` is only needed by the vector-grid fallback/branch below
+        (it's Renderer.draw_radar_grid's own crosshair-clearance argument,
+        passed straight through) -- the raster path itself doesn't use it.
         """
         if not self.map_layers:
             self.showing_raster = False
@@ -191,21 +194,21 @@ class Backdrop:
                       " mem", gc.mem_free())
             except OSError:
                 print("raster basemap:", RASTER_PATH, "missing -- vector grid on layer 0")
-                self.draw_grid()
+                self.draw_grid(view_cx, selected)
                 self.draw_vector()
             except Exception as e:  # noqa: BLE001 -- optional, never fatal
                 print("raster basemap: decode failed:", repr(e), "-- vector grid on layer 0")
-                self.draw_grid()
+                self.draw_grid(view_cx, selected)
                 self.draw_vector()
         else:
             # DISPLAY_MODE == "radar": the same grid + coastline scope mode always
             # draws, just on layer 0 instead of redrawn fresh every frame.
-            self.draw_grid()
+            self.draw_grid(view_cx, selected)
             self.draw_vector()
         self.display.set_layer(1)
 
-    def load(self, view_cx):
+    def load(self, view_cx, selected):
         if not self.raster_ok:
             return
         self.map_layers = True          # committed to the 2-layer composite
-        self.redraw(view_cx)
+        self.redraw(view_cx, selected)

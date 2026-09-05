@@ -1,5 +1,4 @@
 import asyncio
-import math
 import sys
 import network
 import time
@@ -17,6 +16,7 @@ import geometry                         # sibling module: project/compass/alt_ke
 import routes                           # sibling module: route lookup + cache
 import feed                             # sibling module: fetch/parse (feed.Feed)
 import backdrop                         # sibling module: vector cache + raster (backdrop.Backdrop)
+import render                           # sibling module: pens + all draw_* (render.Renderer)
 
 # User-tunable configuration (centre, radius, intervals, flags, ...). Only
 # DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND ever change after boot (the
@@ -105,56 +105,6 @@ display = presto.display
 WIDTH, HEIGHT = 480, 480
 print("radar.py: Presto display ready  (layers=%d)" % (2 if _RASTER_OK else 1))
 
-# Pen Colors (RGB). RADAR_* / MAP_* name the same three roles for each of the
-# two backdrops this can draw over -- the dark scope grid ("radar") and the
-# raster basemap ("map", REFACTORING.md #3) -- so a role and its counterpart
-# read as a pair instead of (as before this rename) one bare name and one
-# MAP_-prefixed name per role.
-BG_COLOR = display.create_pen(10, 20, 10)
-TRANSPARENT_PEN = display.create_pen(0, 0, 0)   # 0x0000 -- see-through on layer 1
-RADAR_ICON_COLOR = display.create_pen(0, 230, 70)   # mono-mode aircraft AND the
-#                                                      grid/crosshair pen (draw_radar_grid)
-#                                                      -- same value on purpose, both read
-#                                                      as "scope green"
-RADAR_TEXT_PEN = display.create_pen(200, 255, 200)
-COAST_PEN = display.create_pen(60, 90, 120)     # muted blue-grey coastline
-AIRPORT_PEN = display.create_pen(150, 130, 170)  # muted violet airport marks
-# RADAR_TEXT_PEN's pale green is tuned for the dark scope background and
-# washes out over the map-mode raster; use this near-black instead there. NOT
-# pure black -- that's TRANSPARENT_PEN's value (0x0000) on layer 1, which
-# layer 0 (the map) would show through instead of drawing over.
-MAP_TEXT_PEN = display.create_pen(20, 20, 20)
-# No separate raster mono-aircraft colour exists yet -- mono mode over the
-# raster just reuses MAP_TEXT_PEN. Named on its own anyway so a future "give
-# mono-on-raster its own colour" is a one-line change here, not another pass
-# through plane_pen().
-MAP_ICON_COLOR = MAP_TEXT_PEN
-
-# Vertical-state colours: level / cruising, climbing (departing), descending
-# (approaching). Keyed by the "vstate" string feed.py's Feed sets per plane.
-RADAR_VSTATE_PENS = {
-    "level": display.create_pen(235, 235, 235),   # white
-    "climb": display.create_pen(60, 200, 255),    # cyan
-    "descent": display.create_pen(255, 160, 40),  # amber
-}
-# In map mode, "level"'s near-white washes out over light map colours the same
-# way RADAR_TEXT_PEN did -- swap it for MAP_TEXT_PEN there (see THEMES below).
-# climb/descent stay put: cyan and amber read fine on the basemap styles
-# tried so far.
-MAP_VSTATE_PENS = dict(RADAR_VSTATE_PENS, level=MAP_TEXT_PEN)
-
-# What's actually behind the drawing decides which pens to use -- keyed by
-# _backdrop.showing_raster (whether the raster backdrop is actually showing),
-# NOT by DISPLAY_MODE: the vector-grid fallback when a raster fails to decode
-# is still the dark "radar" look even while DISPLAY_MODE == "map". See _theme().
-THEMES = {
-    "radar": {"text": RADAR_TEXT_PEN, "icon": RADAR_ICON_COLOR, "vstate": RADAR_VSTATE_PENS},
-    "map":   {"text": MAP_TEXT_PEN,   "icon": MAP_ICON_COLOR,   "vstate": MAP_VSTATE_PENS},
-}
-
-def _theme():
-    return THEMES["map"] if _backdrop.showing_raster else THEMES["radar"]
-
 # Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
 # selected aircraft.
 PANEL_X = 256                                      # sidebar spans PANEL_X..WIDTH (~224 px)
@@ -162,123 +112,7 @@ PANEL_X = 256                                      # sidebar spans PANEL_X..WIDT
 # width while the sidebar is open so the visible radar re-centres in what's left;
 # the basemap cache is rebuilt on change since its segments are pre-projected.
 _view_cx = WIDTH // 2
-PANEL_BG = display.create_pen(16, 26, 16)
-PANEL_BORDER = display.create_pen(0, 150, 50)
-PANEL_LABEL = display.create_pen(192, 192, 192)    # row labels, dimmer than values
-SELECT_PEN = display.create_pen(255, 235, 90)      # ring: distinct from vstate pens
-EMERG_PEN = display.create_pen(255, 70, 70)
 HIT_RADIUS = 26                                    # px; generous finger target
-
-# Panel text stays on the bitmap font. Tried on this firmware and rejected:
-#   - PicoVector + Roboto-Medium.af (e49dede): NotImplementedError: opcode
-#   - PicoGraphics "sans" vector font (9edd5c4): renders as a scribble of strokes
-def _ptext(s, x, y_top, size, pen):
-    # One line of panel text, top-left at (x, y_top); size is a pixel height
-    # mapped to the nearest bitmap8 integer scale.
-    display.set_pen(pen)
-    display.text(str(s), x, y_top, WIDTH - x - 2, max(1, size // 8))
-
-def draw_track_arrow(x, y, heading_deg, speed_kt, pen):
-    # heading_deg is degrees clockwise from north (the aircraft's track over the
-    # ground). Screen y grows downwards, so north maps to -y.
-    a = math.radians(heading_deg)
-    dx, dy = math.sin(a), -math.cos(a)
-    length = min(60, max(12, speed_kt * 0.15))  # ~knots -> pixels, clamped
-    tip_x, tip_y = int(x + dx * length), int(y + dy * length)
-    display.set_pen(pen)
-    display.line(int(x), int(y), tip_x, tip_y)
-    # Arrowhead: two short barbs splayed back from the tip.
-    for barb_deg in (heading_deg + 148, heading_deg - 148):
-        b = math.radians(barb_deg)
-        display.line(tip_x, tip_y,
-                     int(tip_x + math.sin(b) * 7), int(tip_y - math.cos(b) * 7))
-
-# Top-down airliner for "map" mode. Local coords: +x = right wing, +y = nose;
-# ~14 px nose-to-tail. Every wing/tailplane root overlaps the fuselage quad, so
-# the shape stays connected at any rotation. Convex triangles -- display.polygon()
-# only fills convex reliably, display.triangle() is always exact.
-_ICON_TRIS = (
-    (-1.5, -6.0), (1.5, -6.0), (1.5, 5.5),     # fuselage
-    (-1.5, -6.0), (1.5, 5.5), (-1.5, 5.5),
-    (-1.5, 5.5), (1.5, 5.5), (0.0, 7.5),       # nose
-    (1.4, 2.6), (1.4, -3.0), (8.8, -1.8),      # right wing (~30 deg sweep)
-    (-1.4, 2.6), (-1.4, -3.0), (-8.8, -1.8),   # left wing
-    (1.5, -3.5), (1.5, -6.0), (3.8, -7.0),     # right tailplane
-    (-1.5, -3.5), (-1.5, -6.0), (-3.8, -7.0),  # left tailplane
-)
-
-def _icon_pass(x, y, ca, sa, scale):
-    # Fill the icon's triangles at the current pen, rotated by (ca, sa) =
-    # (cos, sin) of the heading and multiplied by `scale`. Caller sets the pen.
-    t = _ICON_TRIS
-    for i in range(0, len(t), 3):
-        (ax, ay), (bx, by), (cx, cy) = t[i], t[i + 1], t[i + 2]
-        display.triangle(
-            int(x + (ax * ca + ay * sa) * scale), int(y + (ax * sa - ay * ca) * scale),
-            int(x + (bx * ca + by * sa) * scale), int(y + (bx * sa - by * ca) * scale),
-            int(x + (cx * ca + cy * sa) * scale), int(y + (cx * sa - cy * ca) * scale),
-        )
-
-# Emitter-category (ADS-B "category") -> fixed-wing icon scale. A1 light .. A5
-# heavy; anything not listed (incl. not broadcast) draws at 1.0.
-_CAT_SCALE = {"A1": 0.72, "A2": 0.88, "A3": 1.0, "A4": 1.2, "A5": 1.35}
-
-def _draw_rotor(x, y, heading_deg, scale):
-    # Top-down helicopter for category A7: hub, a tail boom pointing aft, and a
-    # two-blade rotor set 45 degrees off the heading so it doesn't read as a
-    # fixed wing. Caller has set the pen.
-    display.circle(x, y, max(2, int(2 * scale)))
-    ba = math.radians(heading_deg + 180)
-    boom = int(8 * scale)
-    display.line(x, y, int(x + math.sin(ba) * boom), int(y - math.cos(ba) * boom))
-    blade = int(7 * scale)
-    for off in (45, 135):
-        a = math.radians(heading_deg + off)
-        bx, by = math.sin(a) * blade, -math.cos(a) * blade
-        display.line(int(x - bx), int(y - by), int(x + bx), int(y + by))
-
-def ring(cx, cy, r, thickness=3):
-    # PicoGraphics circles are filled, so draw an outline as an outer disc with
-    # a background-coloured disc punched out of the middle.
-    display.set_pen(RADAR_ICON_COLOR)
-    display.circle(cx, cy, r)
-    display.set_pen(BG_COLOR)
-    display.circle(cx, cy, r - thickness)
-
-def draw_radar_grid():
-    display.set_pen(BG_COLOR)
-    display.clear()
-    # Concentric rings at RADIUS_KM and half that
-    ring(_view_cx, 240, int(RADIUS_KM * PX_PER_KM))
-    ring(_view_cx, 240, int(RADIUS_KM * 0.5 * PX_PER_KM))
-    # Crosshairs -- stop the horizontal one at the sidebar when it's open
-    x_right = PANEL_X - 4 if _selected is not None else WIDTH - 10
-    display.set_pen(RADAR_ICON_COLOR)
-    display.line(_view_cx, 10, _view_cx, 470)
-    display.line(10, 240, x_right, 240)
-
-# The vector basemap cache (coastline/airports, Cohen-Sutherland clipped) and
-# the raster backdrop (PLAN item 8, jpegdec onto layer 0) both live in
-# backdrop.py now (REFACTORING.md #1). view_cx isn't owned there -- it's
-# UI-owned state that still lives here until ui.py exists -- so every
-# Backdrop method that needs it (build_vector_cache() doesn't; redraw()/
-# load() do) takes it as an argument. draw_radar_grid, similarly, is
-# injected rather than owned by Backdrop: it's a rendering concern (pens,
-# not basemap data) that stays here until render.py exists.
-_backdrop = backdrop.Backdrop(display, SETTINGS, _RASTER_OK, DRAW_BASEMAP, basemap_data,
-                               to_screen, draw_radar_grid, BG_COLOR, COAST_PEN, AIRPORT_PEN)
-
-def show_message(text):
-    display.set_pen(BG_COLOR)
-    display.clear()
-    display.set_pen(RADAR_TEXT_PEN)
-    display.text(f"{text}", 5, 10, WIDTH, 2)
-    presto.update()
-
-
-# --- Tap to inspect (item 2a) --------------------------------------------------
-_selected = None          # the selected plane dict, or None
-_last_drawn = []           # [(x, y, plane), ...] from the last draw_planes()
 
 # Shifting the view while the sidebar is open used to be a flat offset, which
 # was wrong for anything except a plane that started near centre: already clear
@@ -299,6 +133,43 @@ _PANEL_MARGIN = 20                    # clearance kept between the plane and PAN
 # lesser failure.
 _MAX_SHIFT = 112
 _MIN_VIEW_CX = WIDTH // 2 - _MAX_SHIFT
+
+# --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
+_settings_open = False
+SETTINGS_BTN = (WIDTH - 40, HEIGHT - 36, 36, 32)      # x, y, w, h  (bottom-right)
+_SPANEL = (WIDTH - 288, HEIGHT - 172, 284, 168)       # x, y, w, h  (~60% wide;
+#                                                       right/bottom edges kept
+#                                                       inside 0..479 so their
+#                                                       border lines draw)
+_SP_ROW0 = _SPANEL[1] + 44                            # top y of the first value row
+_SP_ROWH = 30
+_SP_VALDX = 120                                       # value column, px from label x
+
+def _hidden(p):
+    # Applied at draw time, not fetch time, so toggling HIDE_ON_GROUND takes
+    # effect on the next redraw (<= ANIM_INTERVAL) instead of the next fetch
+    # (<= FETCH_INTERVAL_MS). Same condition feed.py's _fetch() used to filter
+    # with (REFACTORING.md #5). Lives here, not render.py: also used by
+    # _on_feed_update()'s selection re-pointing, which isn't a rendering
+    # concern.
+    return SETTINGS.HIDE_ON_GROUND and (p["alt"] in (0, "ground") or p["gs"] == 0)
+
+# All pens and every draw_* routine live in render.py now (REFACTORING.md #1).
+# Renderer needs Backdrop (for showing_raster) but Backdrop's constructor needs
+# Renderer's pens and its draw_radar_grid method -- so Renderer is built first
+# with backdrop left unset, Backdrop is built using pieces off it, then
+# Renderer.backdrop is assigned. Same two-phase pattern as _feed.on_update.
+_renderer = render.Renderer(display, presto, SETTINGS, _feed, to_screen, _hidden,
+                             RADIUS_KM, PX_PER_KM, PANEL_X, SETTINGS_BTN, _SPANEL,
+                             _SP_ROW0, _SP_ROWH, _SP_VALDX)
+_backdrop = backdrop.Backdrop(display, SETTINGS, _RASTER_OK, DRAW_BASEMAP, basemap_data,
+                               to_screen, _renderer.draw_radar_grid,
+                               _renderer.BG_COLOR, _renderer.COAST_PEN, _renderer.AIRPORT_PEN)
+_renderer.backdrop = _backdrop
+
+
+# --- Tap to inspect (item 2a) --------------------------------------------------
+_selected = None          # the selected plane dict, or None
 
 
 def _target_view_cx(p):
@@ -328,23 +199,12 @@ def _set_selected(p):
         # need a rebuild on a shift -- the vector cache re-projects its segments;
         # the raster re-decodes onto layer 0 at the new offset (Backdrop.redraw).
         if _backdrop.map_layers:
-            _backdrop.redraw(_view_cx)
+            _backdrop.redraw(_view_cx, _selected)
         else:
             _backdrop.build_vector_cache()
     if p is not None:
         routes.request(p["callsign"])
 
-
-# --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
-_settings_open = False
-SETTINGS_BTN = (WIDTH - 40, HEIGHT - 36, 36, 32)      # x, y, w, h  (bottom-right)
-_SPANEL = (WIDTH - 288, HEIGHT - 172, 284, 168)       # x, y, w, h  (~60% wide;
-#                                                       right/bottom edges kept
-#                                                       inside 0..479 so their
-#                                                       border lines draw)
-_SP_ROW0 = _SPANEL[1] + 44                            # top y of the first value row
-_SP_ROWH = 30
-_SP_VALDX = 120                                       # value column, px from label x
 
 def _in_rect(px, py, r):
     return r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]
@@ -355,12 +215,12 @@ def _toggle_setting(row):
     # new value immediately (see the Settings class docstring above).
     if row == 0:
         SETTINGS.DISPLAY_MODE = "radar" if SETTINGS.DISPLAY_MODE == "map" else "map"
-        # Aircraft icons already follow DISPLAY_MODE every frame (draw_planes());
+        # Aircraft icons already follow DISPLAY_MODE every frame (Renderer.draw_planes());
         # the backdrop is a static layer-0 draw and needs telling explicitly.
         # Only takes effect if we booted with 2 layers (a "map" boot) -- toggling
         # *into* "map" from a "radar" boot still can't get the raster, since
         # there's no layer 0 to draw it onto (PLAN item 8, "Runtime toggle").
-        _backdrop.redraw(_view_cx)
+        _backdrop.redraw(_view_cx, _selected)
     elif row == 1:
         SETTINGS.COLOUR_MODE = "mono" if SETTINGS.COLOUR_MODE == "alt" else "alt"
     elif row == 2:
@@ -393,93 +253,18 @@ def handle_tap(tx, ty):
     if _selected is not None and tx >= PANEL_X:
         return
     best, best_d = None, HIT_RADIUS * HIT_RADIUS
-    for x, y, p in _last_drawn:
+    for x, y, p in _renderer.last_drawn:
         d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
         if d < best_d:
             best, best_d = p, d
     _set_selected(best)          # None => tapped empty space => dismiss
 
 
-def draw_legend_alt():
-    # Over the raster, RADAR_VSTATE_PENS' pale "level" dot and RADAR_TEXT_PEN's
-    # pale green both lose contrast against light map colours; the "map" theme
-    # swaps both (same pens plane_pen() draws aircraft with, so the legend
-    # still matches), plus a dark halo behind each dot. _theme() keys off
-    # _showing_raster, not map_layers/DISPLAY_MODE: what's actually behind
-    # this is what decides contrast, and the raster can be unavailable even in
-    # "map" mode (see Backdrop.redraw()'s fallback).
-    theme = _theme()
-    for i, (state, label) in enumerate((("level", "level"),
-                                        ("climb", "climb"),
-                                        ("descent", "descent"))):
-        row_y = 414 + i * 20
-        if _backdrop.showing_raster:
-            display.set_pen(theme["text"])
-            display.circle(14, row_y + 6, 4)      # halo so a light dot still reads
-        display.set_pen(theme["vstate"][state])
-        display.circle(14, row_y + 6, 3)
-        display.set_pen(theme["text"])
-        display.text(label, 24, row_y, WIDTH, 2)
-
-
-_basemap_ms = 0
-
-def plane_pen(p):
-    # Pen for an aircraft mark under the current COLOUR_MODE, themed by
-    # _theme() the same way draw_legend_alt() is. "mono" keeps the scope look
-    # (everything RADAR_ICON_COLOR) -- except that reads fine on a dark scope
-    # but washes out on the raster, so the "map" theme's icon colour instead.
-    # "alt" colours by vertical state -- the "map" theme's vstate pens while
-    # the raster backdrop is actually showing, so a "level" aircraft isn't
-    # drawn in the same washed-out white the legend fix moved away from.
-    # Extra schemes go here.
-    theme = _theme()
-    if SETTINGS.COLOUR_MODE == "alt":
-        return theme["vstate"][p["vstate"]]
-    return theme["icon"]
-
-def _draw_planes_radar(order):
-    # Scope style: blip, track arrow, callsign tag.
-    for x, y, p in order:
-        pen = plane_pen(p)
-        display.set_pen(pen)
-        display.circle(x, y, 3)
-        if p["heading"] is not None and p["gs"] > 20:
-            draw_track_arrow(x, y, p["heading"], p["gs"], pen)
-        display.set_pen(RADAR_TEXT_PEN)
-        display.text(p["callsign"], x + 8, y - 8, WIDTH, 2)
-
-def _draw_planes_map(order):
-    # Map style: an icon along the track, no label; a plain blip when there's no
-    # usable heading. Shape/size come from the ADS-B emitter category -- A7 is a
-    # helicopter, A1..A5 scale the fixed-wing icon light..heavy. Nearest is drawn
-    # last (order is pre-sorted) so a dense in-trail stream reads as an
-    # overlapping line rather than a pile of text.
-    for x, y, p in order:
-        display.set_pen(plane_pen(p))
-        heading = p["heading"]
-        if heading is None or p["gs"] <= 20:
-            display.circle(x, y, 3)
-            continue
-        cat = p["cat"]
-        if cat == "A7":
-            _draw_rotor(x, y, heading, 1.0)
-        else:
-            a = math.radians(heading)
-            _icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
-
-def _hidden(p):
-    # Applied at draw time, not fetch time, so toggling HIDE_ON_GROUND takes
-    # effect on the next redraw (<= ANIM_INTERVAL) instead of the next fetch
-    # (<= FETCH_INTERVAL_MS). Same condition feed.py's _fetch() used to filter
-    # with (REFACTORING.md #5).
-    return SETTINGS.HIDE_ON_GROUND and (p["alt"] in (0, "ground") or p["gs"] == 0)
-
 def _on_feed_update(fresh):
     # _feed.on_update: called with the fresh list after every successful
     # fetch. Re-point the selection at the same aircraft in it, or clear it
     # (and un-shift the view) if that aircraft has dropped off -- or is now
-    # hidden by HIDE_ON_GROUND (draw_planes() would clear it on the next
+    # hidden by HIDE_ON_GROUND (_render_loop() would clear it on the next
     # redraw anyway; doing it here skips that one extra tick of a stale
     # selection).
     if _selected is not None:
@@ -487,163 +272,6 @@ def _on_feed_update(fresh):
         _set_selected(next((q for q in fresh if q["hex"] == h and not _hidden(q)), None))
 
 _feed.on_update = _on_feed_update
-
-def draw_planes(planes):
-    global _last_drawn
-    # Lowest altitude first, so where two overlap the higher aircraft is drawn on
-    # top -- it's the one nearer the viewer looking down.
-    order = []
-    for p in sorted(planes, key=geometry.alt_key):
-        if _hidden(p):
-            continue
-        x, y = to_screen(p["e"], p["n"])
-        if -40 <= x <= 520 and -40 <= y <= 520:
-            order.append((x, y, p))
-    (_draw_planes_map if SETTINGS.DISPLAY_MODE == "map" else _draw_planes_radar)(order)
-    _last_drawn = order
-
-    if _selected is not None and _hidden(_selected):
-        # The selection just became hidden -- it landed while HIDE_ON_GROUND
-        # was on, or the setting was flipped on while it was already on the
-        # ground. Dismiss rather than leave the panel open with no ring/dot
-        # on-screen to match it.
-        _set_selected(None)
-
-    # Ring the selected aircraft, on top of everything. Outer/inner discs make an
-    # outline; kept small (r 7) so it doesn't reach the callsign tag at (x+8, y-8).
-    for x, y, p in order:
-        if p is _selected:
-            display.set_pen(SELECT_PEN)
-            display.circle(x, y, 7)
-            display.set_pen(BG_COLOR)
-            display.circle(x, y, 5)
-            display.set_pen(plane_pen(p))
-            display.circle(x, y, 3)   # put the marker back inside the ring
-            break
-
-_VAL_DX = 96   # value column: px from the label's x, clears the widest label
-
-def _fmt_alt(alt):
-    if alt in (0, "ground"):
-        return "ground"
-    return "%sft" % alt
-
-def _fmt_route(cs):
-    rc = routes.get(cs)
-    if rc == "":
-        return "..."
-    if isinstance(rc, tuple):
-        return "%s-%s" % rc
-    if cs and not routes.is_hex_id(cs):
-        return "unknown"
-    return "-"
-
-def draw_panel(p):
-    display.set_pen(PANEL_BG)
-    display.rectangle(PANEL_X, 0, WIDTH - PANEL_X, HEIGHT)
-    display.set_pen(PANEL_BORDER)
-    display.line(PANEL_X, 0, PANEL_X, HEIGHT)
-
-    tx = PANEL_X + 8
-    vx = tx + _VAL_DX
-    rh = 22
-    y = 8
-
-    _ptext(p["callsign"] or p["hex"] or "?", tx, y, 16, RADAR_TEXT_PEN)
-    y += 28
-
-    em = p["emergency"]
-    if em and em != "none":
-        _ptext("! " + str(em).upper(), tx, y, 16, EMERG_PEN)
-        y += rh
-
-    hdg = p["heading"]
-    vr = p["vrate"]
-    rows = (
-        ("REG", p["reg"] or "-"),
-        ("TYPE", p["type"] or "-"),
-        ("RTE", _fmt_route((p["callsign"] or "").strip())),
-        ("ALT", _fmt_alt(p["alt"])),
-        ("VS", ("%+d" % vr) if vr else "level"),
-        ("SPEED", "%d kt" % (p["gs"] or 0)),
-        ("TRACK", ("%d" % round(hdg)) if hdg is not None else "-"),
-        ("DIST", ("%dnm %s" % (round(p["dst"]), geometry.compass(p["dir"])))
-                 if p["dst"] is not None else "-"),
-        ("SQWK", p["squawk"] or "-"),
-        ("ICAO", (p["hex"] or "-").upper()),
-    )
-    for label, value in rows:
-        _ptext(label, tx, y, 16, PANEL_LABEL)
-        _ptext(value, vx, y, 16, RADAR_TEXT_PEN)
-        y += rh
-
-def _status_text(planes):
-    if _feed.fetch_count == 0:
-        return "Connecting..."          # nothing fetched yet
-    # `planes` (== _feed.planes) holds every fetched aircraft, ground-hidden
-    # ones included (see _hidden(), REFACTORING.md #5) -- count only what's
-    # actually shown, same as what draw_planes() puts on-screen.
-    visible = sum(1 for p in planes if not _hidden(p))
-    if not _feed.fetch_ok:               # last fetch failed -- planes may be stale
-        return ("Aircraft: %d (stale)" % visible) if planes else "Fetch failed"
-    return "Aircraft: %d" % visible  # 0 is legitimate: a quiet sky
-
-def draw_settings_btn():
-    bx, by, bw, bh = SETTINGS_BTN
-    display.set_pen(PANEL_BG)
-    display.rectangle(bx, by, bw, bh)
-    display.set_pen(PANEL_BORDER)
-    for i in range(3):                    # hamburger glyph
-        ly = by + 10 + i * 6
-        display.line(bx + 8, ly, bx + bw - 8, ly)
-
-def draw_settings_panel():
-    px, py, pw, ph = _SPANEL
-    display.set_pen(PANEL_BG)
-    display.rectangle(px, py, pw, ph)
-    display.set_pen(PANEL_BORDER)
-    display.line(px, py, px + pw, py)
-    display.line(px, py + ph, px + pw, py + ph)
-    display.line(px, py, px, py + ph)
-    display.line(px + pw, py, px + pw, py + ph)
-
-    _ptext("SETTINGS", px + 10, py + 10, 16, RADAR_TEXT_PEN)
-    display.set_pen(PANEL_BORDER)
-    display.line(px + 8, py + 36, px + pw - 8, py + 36)
-
-    rows = (("mode", SETTINGS.DISPLAY_MODE),
-            ("colour", SETTINGS.COLOUR_MODE),
-            ("ground", "hide" if SETTINGS.HIDE_ON_GROUND else "show"))
-    y = _SP_ROW0
-    for label, value in rows:
-        _ptext(label, px + 10, y, 16, PANEL_LABEL)
-        _ptext(str(value).upper(), px + 10 + _SP_VALDX, y, 16, RADAR_TEXT_PEN)
-        y += _SP_ROWH
-    _ptext("tap away to close", px + 10, y + 6, 8, PANEL_LABEL)
-
-def draw_scene(planes):
-    global _basemap_ms
-    t = time.ticks_ms()
-    if _backdrop.map_layers:
-        display.set_layer(1)             # aircraft layer; layer 0 holds the backdrop
-        display.set_pen(TRANSPARENT_PEN)
-        display.clear()
-    else:
-        draw_radar_grid()                 # clears + draws the scope grid
-        _backdrop.draw_vector()
-    _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
-    display.set_pen(_theme()["text"])
-    display.text(_status_text(planes), 5, 10, WIDTH, 2)
-    if SETTINGS.COLOUR_MODE == "alt" and _selected is None:
-        draw_legend_alt()
-    draw_planes(planes)
-    if _selected is not None:
-        draw_panel(_selected)
-    elif not _settings_open:
-        draw_settings_btn()
-    if _settings_open:
-        draw_settings_panel()
-    presto.update()
 
 
 async def _render_loop():
@@ -661,12 +289,19 @@ async def _render_loop():
                 p["e"] += p["ve"] * dt
                 p["n"] += p["vn"] * dt
 
+            if _selected is not None and _hidden(_selected):
+                # The selection just became hidden -- it landed while
+                # HIDE_ON_GROUND was on, or the setting was flipped on while
+                # it was already on the ground. Dismiss rather than hand the
+                # renderer a selection it would just skip drawing a ring for.
+                _set_selected(None)
+
             t = time.ticks_ms()
-            draw_scene(_feed.planes)
+            _renderer.draw_scene(_feed.planes, _selected, _settings_open, _view_cx)
             frame += 1
             if frame <= 3 or frame % 20 == 0:
                 log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
-                    "ms  basemap", _basemap_ms, "ms")
+                    "ms  basemap", _renderer.basemap_ms, "ms")
 
             screenshot.serve_poll(display, presto.presto)
         except Exception as e:  # noqa: BLE001
@@ -704,7 +339,7 @@ def main():
     print("main: start  display:", SETTINGS.DISPLAY_MODE, " colour:", SETTINGS.COLOUR_MODE)
 
     _backdrop.build_vector_cache()
-    _backdrop.load(_view_cx)
+    _backdrop.load(_view_cx, _selected)
     print("main: basemap cache:", len(_backdrop.segs or ()), "segments,",
           len(_backdrop.marks), "marks; map layers",
           "on" if _backdrop.map_layers else "off")
@@ -714,20 +349,20 @@ def main():
         frame = 0
         while True:
             t = time.ticks_ms()
-            draw_scene([])
+            _renderer.draw_scene([], _selected, _settings_open, _view_cx)
             frame += 1
             print("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
-                  "ms  basemap", _basemap_ms, "ms")
+                  "ms  basemap", _renderer.basemap_ms, "ms")
             time.sleep(1)
 
-    show_message("Connecting...")
+    _renderer.show_message("Connecting...")
 
     try:
         wifi = presto.connect()
     except Exception as e:  # noqa: BLE001
         print("main: connect failed:", repr(e))
         while True:
-            show_message("WiFi: %s" % e)
+            _renderer.show_message("WiFi: %s" % e)
             time.sleep(3)
 
     log_init()
