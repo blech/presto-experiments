@@ -1,5 +1,4 @@
 import asyncio
-import gc
 import math
 import sys
 import network
@@ -17,6 +16,7 @@ import net                              # sibling module: async HTTPS GET (net.h
 import geometry                         # sibling module: project/compass/alt_key
 import routes                           # sibling module: route lookup + cache
 import feed                             # sibling module: fetch/parse (feed.Feed)
+import backdrop                         # sibling module: vector cache + raster (backdrop.Backdrop)
 
 # User-tunable configuration (centre, radius, intervals, flags, ...). Only
 # DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND ever change after boot (the
@@ -144,16 +144,16 @@ RADAR_VSTATE_PENS = {
 MAP_VSTATE_PENS = dict(RADAR_VSTATE_PENS, level=MAP_TEXT_PEN)
 
 # What's actually behind the drawing decides which pens to use -- keyed by
-# _showing_raster (whether the raster backdrop is actually showing), NOT by
-# DISPLAY_MODE: the vector-grid fallback when a raster fails to decode is
-# still the dark "radar" look even while DISPLAY_MODE == "map". See _theme().
+# _backdrop.showing_raster (whether the raster backdrop is actually showing),
+# NOT by DISPLAY_MODE: the vector-grid fallback when a raster fails to decode
+# is still the dark "radar" look even while DISPLAY_MODE == "map". See _theme().
 THEMES = {
     "radar": {"text": RADAR_TEXT_PEN, "icon": RADAR_ICON_COLOR, "vstate": RADAR_VSTATE_PENS},
     "map":   {"text": MAP_TEXT_PEN,   "icon": MAP_ICON_COLOR,   "vstate": MAP_VSTATE_PENS},
 }
 
 def _theme():
-    return THEMES["map"] if _showing_raster else THEMES["radar"]
+    return THEMES["map"] if _backdrop.showing_raster else THEMES["radar"]
 
 # Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
 # selected aircraft.
@@ -257,181 +257,16 @@ def draw_radar_grid():
     display.line(_view_cx, 10, _view_cx, 470)
     display.line(10, 240, x_right, 240)
 
-# Cohen-Sutherland: clip a segment to [0, WIDTH) x [0, HEIGHT) before it reaches
-# display.line(). The coastline rings run out to a 50 km clip box (~+/-620 px),
-# and feeding coordinates that far off-screen into the graphics library is the
-# suspected cause of the freeze.
-_L, _R, _B, _T = 1, 2, 4, 8
-
-def _outcode(x, y):
-    c = 0
-    if x < 0:
-        c |= _L
-    elif x > WIDTH - 1:
-        c |= _R
-    if y < 0:
-        c |= _B
-    elif y > HEIGHT - 1:
-        c |= _T
-    return c
-
-def _clip_segment(x0, y0, x1, y1):
-    c0, c1 = _outcode(x0, y0), _outcode(x1, y1)
-    while True:
-        if not (c0 | c1):
-            return x0, y0, x1, y1
-        if c0 & c1:
-            return None
-        c = c0 or c1
-        if c & _T:
-            x = x0 + (x1 - x0) * (HEIGHT - 1 - y0) / (y1 - y0)
-            y = HEIGHT - 1
-        elif c & _B:
-            x = x0 + (x1 - x0) * (0 - y0) / (y1 - y0)
-            y = 0
-        elif c & _R:
-            y = y0 + (y1 - y0) * (WIDTH - 1 - x0) / (x1 - x0)
-            x = WIDTH - 1
-        else:
-            y = y0 + (y1 - y0) * (0 - x0) / (x1 - x0)
-            x = 0
-        if c == c0:
-            x0, y0, c0 = x, y, _outcode(x, y)
-        else:
-            x1, y1, c1 = x, y, _outcode(x, y)
-
-# The basemap never changes shape at runtime -- fixed centre, fixed projection --
-# so project and viewport-clip every coastline/lake segment ONCE, at import, into
-# screen-space integer endpoints. draw_basemap() then just replays a list of
-# display.line() calls: no float maths, no Cohen-Sutherland per segment, and
-# off-screen geometry has already been discarded. Doing this every frame (the
-# NYC coastline alone is ~1800 vertices) was the bulk of the per-frame draw cost
-# at ANIM_INTERVAL.
-_BASEMAP_SEGS = None   # [(x0, y0, x1, y1), ...] ints, clipped to the viewport
-_BASEMAP_MARKS = ()    # [(x, y, name), ...] airports inside the viewport
-
-def _cache_rings(rings, out):
-    for r in rings:
-        px, py = to_screen(*r[0])
-        for point in r[1:]:
-            cx, cy = to_screen(*point)
-            seg = _clip_segment(px, py, cx, cy)
-            if seg is not None:
-                out.append((int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3])))
-            px, py = cx, cy
-
-def build_basemap_cache():
-    global _BASEMAP_SEGS, _BASEMAP_MARKS
-    try:
-        if basemap_data is None:
-            _BASEMAP_SEGS = []
-            return
-        segs = []
-        _cache_rings(basemap_data.COASTLINE, segs)
-        _cache_rings(getattr(basemap_data, "LAKES", ()), segs)
-        marks = []
-        for name, e, n in getattr(basemap_data, "AIRPORTS", ()):
-            x, y = to_screen(e, n)
-            if 0 <= x < WIDTH and 0 <= y < HEIGHT:
-                marks.append((x, y, name))
-        _BASEMAP_SEGS, _BASEMAP_MARKS = segs, marks
-    except Exception as e:  # noqa: BLE001 -- the basemap is optional, don't die for it
-        print("build_basemap_cache failed:", repr(e))
-        _BASEMAP_SEGS = []
-    gc.collect()
-
-def draw_basemap():
-    if not DRAW_BASEMAP or not _BASEMAP_SEGS:
-        return
-    display.set_pen(COAST_PEN)
-    for s in _BASEMAP_SEGS:
-        display.line(s[0], s[1], s[2], s[3])
-    if _BASEMAP_MARKS:
-        display.set_pen(AIRPORT_PEN)
-        for x, y, name in _BASEMAP_MARKS:
-            display.circle(x, y, 3)
-            display.text(name, x + 5, y - 4, WIDTH, 1)
-
-# --- Raster basemap (PLAN item 8) -------------------------------------------
-# In map mode a pre-rendered 480x480 backdrop stands in for the vector grid.
-# make_basemap.py --raster bakes prestoradar/basemap.jpg in the same
-# kilometres-east/north frame to_screen() projects into, radar_deploy.sh copies
-# it, and here jpegdec decodes it onto layer 0. draw_scene() then just clears
-# layer 1 and draws the aircraft; presto.update() composites the two. If
-# basemap.jpg is missing, the vector grid is drawn on layer 0 as the fallback.
-RASTER_PATH = "/prestoradar/basemap.jpg"
-_map_layers = False    # True once boot committed to the 2-layer composite (fixed
-#                         at boot -- whether layer 0 exists at all, not what's on it)
-_showing_raster = False    # True only while layer 0 currently holds the decoded
-#                             raster. Tracks what _draw_map_backdrop() actually put
-#                             there (can lag DISPLAY_MODE if the raster is missing
-#                             or fails to decode) -- plane_pen(), draw_legend_alt()
-#                             and draw_scene()'s status line read this, not
-#                             _map_layers or DISPLAY_MODE, to pick contrast-
-#                             appropriate pens for whatever is actually behind them.
-
-def _draw_map_backdrop():
-    """(Re)draw layer 0 to match DISPLAY_MODE at the current view shift: the
-    raster if "map" (falling back to the vector grid + coastline if
-    basemap.jpg is missing or fails to decode), the vector grid + coastline if
-    "radar" -- the same two components draw_scene()'s non-2-layer path draws
-    every frame, so toggling between modes restores the *whole* look, not just
-    the grid. Called once at boot, again from _set_selected() whenever
-    _view_cx changes (the detail panel opening/closing, or the shift adjusting
-    to keep the selected plane clear of it -- see _target_view_cx()), and again
-    from _toggle_setting() when DISPLAY_MODE itself changes, so the backdrop
-    actually follows the on-device toggle instead of only the aircraft icons
-    and pens. Only meaningful once the boot layer count is 2 (_map_layers) --
-    that's fixed by DISPLAY_MODE *at boot*, so toggling into "map" from a
-    "radar" boot still can't get the raster (no layer 0 to draw it onto);
-    toggling between them after a "map" boot works both ways, using this same
-    layer-0 redraw either direction. The raster path costs one ~380 ms jpegdec
-    decode -- same as the panel-shift redraw, only on a mode/selection change,
-    not per frame. offset_x is 0 unshifted, negative (image slides left) once a
-    plane needs clearing; _MIN_VIEW_CX keeps the gap that opens on the right
-    inside the panel's own footprint (PANEL_X..WIDTH), so the panel painting
-    over it on layer 1 every frame covers it -- no separate fill needed here."""
-    global _showing_raster
-    if not _map_layers:
-        _showing_raster = False
-        return
-    offset_x = _view_cx - WIDTH // 2
-    display.set_layer(0)
-    display.set_pen(BG_COLOR)
-    display.clear()
-    _showing_raster = False
-    if SETTINGS.DISPLAY_MODE == "map":
-        try:
-            import jpegdec
-            j = jpegdec.JPEG(display)
-            j.open_file(RASTER_PATH)
-            j.decode(offset_x, 0, jpegdec.JPEG_SCALE_FULL)
-            j = None
-            gc.collect()
-            _showing_raster = True
-            print("raster basemap: layer 0 <-", RASTER_PATH, " offset_x", offset_x,
-                  " mem", gc.mem_free())
-        except OSError:
-            print("raster basemap:", RASTER_PATH, "missing -- vector grid on layer 0")
-            draw_radar_grid()
-            draw_basemap()
-        except Exception as e:  # noqa: BLE001 -- optional, never fatal
-            print("raster basemap: decode failed:", repr(e), "-- vector grid on layer 0")
-            draw_radar_grid()
-            draw_basemap()
-    else:
-        # DISPLAY_MODE == "radar": the same grid + coastline scope mode always
-        # draws, just on layer 0 instead of redrawn fresh every frame.
-        draw_radar_grid()
-        draw_basemap()
-    display.set_layer(1)
-
-def load_raster_basemap():
-    global _map_layers
-    if not _RASTER_OK:
-        return
-    _map_layers = True                 # committed to the 2-layer composite
-    _draw_map_backdrop()
+# The vector basemap cache (coastline/airports, Cohen-Sutherland clipped) and
+# the raster backdrop (PLAN item 8, jpegdec onto layer 0) both live in
+# backdrop.py now (REFACTORING.md #1). view_cx isn't owned there -- it's
+# UI-owned state that still lives here until ui.py exists -- so every
+# Backdrop method that needs it (build_vector_cache() doesn't; redraw()/
+# load() do) takes it as an argument. draw_radar_grid, similarly, is
+# injected rather than owned by Backdrop: it's a rendering concern (pens,
+# not basemap data) that stays here until render.py exists.
+_backdrop = backdrop.Backdrop(display, SETTINGS, _RASTER_OK, DRAW_BASEMAP, basemap_data,
+                               to_screen, draw_radar_grid, BG_COLOR, COAST_PEN, AIRPORT_PEN)
 
 def show_message(text):
     display.set_pen(BG_COLOR)
@@ -491,11 +326,11 @@ def _set_selected(p):
         _view_cx = cx
         # Both backdrops are pre-rendered through to_screen()/_view_cx, so both
         # need a rebuild on a shift -- the vector cache re-projects its segments;
-        # the raster re-decodes onto layer 0 at the new offset (_draw_map_backdrop).
-        if _map_layers:
-            _draw_map_backdrop()
+        # the raster re-decodes onto layer 0 at the new offset (Backdrop.redraw).
+        if _backdrop.map_layers:
+            _backdrop.redraw(_view_cx)
         else:
-            build_basemap_cache()
+            _backdrop.build_vector_cache()
     if p is not None:
         routes.request(p["callsign"])
 
@@ -525,7 +360,7 @@ def _toggle_setting(row):
         # Only takes effect if we booted with 2 layers (a "map" boot) -- toggling
         # *into* "map" from a "radar" boot still can't get the raster, since
         # there's no layer 0 to draw it onto (PLAN item 8, "Runtime toggle").
-        _draw_map_backdrop()
+        _backdrop.redraw(_view_cx)
     elif row == 1:
         SETTINGS.COLOUR_MODE = "mono" if SETTINGS.COLOUR_MODE == "alt" else "alt"
     elif row == 2:
@@ -570,15 +405,15 @@ def draw_legend_alt():
     # pale green both lose contrast against light map colours; the "map" theme
     # swaps both (same pens plane_pen() draws aircraft with, so the legend
     # still matches), plus a dark halo behind each dot. _theme() keys off
-    # _showing_raster, not _map_layers/DISPLAY_MODE: what's actually behind
+    # _showing_raster, not map_layers/DISPLAY_MODE: what's actually behind
     # this is what decides contrast, and the raster can be unavailable even in
-    # "map" mode (see _draw_map_backdrop()'s fallback).
+    # "map" mode (see Backdrop.redraw()'s fallback).
     theme = _theme()
     for i, (state, label) in enumerate((("level", "level"),
                                         ("climb", "climb"),
                                         ("descent", "descent"))):
         row_y = 414 + i * 20
-        if _showing_raster:
+        if _backdrop.showing_raster:
             display.set_pen(theme["text"])
             display.circle(14, row_y + 6, 4)      # halo so a light dot still reads
         display.set_pen(theme["vstate"][state])
@@ -789,13 +624,13 @@ def draw_settings_panel():
 def draw_scene(planes):
     global _basemap_ms
     t = time.ticks_ms()
-    if _map_layers:
+    if _backdrop.map_layers:
         display.set_layer(1)             # aircraft layer; layer 0 holds the backdrop
         display.set_pen(TRANSPARENT_PEN)
         display.clear()
     else:
         draw_radar_grid()                 # clears + draws the scope grid
-        draw_basemap()
+        _backdrop.draw_vector()
     _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
     display.set_pen(_theme()["text"])
     display.text(_status_text(planes), 5, 10, WIDTH, 2)
@@ -868,11 +703,11 @@ async def _amain():
 def main():
     print("main: start  display:", SETTINGS.DISPLAY_MODE, " colour:", SETTINGS.COLOUR_MODE)
 
-    build_basemap_cache()
-    load_raster_basemap()
-    print("main: basemap cache:", len(_BASEMAP_SEGS or ()), "segments,",
-          len(_BASEMAP_MARKS), "marks; map layers",
-          "on" if _map_layers else "off")
+    _backdrop.build_vector_cache()
+    _backdrop.load(_view_cx)
+    print("main: basemap cache:", len(_backdrop.segs or ()), "segments,",
+          len(_backdrop.marks), "marks; map layers",
+          "on" if _backdrop.map_layers else "off")
 
     if SKIP_NETWORK:
         print("main: SKIP_NETWORK -- drawing grid + basemap only")
@@ -902,8 +737,8 @@ def main():
     if basemap_data is not None:
         log("basemap rings", len(basemap_data.COASTLINE),
             "airports", len(getattr(basemap_data, "AIRPORTS", ())),
-            "cached segs", len(_BASEMAP_SEGS or ()), "marks", len(_BASEMAP_MARKS))
-    log("map layers", "on" if _map_layers else "off")
+            "cached segs", len(_backdrop.segs or ()), "marks", len(_backdrop.marks))
+    log("map layers", "on" if _backdrop.map_layers else "off")
 
     try:
         ip = network.WLAN(network.STA_IF).ifconfig()[0]

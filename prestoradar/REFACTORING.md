@@ -24,9 +24,9 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 
 **Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
 (theme table) are done and verified on-device. §1 (file split) is
-underway, module by module -- `net.py`, `geometry.py` and `routes.py` are
-out and verified; `feed.py` is out, pending on-device verification;
-`backdrop.py`, `render.py` and `ui.py` are still proposal. §4 (touch
+underway, module by module -- `net.py`, `geometry.py`, `routes.py` and
+`feed.py` are out and verified; `backdrop.py` is out, pending on-device
+verification; `render.py` and `ui.py` are still proposal. §4 (touch
 latency) is still proposal only.
 
 ---
@@ -93,11 +93,33 @@ Proposed split:
   place to cap the cache (see §6).
 - **`render.py`** — every `draw_*` function, `plane_pen`, the icon/rotor
   drawing helpers, and the pens themselves.
-- **`backdrop.py`** — the basemap subsystem: `build_basemap_cache`,
-  `draw_basemap`, `load_raster_basemap`, `_draw_map_backdrop` (269-401).
-  This is already fairly self-contained (only talks to `basemap_data` and
-  `jpegdec`), it just currently reaches into radar.py's `_view_cx`/
-  `_map_layers`/`_showing_raster` globals directly.
+- **`backdrop.py`** — **done**, and turned out considerably more entangled
+  than "only talks to `basemap_data` and `jpegdec`" suggested: `draw_basemap()`
+  used pens (`COAST_PEN`/`AIRPORT_PEN`) and its raster-missing fallback called
+  `draw_radar_grid()` directly, `build_basemap_cache()` called `to_screen()`
+  (which reads `_view_cx`), and `_draw_map_backdrop()` read `SETTINGS.DISPLAY_MODE`
+  live. A `Backdrop` class now owns `map_layers`/`showing_raster`/the vector
+  segment+mark cache and exposes `build_vector_cache()` / `draw_vector()`
+  (was `build_basemap_cache`/`draw_basemap`) and `load(view_cx)` /
+  `redraw(view_cx)` (was `load_raster_basemap`/`_draw_map_backdrop`).
+  Two things it deliberately does *not* own, both injected at construction
+  instead, following the same precedent §1's `to_screen`/`_target_view_cx`
+  already set (leave state with no home yet where it is, don't force a move
+  that just relocates the coupling):
+  - **`view_cx`** stays a plain `radar.py` global -- it's UI-driven state
+    (the panel opening/shifting), so every `Backdrop` method that needs it
+    (`load`/`redraw`; `build_vector_cache()` doesn't, it goes through the
+    injected `to_screen` instead) takes it as an argument rather than
+    storing it.
+  - **`draw_grid`** (the rings/crosshairs) is injected as a callback --
+    it's a rendering concern (pens, no basemap data), so `Backdrop` calls
+    it rather than owning it, staying put until `render.py` exists.
+  `Backdrop` takes `settings` (for live `DISPLAY_MODE`), the boot-time
+  `raster_ok`/`draw_basemap_flag` decisions, `basemap_data`, and three pens,
+  all as constructor arguments -- no import of `radar.py`, so no
+  circularity. `WIDTH`/`HEIGHT` (480, fixed for this hardware) and
+  `RASTER_PATH` are plain module constants in `backdrop.py` itself, same as
+  they were literals in `radar.py`.
 - **`ui.py`** — touch + selection + settings overlay: `handle_tap`,
   `_set_selected`, `_settings_tap`, `_toggle_setting`, `_target_view_cx`
   (585-714).
@@ -414,7 +436,7 @@ prestoradar/
   geometry.py    # done: project, compass, alt_key (to_screen stays in radar.py for now)
   routes.py      # done: request()/get()/is_hex_id(), adsbdb lookup + cache
   feed.py        # done: Feed (fetch, parse, .run() loop, on_update hook)
-  backdrop.py    # Backdrop: vector cache + raster layer-0 loading
+  backdrop.py    # done: Backdrop (vector cache + raster layer-0 loading)
   render.py      # Renderer: pens, theme table, all draw_* 
   ui.py          # UI: selection, tap handling, settings overlay
   basemap_data.py  # unchanged: generated, gitignored
