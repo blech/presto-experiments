@@ -1,5 +1,7 @@
 import gc
 
+from netlog import log
+
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
 RASTER_PATH = "/prestoradar/basemap.jpg"
 
@@ -202,15 +204,35 @@ class Backdrop:
                       " mem", gc.mem_free())
             except OSError:
                 print("raster basemap:", RASTER_PATH, "missing -- vector grid on layer 0")
+                log("ui: updating coast vector")
+                self.build_vector_cache()
+                log("ui: coast vector updated")
                 self.draw_grid(view_cx, selected)
                 self.draw_vector()
             except Exception as e:  # noqa: BLE001 -- optional, never fatal
                 print("raster basemap: decode failed:", repr(e), "-- vector grid on layer 0")
+                log("ui: updating coast vector")
+                self.build_vector_cache()
+                log("ui: coast vector updated")
                 self.draw_grid(view_cx, selected)
                 self.draw_vector()
         else:
             # DISPLAY_MODE == "radar": the same grid + coastline scope mode always
             # draws, just on layer 0 instead of redrawn fresh every frame.
+            # build_vector_cache() has to run here too, not just in the
+            # map_layers=False path (ui.py's UI._rebuild_backdrop()) -- without
+            # it, draw_vector() below just replays segs from whichever
+            # view_cx build_vector_cache() last ran at (boot, or whenever
+            # DISPLAY_MODE last flipped away from "radar"), so the coastline
+            # would never actually follow a shift here even though draw_grid()
+            # (given view_cx directly) correctly does. This is almost
+            # certainly the "reticle moves, coastline doesn't" bug seen
+            # on-device -- this code path, not the map_layers=False one
+            # REFACTORING.md #4 originally fixed, is what a map-capable boot
+            # toggled to "radar" mode actually runs.
+            log("ui: updating coast vector")
+            self.build_vector_cache()
+            log("ui: coast vector updated")
             self.draw_grid(view_cx, selected)
             self.draw_vector()
         self.display.set_layer(1)

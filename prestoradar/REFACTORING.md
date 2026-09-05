@@ -449,6 +449,27 @@ this refers to the current module names:
   positioning goes through `to_screen()`, which reads the live value
   directly and was never affected).
 
+  **Third on-device finding: the previous fix targeted the wrong code path
+  for a map-capable boot.** `vector_view_cx` only matters when
+  `Backdrop.map_layers` is `False` -- a boot with no raster at all. A boot
+  *with* raster capability (`map_layers=True`) that's toggled to "radar"
+  mode at runtime never goes near `draw_scene()`'s single-layer branch; it
+  runs `Backdrop.redraw()`'s own `else` branch instead (`draw_grid()` then
+  `draw_vector()`, onto layer 0, once per shift rather than every frame).
+  Diagnostic logging (added on request, bracketing each backdrop piece with
+  "updating X"/"X updated") caught the real bug there: that branch calls
+  `draw_grid(view_cx, ...)` with the live, current `view_cx`, but
+  `draw_vector()` just replays `self.segs` from whatever `view_cx`
+  `build_vector_cache()` last ran at -- which, on this path, was *only ever
+  boot* (`radar.py`'s `main()`), since nothing in `redraw()` itself
+  refreshed it. So the reticle always followed a shift correctly and the
+  coastline never did, on every device with raster capability regardless of
+  which mode it's currently showing -- not a race or an ordering bug at
+  all, just a missing call. Fixed by calling `build_vector_cache()` inside
+  `redraw()`'s vector-fallback branches (the "radar" mode branch, and the
+  two "raster failed/missing" fallback branches within "map" mode, which
+  had the identical gap) before `draw_vector()` runs.
+
   **`_MAX_SHIFT` raised from 112 to the theoretical 224, to retest.** The
   112 cap dated from before `UI._target_view_cx()` -- and its `int()` cast
   on every returned `view_cx` -- existed; the original diagnosis ("jpegdec
