@@ -599,3 +599,12 @@ flicker. The 240x240 fallback was not needed.
 - **Attribution.** `--raster-fetch` prints the required Esri/OSM credit line but
   nothing shows it on-device -- fine for a personal desk display, would need a
   small always-on label if this were ever shared or shipped.
+
+---
+
+Scratch notes
+
+* Add '--run' option to radar_deploy.sh to call `mpremote run --no-follow ...`
+* Add brightness control (slider?) to settings - particularly for map mode
+* Fix map not being available when starting in radar mode
+* Disable LEDs option (settings.py only at first?)
