@@ -25,9 +25,9 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 **Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
 (theme table) are done and verified on-device. §1 (file split) is
 **complete** -- `net.py`, `geometry.py`, `routes.py`, `feed.py`,
-`backdrop.py` and `render.py` are out and verified; `ui.py` is out,
-pending on-device verification (the last piece). §4 (touch latency) is
-the only item left, still proposal only.
+`backdrop.py`, `render.py` and `ui.py` are all out and verified. §4 (touch
+latency) is still proposal only. §9 (persistent aircraft identity + trail
+history) is a new proposal, not part of the original split.
 
 ---
 
@@ -514,12 +514,181 @@ the next, the same way PLAN.md's items landed incrementally:
    -- the toggle can't reach the raster from a `"radar"` boot at all, a
    pre-existing hardware constraint unrelated to this step; see PLAN.md
    item 8 and `_draw_map_backdrop()`'s docstring).
-4. **Done** (`ui.py` pending on-device verification). §1's file split — the
-   big one; did it after 1-3 so there's less state to carry across the
-   split, and each new module was dropped in with the old monolith still
-   working as a fallback until confirmed on-device. Landed module by
-   module in this order: `net.py`, `geometry.py`, `routes.py`, `feed.py`,
-   `backdrop.py`, `render.py`, `ui.py` -- `radar.py` went from 753 lines to
-   288 across the whole sequence.
-5. §4's redraw-on-tap and debounce tuning — the one item left, and the one
-   change that needs on-device feel rather than a log line to judge.
+4. **Done.** §1's file split — the big one; did it after 1-3 so there's
+   less state to carry across the split, and each new module was dropped
+   in with the old monolith still working as a fallback until confirmed
+   on-device. Landed module by module in this order: `net.py`,
+   `geometry.py`, `routes.py`, `feed.py`, `backdrop.py`, `render.py`,
+   `ui.py` -- `radar.py` went from 753 lines to 288 across the whole
+   sequence, all verified on-device.
+5. §4's redraw-on-tap and debounce tuning — the one item left from the
+   original split, and the one change that needs on-device feel rather
+   than a log line to judge. §9 (below) is a separate, later proposal --
+   not part of this ordering.
+
+---
+
+## 9. Persistent aircraft identity (trail history + route caching)
+
+**Not started — proposal only.** Prompted by a design question rather than
+a code smell: `feed.py`'s `Feed._fetch()` throws away the entire plane
+list and rebuilds it from scratch every fetch (every `FETCH_INTERVAL_MS`,
+30 s) -- "the same aircraft" across two fetches is only ever a coincidence
+of matching `hex` strings between two otherwise-unrelated dicts, never an
+actual persistent identity. That's fine for what the radar draws today
+(position, heading, a detail panel), but it rules out two things a
+standard flight-tracking UI is expected to have:
+
+- **A trail** (the aircraft's recent track, drawn as a fading line behind
+  it) — needs *some* memory of where the aircraft was a minute ago, which
+  a rebuilt-every-fetch dict fundamentally can't hold.
+- **A natural home for the resolved route** — today `routes.py` keeps its
+  own cache keyed by callsign, entirely decoupled from the plane's own
+  (nonexistent) lifetime. Works, but "look up this plane's route" and
+  "remember this plane's route" are two different concerns living in two
+  different places for no reason other than the plane itself never
+  persists long enough to remember anything.
+
+### The core change: a registry, not a list
+
+`Feed` needs to hold a `dict` of `hex -> Plane`, updated in place each
+fetch, instead of discarding and rebuilding `self.planes` wholesale:
+
+- A `hex` already in the registry gets its live fields refreshed (position,
+  velocity, heading, altitude, vstate, ...) on the *same* object, and a new
+  point appended to its trail.
+- A `hex` not in the registry gets a new `Plane` created.
+- A `hex` in the registry but **absent from the fresh fetch** gets
+  dropped. This eviction step isn't optional polish -- skip it and the
+  registry leaks one entry per aircraft ever seen for the life of the
+  process, which over a multi-day run is a real, unbounded memory leak
+  (ADS-B coverage near any airport sees far more distinct aircraft over a
+  day than are ever visible at once). A held-for-one-missed-fetch grace
+  period (to tolerate a single transient API hiccup without an aircraft's
+  trail visibly resetting) is a reasonable later refinement, not needed
+  for a first cut -- today's code already treats a single missed detection
+  as "gone", so keeping that behaviour is the lower-risk starting point.
+- `self.planes` stays around as `list(self._registry.values())`, rebuilt
+  each fetch, so everything downstream that already iterates "the current
+  plane list" keeps working unchanged in shape.
+
+**A nice side effect, not the goal:** `UI.on_feed_update()`'s re-pointing
+dance (`next((q for q in fresh if q["hex"] == h and not hidden(q)), None)`)
+exists *only* because the selected plane's dict is replaced every fetch.
+Once `_ui.selected` can hold a direct reference to a `Plane` that `Feed`
+updates in place rather than replaces, that search becomes unnecessary --
+`on_feed_update()` only needs to check whether the registry *still
+contains* the selected aircraft's `hex` (i.e. whether it just got evicted)
+and dismiss if not.
+
+### Dict vs. object -- correcting what I told you last turn
+
+I said a class would be more memory-frugal than a dict "with `__slots__`."
+That's wrong for this device specifically, and worth being precise about
+before writing any code: **MicroPython does not implement `__slots__`** --
+an old prototype PR exists but was abandoned, and no current release
+supports it ([MicroPython discussion #13745](https://github.com/orgs/micropython/discussions/13745)).
+Declaring `__slots__` in a class body on this firmware doesn't raise, but
+it also doesn't restrict anything -- every instance still carries the same
+general-purpose attribute storage a class without `__slots__` would, which
+is the same shape of overhead a dict has. So on this specific MicroPython
+build, **a class and a dict cost roughly the same per instance** -- there
+is no memory argument for switching, in either direction.
+
+That said, memory isn't the deciding factor either way here: PLAN.md item
+8 already measured `gc.mem_free()` at ~8 MB at boot (the heap lives in
+PSRAM), and a bounded trail (a `collections.deque` per plane, MicroPython's
+`deque` takes `maxlen` as a required constructor argument and silently
+drops the oldest point once full -- no manual trimming needed) of say 10-15
+points costs a few hundred bytes total across every visible aircraft.
+Noise against 8 MB, dict or object.
+
+**The actual case for a class is behavioural, not memory:** once a `Plane`
+persists across fetches, it wants *methods* -- `record_position(e, n)`
+(append to the trail), maybe `is_hex_id`-style helpers, potentially
+`resolve_route()` if route caching moves onto the object (see below) --
+and a dict has nowhere natural to put those without a parallel set of free
+functions in `feed.py` operating on `dict` arguments, which is exactly the
+shape of code this whole refactor has been moving away from. `plane.e`
+reading better than `plane["e"]` is a real but secondary benefit.
+
+### Scope of the change
+
+Every consumer of a plane currently uses dict-subscript access and needs
+the mechanical switch to attribute access:
+
+- `feed.py` — `Feed._fetch()` restructures into "parse the raw list, then
+  update/create/evict against the registry" rather than "build a list".
+- `geometry.py` — `alt_key(p)` reads `p["alt"]` -> `p.alt`.
+- `render.py` — every place a plane dict is read: `_draw_planes_radar`/
+  `_draw_planes_map`, `plane_pen`, `draw_panel`, `_status_text` (via the
+  injected `hidden` callback's expectations), `draw_planes` itself (also
+  gains the trail-drawing pass, see below).
+- `radar.py` — `_hidden(p)` reads `p["alt"]`/`p["gs"]`.
+- `ui.py` — `set_selected`/`on_feed_update`/`handle_tap` read
+  `p["callsign"]`/`p["hex"]`, plus `on_feed_update`'s simplification above.
+
+Mechanical, but touches every module the split just created -- same shape
+of change as the split itself, so the same one-step-at-a-time,
+verify-on-device approach applies.
+
+### Where `Plane` lives
+
+Proposed: defined in `feed.py` itself, next to `Feed` -- it's intimately
+tied to `Feed`'s parsing/registry logic and small enough that a dedicated
+module would be one file for one class. Revisit only if it grows enough
+(e.g. picks up real behaviour beyond field storage + trail) to want tests
+independent of `Feed`.
+
+### Trail rendering
+
+A new pass in `Renderer.draw_planes()` (or a dedicated method it calls):
+for each visible plane, `to_screen()` every point in `plane.trail` (plus
+its current position) and draw a polyline through them, before drawing the
+aircraft mark itself so the mark sits on top. Open questions to settle
+while implementing, not before:
+
+- **Which theme/pen.** A dim, desaturated line reads as "history" against
+  either backdrop; whether it should be a fixed muted colour or themed
+  (dark-on-raster vs light-on-scope, same axis as everything else in §3)
+  is worth a quick on-device look rather than guessing.
+- **Both display modes, or just `"map"`?** A trail behind a FR24-style icon
+  is the obvious case; whether it also reads well behind the scope's
+  blip-and-arrow style in `"radar"` mode is worth checking rather than
+  assuming either way.
+- **A `TRAIL_LENGTH` setting** (0 disables it entirely) fits the existing
+  `settings.py` convention for display tunables (`DRAW_BASEMAP`,
+  `HIDE_ON_GROUND`, ...).
+
+### Route caching on the object -- optional, and worth deferring
+
+The original question also asked about route lookups specifically.
+`routes.py`'s cache is keyed by **callsign** (what the adsbdb API takes),
+while `Plane` identity is keyed by **hex** (the ICAO24 address, the
+aircraft's actual persistent identity) -- deliberately different axes,
+since a route is a property of a *flight* (one callsign), not of the
+*airframe* (one hex) that might fly many different callsigns across its
+life. Within one radar session that distinction rarely matters in
+practice, so caching the resolved route as `plane.route` (populated via
+`routes.py`'s existing `request()`/`get()`, invalidated if `plane.callsign`
+ever changes) is a reasonable convenience once `Plane` exists -- but
+`routes.py`'s current callsign-keyed cache already works correctly and
+doesn't *need* to change just because `Plane` does. Land the registry +
+trail first; fold route caching onto the object afterwards only if
+`Renderer.draw_panel()`/`_fmt_route()` reading `plane.route` directly
+turns out to actually simplify anything over calling `routes.get(cs)` as
+now.
+
+### Suggested order
+
+1. `Plane` class + registry in `Feed`, with the mechanical dict-to-attribute
+   rename across `geometry.py`/`render.py`/`radar.py`/`ui.py`. No trail, no
+   behaviour change yet -- verify the app looks and behaves identically
+   before adding anything new.
+2. Trail recording: `plane.trail` populated on each registry update (one
+   point per real fetch, not per dead-reckon tick -- recording the
+   ~0.5 s-interpolated positions would blow the trail length budget for no
+   visual benefit over recording the real ~30 s-apart fetched positions).
+3. Trail rendering in `Renderer`, behind a `TRAIL_LENGTH` setting.
+4. Optional: route caching moves onto `plane.route`, only if it turns out
+   to actually simplify the panel-drawing code once tried.
