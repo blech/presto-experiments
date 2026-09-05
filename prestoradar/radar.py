@@ -11,25 +11,23 @@ from presto import Presto
 if "/prestoradar" not in sys.path:
     sys.path.insert(0, "/prestoradar")
 
-import net                              # sibling module: async HTTPS GET (net.http_get)
-import geometry                         # sibling module: project/compass/alt_key
-import routes                           # sibling module: route lookup + cache
 import feed                             # sibling module: fetch/parse (feed.Feed)
 import backdrop                         # sibling module: vector cache + raster (backdrop.Backdrop)
 import render                           # sibling module: pens + all draw_* (render.Renderer)
+import ui                               # sibling module: touch/selection/settings (ui.UI)
 
 # User-tunable configuration (centre, radius, intervals, flags, ...). Only
 # DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND ever change after boot (the
-# on-device settings overlay, _toggle_setting() below) -- everything else
+# on-device settings overlay, ui.UI.toggle_setting()) -- everything else
 # here is read once at import time and stays a plain module-level name.
 import settings as _settings_module
 from settings import *  # noqa: F401,F403
 
 
 class Settings:
-    """The runtime-mutable slice of settings.py. `_toggle_setting()` mutates
-    attributes on this one instance (`SETTINGS.DISPLAY_MODE = ...`) instead of
-    `global DISPLAY_MODE`, so any code holding a reference to SETTINGS --
+    """The runtime-mutable slice of settings.py. `ui.UI.toggle_setting()`
+    mutates attributes on this one instance (`SETTINGS.DISPLAY_MODE = ...`)
+    instead of `global DISPLAY_MODE`, so any code holding a reference to SETTINGS --
     including, eventually, a module that doesn't do its own `from settings
     import *` -- sees a toggle immediately rather than a copy frozen at its
     own import time. See REFACTORING.md #2."""
@@ -83,10 +81,13 @@ def log_init():
 
 
 def to_screen(east_km, north_km):
-    # Metric frame -> 480x480 pixels; north is up. _view_cx is the x-pixel that
-    # km-east 0 maps to -- screen centre normally, shifted left while the detail
-    # sidebar is open (see _set_selected).
-    return int(_view_cx + east_km * PX_PER_KM), int(240 - north_km * PX_PER_KM)
+    # Metric frame -> 480x480 pixels; north is up. _ui.view_cx is the x-pixel
+    # that km-east 0 maps to -- screen centre normally, shifted left while
+    # the detail sidebar is open (see ui.UI.set_selected). _ui doesn't exist
+    # yet at this point in the file (it's built after _renderer/_backdrop,
+    # which this function is itself injected into) but by the time this is
+    # actually called -- during rendering, well after boot -- it does.
+    return int(_ui.view_cx + east_km * PX_PER_KM), int(240 - north_km * PX_PER_KM)
 
 print("radar.py: importing done, basemap =", "loaded" if basemap_data else "none")
 
@@ -106,19 +107,18 @@ WIDTH, HEIGHT = 480, 480
 print("radar.py: Presto display ready  (layers=%d)" % (2 if _RASTER_OK else 1))
 
 # Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
-# selected aircraft.
+# selected aircraft. view_cx (the x-pixel that km-east 0 maps to, see
+# to_screen) is ui.UI instance state -- shifted left while the sidebar is
+# open so the visible radar re-centres in what's left; the basemap cache is
+# rebuilt on change since its segments are pre-projected.
 PANEL_X = 256                                      # sidebar spans PANEL_X..WIDTH (~224 px)
-# x-pixel that km-east 0 maps to (see to_screen). Shifts left by half the panel
-# width while the sidebar is open so the visible radar re-centres in what's left;
-# the basemap cache is rebuilt on change since its segments are pre-projected.
-_view_cx = WIDTH // 2
 HIT_RADIUS = 26                                    # px; generous finger target
 
 # Shifting the view while the sidebar is open used to be a flat offset, which
 # was wrong for anything except a plane that started near centre: already clear
 # of the panel, it got shifted anyway (risking the left edge); already under
-# where the panel lands, it often stayed there. _target_view_cx() instead shifts
-# left only as far as the *selected* plane needs to clear the panel.
+# where the panel lands, it often stayed there. UI._target_view_cx() instead
+# shifts left only as far as the *selected* plane needs to clear the panel.
 _PANEL_MARGIN = 20                    # clearance kept between the plane and PANEL_X
 # How far left the view is ever allowed to shift. The raster only strictly
 # needs offset_x >= PANEL_X - WIDTH (so the map-mode backdrop -- one 480px
@@ -135,7 +135,6 @@ _MAX_SHIFT = 112
 _MIN_VIEW_CX = WIDTH // 2 - _MAX_SHIFT
 
 # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
-_settings_open = False
 SETTINGS_BTN = (WIDTH - 40, HEIGHT - 36, 36, 32)      # x, y, w, h  (bottom-right)
 _SPANEL = (WIDTH - 288, HEIGHT - 172, 284, 168)       # x, y, w, h  (~60% wide;
 #                                                       right/bottom edges kept
@@ -149,15 +148,16 @@ def _hidden(p):
     # Applied at draw time, not fetch time, so toggling HIDE_ON_GROUND takes
     # effect on the next redraw (<= ANIM_INTERVAL) instead of the next fetch
     # (<= FETCH_INTERVAL_MS). Same condition feed.py's _fetch() used to filter
-    # with (REFACTORING.md #5). Lives here, not render.py: also used by
-    # _on_feed_update()'s selection re-pointing, which isn't a rendering
-    # concern.
+    # with (REFACTORING.md #5). Lives here, not render.py or ui.py: it's used
+    # by both (Renderer's draw-time filter, UI's selection re-pointing) and
+    # neither owns the underlying settings check.
     return SETTINGS.HIDE_ON_GROUND and (p["alt"] in (0, "ground") or p["gs"] == 0)
 
-# All pens and every draw_* routine live in render.py now (REFACTORING.md #1).
-# Renderer needs Backdrop (for showing_raster) but Backdrop's constructor needs
-# Renderer's pens and its draw_radar_grid method -- so Renderer is built first
-# with backdrop left unset, Backdrop is built using pieces off it, then
+# All pens and every draw_* routine live in render.py; the vector cache and
+# raster backdrop live in backdrop.py (REFACTORING.md #1). Renderer needs
+# Backdrop (for showing_raster) but Backdrop's constructor needs Renderer's
+# pens and its draw_radar_grid method -- so Renderer is built first with
+# backdrop left unset, Backdrop is built using pieces off it, then
 # Renderer.backdrop is assigned. Same two-phase pattern as _feed.on_update.
 _renderer = render.Renderer(display, presto, SETTINGS, _feed, to_screen, _hidden,
                              RADIUS_KM, PX_PER_KM, PANEL_X, SETTINGS_BTN, _SPANEL,
@@ -167,111 +167,16 @@ _backdrop = backdrop.Backdrop(display, SETTINGS, _RASTER_OK, DRAW_BASEMAP, basem
                                _renderer.BG_COLOR, _renderer.COAST_PEN, _renderer.AIRPORT_PEN)
 _renderer.backdrop = _backdrop
 
-
-# --- Tap to inspect (item 2a) --------------------------------------------------
-_selected = None          # the selected plane dict, or None
-
-
-def _target_view_cx(p):
-    """Where _view_cx should sit for the current selection p (or None). Shifts
-    left only as far as needed to bring p to _PANEL_MARGIN clear of PANEL_X --
-    zero shift if it's already clear, so a plane that didn't need moving is
-    never pushed off the left edge by an unneeded shift -- then clamps to
-    _MIN_VIEW_CX (see above) so an extreme-edge plane can't ask jpegdec for
-    more shift than is known to work. Always returns an int: _view_cx feeds
-    jpegdec.decode()'s offset_x (and, via the vector-grid fallback,
-    display.circle()/line()) uncast, and p["e"] * PX_PER_KM is a float."""
-    if p is None:
-        return WIDTH // 2
-    x0 = WIDTH // 2 + p["e"] * PX_PER_KM        # p's unshifted screen x
-    wanted = WIDTH // 2 - max(0, x0 - (PANEL_X - _PANEL_MARGIN))
-    return int(max(wanted, _MIN_VIEW_CX))
-
-def _set_selected(p):
-    # Select p (or None to dismiss), shift the view just enough to keep p clear
-    # of the panel, and kick a route lookup.
-    global _selected, _view_cx
-    _selected = p
-    cx = _target_view_cx(p)
-    if cx != _view_cx:
-        _view_cx = cx
-        # Both backdrops are pre-rendered through to_screen()/_view_cx, so both
-        # need a rebuild on a shift -- the vector cache re-projects its segments;
-        # the raster re-decodes onto layer 0 at the new offset (Backdrop.redraw).
-        if _backdrop.map_layers:
-            _backdrop.redraw(_view_cx, _selected)
-        else:
-            _backdrop.build_vector_cache()
-    if p is not None:
-        routes.request(p["callsign"])
-
-
-def _in_rect(px, py, r):
-    return r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]
-
-def _toggle_setting(row):
-    # Mutate SETTINGS in place rather than `global`-reassigning a name --
-    # anything holding a reference to SETTINGS (not just this module) sees the
-    # new value immediately (see the Settings class docstring above).
-    if row == 0:
-        SETTINGS.DISPLAY_MODE = "radar" if SETTINGS.DISPLAY_MODE == "map" else "map"
-        # Aircraft icons already follow DISPLAY_MODE every frame (Renderer.draw_planes());
-        # the backdrop is a static layer-0 draw and needs telling explicitly.
-        # Only takes effect if we booted with 2 layers (a "map" boot) -- toggling
-        # *into* "map" from a "radar" boot still can't get the raster, since
-        # there's no layer 0 to draw it onto (PLAN item 8, "Runtime toggle").
-        _backdrop.redraw(_view_cx, _selected)
-    elif row == 1:
-        SETTINGS.COLOUR_MODE = "mono" if SETTINGS.COLOUR_MODE == "alt" else "alt"
-    elif row == 2:
-        SETTINGS.HIDE_ON_GROUND = 0 if SETTINGS.HIDE_ON_GROUND else 1  # takes effect next redraw
-    log("settings:", SETTINGS.DISPLAY_MODE, SETTINGS.COLOUR_MODE,
-        "ground", "hide" if SETTINGS.HIDE_ON_GROUND else "show")
-
-def _settings_tap(tx, ty):
-    global _settings_open
-    if not _in_rect(tx, ty, _SPANEL):
-        _settings_open = False                        # tap outside closes
-        return
-    row = (ty - _SP_ROW0) // _SP_ROWH
-    if 0 <= row <= 2:
-        _toggle_setting(row)                          # cycle value, stay open
-    else:
-        _settings_open = False                        # title / footer taps close
-
-
-def handle_tap(tx, ty):
-    global _settings_open
-    if _settings_open:
-        _settings_tap(tx, ty)
-        return
-    if _in_rect(tx, ty, SETTINGS_BTN):
-        _settings_open = True
-        _set_selected(None)          # settings and the detail panel are exclusive
-        return
-    # A tap inside the open sidebar is for the panel, not a dismiss.
-    if _selected is not None and tx >= PANEL_X:
-        return
-    best, best_d = None, HIT_RADIUS * HIT_RADIUS
-    for x, y, p in _renderer.last_drawn:
-        d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
-        if d < best_d:
-            best, best_d = p, d
-    _set_selected(best)          # None => tapped empty space => dismiss
-
-
-def _on_feed_update(fresh):
-    # _feed.on_update: called with the fresh list after every successful
-    # fetch. Re-point the selection at the same aircraft in it, or clear it
-    # (and un-shift the view) if that aircraft has dropped off -- or is now
-    # hidden by HIDE_ON_GROUND (_render_loop() would clear it on the next
-    # redraw anyway; doing it here skips that one extra tick of a stale
-    # selection).
-    if _selected is not None:
-        h = _selected["hex"]
-        _set_selected(next((q for q in fresh if q["hex"] == h and not _hidden(q)), None))
-
-_feed.on_update = _on_feed_update
+# Touch/selection/settings-overlay live in ui.py -- the last piece of the
+# split. Unlike Backdrop/Renderer, this *is* the natural owner of
+# selected/view_cx/settings_open (they were passed around as arguments
+# everywhere else precisely because nothing else was), so they become real
+# instance state here instead of module globals. Built last since it holds
+# references to both _backdrop and _renderer.
+_ui = ui.UI(SETTINGS, _backdrop, _renderer, _hidden,
+            PX_PER_KM, PANEL_X, HIT_RADIUS, _PANEL_MARGIN, _MAX_SHIFT, _MIN_VIEW_CX,
+            SETTINGS_BTN, _SPANEL, _SP_ROW0, _SP_ROWH)
+_feed.on_update = _ui.on_feed_update
 
 
 async def _render_loop():
@@ -289,15 +194,10 @@ async def _render_loop():
                 p["e"] += p["ve"] * dt
                 p["n"] += p["vn"] * dt
 
-            if _selected is not None and _hidden(_selected):
-                # The selection just became hidden -- it landed while
-                # HIDE_ON_GROUND was on, or the setting was flipped on while
-                # it was already on the ground. Dismiss rather than hand the
-                # renderer a selection it would just skip drawing a ring for.
-                _set_selected(None)
+            _ui.dismiss_if_hidden()
 
             t = time.ticks_ms()
-            _renderer.draw_scene(_feed.planes, _selected, _settings_open, _view_cx)
+            _renderer.draw_scene(_feed.planes, _ui.selected, _ui.settings_open, _ui.view_cx)
             frame += 1
             if frame <= 3 or frame % 20 == 0:
                 log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
@@ -324,7 +224,7 @@ async def _touch_loop():
                 now = time.ticks_ms()
                 if time.ticks_diff(now, last_ms) > 250:   # debounce
                     last_ms = now
-                    handle_tap(presto.touch.x, presto.touch.y)
+                    _ui.handle_tap(presto.touch.x, presto.touch.y)
             was = touched
         except Exception as e:  # noqa: BLE001
             log("TOUCH ERROR:", repr(e))
@@ -339,7 +239,7 @@ def main():
     print("main: start  display:", SETTINGS.DISPLAY_MODE, " colour:", SETTINGS.COLOUR_MODE)
 
     _backdrop.build_vector_cache()
-    _backdrop.load(_view_cx, _selected)
+    _backdrop.load(_ui.view_cx, _ui.selected)
     print("main: basemap cache:", len(_backdrop.segs or ()), "segments,",
           len(_backdrop.marks), "marks; map layers",
           "on" if _backdrop.map_layers else "off")
@@ -349,7 +249,7 @@ def main():
         frame = 0
         while True:
             t = time.ticks_ms()
-            _renderer.draw_scene([], _selected, _settings_open, _view_cx)
+            _renderer.draw_scene([], _ui.selected, _ui.settings_open, _ui.view_cx)
             frame += 1
             print("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
                   "ms  basemap", _renderer.basemap_ms, "ms")

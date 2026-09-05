@@ -24,10 +24,10 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 
 **Progress:** §8 steps 1 (`Settings` object), 2 (live ground-toggle) and 3
 (theme table) are done and verified on-device. §1 (file split) is
-underway, module by module -- `net.py`, `geometry.py`, `routes.py`,
-`feed.py` and `backdrop.py` are out and verified; `render.py` is out,
-pending on-device verification; `ui.py` is the last piece, still proposal.
-§4 (touch latency) is still proposal only.
+**complete** -- `net.py`, `geometry.py`, `routes.py`, `feed.py`,
+`backdrop.py` and `render.py` are out and verified; `ui.py` is out,
+pending on-device verification (the last piece). §4 (touch latency) is
+the only item left, still proposal only.
 
 ---
 
@@ -158,15 +158,29 @@ Proposed split:
   circularity. `WIDTH`/`HEIGHT` (480, fixed for this hardware) and
   `RASTER_PATH` are plain module constants in `backdrop.py` itself, same as
   they were literals in `radar.py`.
-- **`ui.py`** — touch + selection + settings overlay: `handle_tap`,
-  `_set_selected`, `_settings_tap`, `_toggle_setting`, `_target_view_cx`
-  (585-714).
-- **`radar.py`** stays, but shrinks to the entry point: build the pieces
-  above, wire touch → UI → (feed filter / backdrop shift), and run
-  `asyncio.gather(render_loop, fetch_loop, touch_loop)`. Keep calling the
-  entry function unconditionally at module scope, no `if __name__`
-  guard — MicroPython's launcher runs the file directly and a guard means
-  it silently does nothing.
+- **`ui.py`** — **done**, and the last piece: a `UI` class holding
+  `handle_tap`/`_settings_tap`/`toggle_setting`/`_target_view_cx` (was
+  `_toggle_setting`/`_target_view_cx` etc., unprefixed where they're now
+  public methods). This is the one class in the whole split where
+  `selected`/`view_cx`/`settings_open` finally get an actual home as
+  instance attributes, rather than being threaded through as method
+  arguments the way `Backdrop`/`Renderer` had to -- they exist precisely
+  *because* nothing else was the right owner, and now something is. `UI`
+  holds `backdrop`/`renderer` by reference (plain composition -- both were
+  already constructed) and takes `hidden` injected, same as `Renderer`
+  does, since neither owns the underlying `HIDE_ON_GROUND` check.
+- **`radar.py`** — **done shrinking**, though it stayed the entry point
+  rather than disappearing: 753 lines at the start of this split, 288 now.
+  It builds every object in dependency order (`Settings` -> `Feed` ->
+  `Renderer` -> `Backdrop` -> `UI`, the last two needing pieces of the ones
+  before them), wires the two two-phase assignments (`renderer.backdrop`,
+  `feed.on_update`), and runs `asyncio.gather(_render_loop(), _feed.run(),
+  _touch_loop())`. Still calls its entry function unconditionally at module
+  scope, no `if __name__` guard — MicroPython's launcher runs the file
+  directly and a guard means it silently does nothing. What's left in it:
+  `to_screen()` (needs `_ui.view_cx`, still no cleaner home), `_hidden()`
+  (shared by `Renderer` and `UI`, owned by neither), Presto/display setup,
+  and the three async loops.
 
 Net effect: `feed.py` can be imported and its parsing tested against a
 canned adsb.lol JSON fixture on a laptop with plain CPython — currently the
@@ -476,7 +490,7 @@ prestoradar/
   feed.py        # done: Feed (fetch, parse, .run() loop, on_update hook)
   backdrop.py    # done: Backdrop (vector cache + raster layer-0 loading)
   render.py      # done: Renderer (pens, theme table, all draw_*)
-  ui.py          # UI: selection, tap handling, settings overlay
+  ui.py          # done: UI (selection, tap handling, settings overlay)
   basemap_data.py  # unchanged: generated, gitignored
 ```
 
@@ -500,12 +514,12 @@ the next, the same way PLAN.md's items landed incrementally:
    -- the toggle can't reach the raster from a `"radar"` boot at all, a
    pre-existing hardware constraint unrelated to this step; see PLAN.md
    item 8 and `_draw_map_backdrop()`'s docstring).
-4. §1's file split — the big one; do it after 1-3 so there's less state to
-   carry across the split, and each new module can be dropped in with the
-   old monolith still working as a fallback until the split module is
-   confirmed on-device. **Underway, module by module: `net.py`,
-   `geometry.py`, `routes.py`, `feed.py`, `backdrop.py` and `render.py` are
-   done and verified except `render.py` (pending); `ui.py` is the last
-   piece left.**
-5. §4's redraw-on-tap and debounce tuning — do last, since it's the one
+4. **Done** (`ui.py` pending on-device verification). §1's file split — the
+   big one; did it after 1-3 so there's less state to carry across the
+   split, and each new module was dropped in with the old monolith still
+   working as a fallback until confirmed on-device. Landed module by
+   module in this order: `net.py`, `geometry.py`, `routes.py`, `feed.py`,
+   `backdrop.py`, `render.py`, `ui.py` -- `radar.py` went from 753 lines to
+   288 across the whole sequence.
+5. §4's redraw-on-tap and debounce tuning — the one item left, and the one
    change that needs on-device feel rather than a log line to judge.
