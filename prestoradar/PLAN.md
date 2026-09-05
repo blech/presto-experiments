@@ -606,5 +606,8 @@ Scratch notes
 
 * Add '--run' option to radar_deploy.sh to call `mpremote run --no-follow ...`
 * Add brightness control (slider?) to settings - particularly for map mode
+* Add path for selected image (with altitude colours?)
+* Add 'speed' mode to alt/mono?
+* Shadow for current altitude in map mode (requires new plane colour)
 * Fix map not being available when starting in radar mode
 * Disable LEDs option (settings.py only at first?)
