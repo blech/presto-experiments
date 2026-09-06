@@ -203,14 +203,16 @@ class Backdrop:
                 print("raster basemap: layer 0 <-", RASTER_PATH, " offset_x", offset_x,
                       " mem", gc.mem_free())
             except OSError:
-                print("raster basemap:", RASTER_PATH, "missing -- vector grid on layer 0")
+                log("raster basemap:", RASTER_PATH, "missing, offset_x", offset_x,
+                    "-- vector grid on layer 0")
                 log("ui: updating coast vector")
                 self.build_vector_cache()
                 log("ui: coast vector updated")
                 self.draw_grid(view_cx, selected)
                 self.draw_vector()
             except Exception as e:  # noqa: BLE001 -- optional, never fatal
-                print("raster basemap: decode failed:", repr(e), "-- vector grid on layer 0")
+                log("raster basemap: decode failed:", repr(e), "offset_x", offset_x,
+                    "-- vector grid on layer 0")
                 log("ui: updating coast vector")
                 self.build_vector_cache()
                 log("ui: coast vector updated")

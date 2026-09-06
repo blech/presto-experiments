@@ -108,8 +108,15 @@ class Renderer:
         # In map mode, "level"'s near-white washes out over light map colours
         # the same way RADAR_TEXT_PEN did -- swap it for MAP_TEXT_PEN there
         # (see THEMES below). climb/descent stay put: cyan and amber read fine
-        # on the basemap styles tried so far.
-        self.MAP_VSTATE_PENS = dict(self.RADAR_VSTATE_PENS, level=self.MAP_TEXT_PEN)
+        # on the basemap styles tried so far. Built as a copy + one item
+        # assignment, not dict(self.RADAR_VSTATE_PENS, level=...) -- a
+        # RENDER ERROR: KeyError('climb') seen on-device is consistent with
+        # this firmware's dict() not handling a positional mapping plus
+        # keyword args the way CPython's does, silently dropping the
+        # positional dict's other entries (unconfirmed, but this form sidesteps
+        # the question rather than depending on it).
+        self.MAP_VSTATE_PENS = dict(self.RADAR_VSTATE_PENS)
+        self.MAP_VSTATE_PENS["level"] = self.MAP_TEXT_PEN
 
         # What's actually behind the drawing decides which pens to use --
         # keyed by self.backdrop.showing_raster (whether the raster backdrop
@@ -234,7 +241,13 @@ class Renderer:
             if self.backdrop.showing_raster:
                 d.set_pen(theme["text"])
                 d.circle(14, row_y + 6, 4)      # halo so a light dot still reads
-            d.set_pen(theme["vstate"][state])
+            # .get(), not [state]: a lookup failure here used to take down the
+            # whole render_loop iteration (a RENDER ERROR caught in radar.py,
+            # skipping presto.update() -- the display just freezes on the
+            # last good frame, everything else keeps running underneath).
+            # Cheap insurance against exactly that, whatever the actual cause
+            # turns out to be.
+            d.set_pen(theme["vstate"].get(state, self.RADAR_ICON_COLOR))
             d.circle(14, row_y + 6, 3)
             d.set_pen(theme["text"])
             d.text(label, 24, row_y, WIDTH, 2)
@@ -250,7 +263,11 @@ class Renderer:
         # here.
         theme = self.theme()
         if self.settings.COLOUR_MODE == "alt":
-            return theme["vstate"][p["vstate"]]
+            # .get(), not [p["vstate"]] -- see draw_legend_alt()'s comment on
+            # the same lookup; feed.py only ever sets one of the three known
+            # strings, but a bad lookup here shouldn't be able to freeze the
+            # whole display either way.
+            return theme["vstate"].get(p["vstate"], theme["icon"])
         return theme["icon"]
 
     def _draw_planes_radar(self, order):
