@@ -151,8 +151,9 @@ class UI:
 
     # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) --
 
-    def _in_rect(self, px, py, r):
-        return r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]
+    def _in_rect(self, px, py, r, margin=0):
+        return (r[0] - margin <= px <= r[0] + r[2] + margin
+                and r[1] - margin <= py <= r[1] + r[3] + margin)
 
     def toggle_setting(self, row):
         # Mutate settings in place rather than reassigning a name -- anything
@@ -201,7 +202,11 @@ class UI:
         if self.settings_open:
             self._settings_tap(tx, ty)
             return
-        if self._in_rect(tx, ty, self.settings_btn):
+        # +5px margin: SETTINGS_BTN (radar.py) doesn't quite reach the physical
+        # corner (WIDTH-1, HEIGHT-1), so a tap aimed at the corner itself --
+        # a natural target for a bottom-right icon -- can land just past its
+        # tight hitbox and miss.
+        if self._in_rect(tx, ty, self.settings_btn, margin=5):
             log("ui: settings opened")
             self.settings_open = True
             self.set_selected(None)      # settings and the detail panel are exclusive
