@@ -112,6 +112,24 @@ class UI:
             asyncio.create_task(self._rebuild_backdrop())
 
     async def _rebuild_backdrop(self):
+        # Has to advance BEFORE either branch below runs, not after: both
+        # Backdrop.redraw()'s vector-fallback branches and the direct
+        # build_vector_cache() call here project through to_screen(), which
+        # reads this value. Setting it afterward (the bug this replaced) left
+        # the coastline cache always one shift stale -- built for whatever
+        # display_view_cx was *before* this rebuild, one tap behind the
+        # aircraft/grid, which already move to the new position via the same
+        # to_screen(). On-device this looked exactly backwards: the coastline
+        # sat at its normal, centred position while a plane was selected
+        # (rebuilt for the *previous*, centred view before the shift), and
+        # shifted left once dismissed (rebuilt for the *previous*, shifted
+        # view before returning to centre). No async gap between this
+        # assignment and the rebuild using it -- _rebuild_backdrop() has no
+        # awaits before request_redraw(), so nothing else can run and observe
+        # the two out of step.
+        log("ui: updating reticle")
+        self.backdrop.display_view_cx = self.view_cx
+        log("ui: reticle updated")
         if self.backdrop.map_layers:
             log("ui: updating background")
             self.backdrop.redraw(self.view_cx, self.selected)
@@ -120,18 +138,6 @@ class UI:
             log("ui: updating coast vector")
             self.backdrop.build_vector_cache()
             log("ui: coast vector updated")
-        # Only advanced once the backdrop actually reflects it -- to_screen()
-        # (aircraft/ring positions) and, in single-layer mode, the grid both
-        # read backdrop.display_view_cx rather than the live self.view_cx, so
-        # a shift only becomes visible once everything that needs to move
-        # can move together in the same frame, instead of the aircraft
-        # jumping to the new position while the backdrop is still catching
-        # up (which is what "instant tap, laggy background" actually looked
-        # like on-device: a plane at the wrong spot relative to the map/grid
-        # underneath it for the ~0.3-0.9s the rebuild takes).
-        log("ui: updating reticle")
-        self.backdrop.display_view_cx = self.view_cx
-        log("ui: reticle updated")
         self.request_redraw()   # show the corrected backdrop as soon as it's ready
 
     def dismiss_if_hidden(self):

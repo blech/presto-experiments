@@ -517,6 +517,22 @@ this refers to the current module names:
   `self.view_cx`/`self.selected` fresh when it runs, so this only needed
   the flag, not a new code path.
 
+  **Sixth on-device finding: the fourth finding's own fix had an
+  off-by-one.** `_rebuild_backdrop()` set `backdrop.display_view_cx` to the
+  new target *after* calling `Backdrop.redraw()`'s vector-fallback branches
+  or `build_vector_cache()` directly -- both of which project through
+  `to_screen()`, which reads `display_view_cx`. So the coastline cache was
+  always built one shift stale: for whatever `display_view_cx` was *before*
+  this rebuild, not the value the aircraft and grid (reading the same
+  variable) had already moved to. On-device this looked exactly backwards --
+  the coastline sat at its normal, centred position while a plane was
+  selected (built for the previous, centred view, before the shift), and
+  shifted left once dismissed (built for the previous, shifted view, before
+  returning to centre). Fixed by advancing `display_view_cx` first, before
+  either branch runs; safe to do unconditionally since `_rebuild_backdrop()`
+  has no `await` before its final `request_redraw()`, so nothing else can
+  run in between and observe the two out of step.
+
   **`_MAX_SHIFT` raised from 112 to the theoretical 224, to retest.** The
   112 cap dated from before `UI._target_view_cx()` -- and its `int()` cast
   on every returned `view_cx` -- existed; the original diagnosis ("jpegdec
