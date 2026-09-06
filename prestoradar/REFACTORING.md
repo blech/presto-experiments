@@ -497,6 +497,26 @@ this refers to the current module names:
   exposed panel-side strip is never visible mid-transition, since the
   backdrop and the foreground now change together or not at all.
 
+  **Fifth on-device finding: a lockup traced to the one remaining
+  synchronous backdrop rebuild.** `UI.toggle_setting()`'s `DISPLAY_MODE`
+  toggle (row 0 of the settings overlay) called `Backdrop.redraw()`
+  directly rather than through `_backdrop_dirty`/`maybe_rebuild_backdrop()`
+  -- the only place left in the app still doing that inline, everywhere
+  else having moved to the backgrounded path over the course of this
+  section. On-device, toggling to "radar" hung inside `build_vector_cache()`
+  -- logged "updating coast vector", never returned "coast vector updated",
+  froze the whole app (a fully synchronous call blocks the entire
+  single-threaded event loop, not just drawing). The exact mechanism wasn't
+  pinned down -- the identical `build_vector_cache()` call has run cleanly
+  every other time this session via the backgrounded path, and nothing about
+  calling it inline looks different enough on paper to explain a hang rather
+  than just being slow -- but routing it through the one path already proven
+  to work, rather than leaving the last synchronous exception in place, is
+  the safer fix regardless of the root cause. `view_cx` itself doesn't
+  change on a mode toggle; `_rebuild_backdrop()` already reads
+  `self.view_cx`/`self.selected` fresh when it runs, so this only needed
+  the flag, not a new code path.
+
   **`_MAX_SHIFT` raised from 112 to the theoretical 224, to retest.** The
   112 cap dated from before `UI._target_view_cx()` -- and its `int()` cast
   on every returned `view_cx` -- existed; the original diagnosis ("jpegdec

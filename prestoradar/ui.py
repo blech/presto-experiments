@@ -47,7 +47,8 @@ class UI:
         self.selected = None      # the selected plane dict, or None
         self.view_cx = WIDTH // 2  # x-pixel that km-east 0 maps to (see radar.py's to_screen)
         self.settings_open = False
-        self._backdrop_dirty = False  # set by set_selected() when view_cx changed; see
+        self._backdrop_dirty = False  # set by set_selected() (view_cx changed) or
+                                       # toggle_setting() (DISPLAY_MODE changed); see
                                        # maybe_rebuild_backdrop()
 
     # --- Tap to inspect (item 2a) -------------------------------------
@@ -174,7 +175,23 @@ class UI:
             # with 2 layers (a "map" boot) -- toggling *into* "map" from a
             # "radar" boot still can't get the raster, since there's no
             # layer 0 to draw it onto (PLAN item 8, "Runtime toggle").
-            self.backdrop.redraw(self.view_cx, self.selected)
+            #
+            # Backgrounded via the same _backdrop_dirty/maybe_rebuild_backdrop()
+            # path a selection shift uses (REFACTORING.md #4), not called
+            # inline here as it used to be: an on-device lockup traced to
+            # this exact call -- toggling to "radar" hung inside
+            # build_vector_cache(), logged "updating coast vector" and never
+            # returned -- while the identical build_vector_cache() call via
+            # the backgrounded path has run cleanly throughout this session's
+            # testing. The actual mechanism wasn't pinned down (nothing about
+            # this call looked different enough on paper to explain a hang
+            # rather than just being slow), but routing it through the one
+            # path already proven to work rather than the one synchronous
+            # backdrop rebuild left in the codebase is the safer fix either
+            # way. view_cx itself doesn't change here -- _rebuild_backdrop()
+            # reads self.view_cx/self.selected fresh when it actually runs,
+            # so this just needs the flag.
+            self._backdrop_dirty = True
         elif row == 1:
             self.settings.COLOUR_MODE = "mono" if self.settings.COLOUR_MODE == "alt" else "alt"
         elif row == 2:
