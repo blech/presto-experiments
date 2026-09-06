@@ -533,6 +533,26 @@ this refers to the current module names:
   has no `await` before its final `request_redraw()`, so nothing else can
   run in between and observe the two out of step.
 
+  **Seventh on-device finding: `_backdrop_dirty`'s trigger condition was
+  missing half of what the grid depends on.** A screenshot showed
+  `draw_radar_grid()`'s horizontal crosshair frozen at its shortened,
+  panel-open length with nothing selected -- legend and aircraft count both
+  visible, confirming `selected is None`, crosshair still cut short.
+  `set_selected()` only set `_backdrop_dirty` (and hence only triggered a
+  `Backdrop.redraw()` on a map-capable boot) when `view_cx` itself changed
+  numerically -- but the crosshair's length depends on `selected is not
+  None` by itself, independent of `view_cx`. Select a plane that needs no
+  shift (already clear of the panel) while a different, shifted plane was
+  previously selected: `view_cx` returns to centre (a real change, so this
+  redraws correctly, crosshair rightly short since a plane *is* selected).
+  Then dismiss *that* plane, which also needs no shift (`view_cx` was
+  already centred): no numeric change, `_backdrop_dirty` never fires, the
+  grid is never told `selected` is now `None`, and the crosshair stays
+  wrong indefinitely. Fixed by also triggering a (shift-free) backdrop
+  refresh whenever `(p is not None) != had_selection`, i.e. whenever
+  selecting/dismissing flips whether anything is selected at all, even if
+  the numeric target happens not to move.
+
   **`_MAX_SHIFT` raised from 112 to the theoretical 224, to retest.** The
   112 cap dated from before `UI._target_view_cx()` -- and its `int()` cast
   on every returned `view_cx` -- existed; the original diagnosis ("jpegdec

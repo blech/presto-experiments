@@ -73,6 +73,22 @@ class UI:
     def set_selected(self, p):
         # Select p (or None to dismiss), shift the view just enough to keep
         # p clear of the panel, and kick a route lookup.
+        #
+        # self.view_cx is the *target*, updated immediately below when it
+        # needs to change; the panel (fixed layout, doesn't care about
+        # view_cx) and `selected` itself still take effect on the very next
+        # frame, so a tap's response is still instant where it can be. But
+        # radar.py's to_screen() -- and, in single-layer mode, the grid --
+        # read backdrop.display_view_cx, not this, for actual pixel
+        # positions: aircraft/ring/backdrop only move once
+        # _rebuild_backdrop() advances display_view_cx to match, all
+        # together in the same frame, rather than the aircraft jumping to
+        # the new position while the backdrop (raster ~380ms decode, or the
+        # vector cache rebuild) is still catching up. Flagged dirty here,
+        # not kicked off directly -- see maybe_rebuild_backdrop()'s
+        # docstring for why that ordering has to go through _render_loop
+        # rather than being started right here (REFACTORING.md #4).
+        had_selection = self.selected is not None
         self.selected = p
         cx = self._target_view_cx(p)
         if cx != self.view_cx:
@@ -81,20 +97,22 @@ class UI:
             log("ui: shifting", mode, "by", abs(cx - self.view_cx), "pixels", direction,
                 "(view_cx", self.view_cx, "->", cx, ")")
             self.view_cx = cx
-            # self.view_cx is the *target* now, updated immediately; the
-            # panel (fixed layout, doesn't care about view_cx) and `selected`
-            # itself still take effect on the very next frame, so a tap's
-            # response is still instant where it can be. But radar.py's
-            # to_screen() -- and, in single-layer mode, the grid -- read
-            # backdrop.display_view_cx, not this, for actual pixel positions:
-            # aircraft/ring/backdrop only move once _rebuild_backdrop()
-            # advances display_view_cx to match, all together in the same
-            # frame, rather than the aircraft jumping to the new position
-            # while the backdrop (raster ~380ms decode, or the vector cache
-            # rebuild) is still catching up. Flagged dirty here, not kicked
-            # off directly -- see maybe_rebuild_backdrop()'s docstring for why
-            # that ordering has to go through _render_loop rather than being
-            # started right here (REFACTORING.md #4).
+            self._backdrop_dirty = True
+        elif (p is not None) != had_selection:
+            # view_cx isn't changing, but a redraw is still needed: on a
+            # map-capable boot, the grid is only redrawn (Backdrop.redraw(),
+            # via _rebuild_backdrop()) when _backdrop_dirty fires, and
+            # draw_radar_grid()'s crosshair length depends on `selected is
+            # not None` on its own, independent of view_cx -- e.g. dismissing
+            # a plane that needed no shift in the first place (already clear
+            # of the panel) leaves view_cx unchanged, so without this branch
+            # the crosshair would stay frozen at its shortened, panel-open
+            # length forever after, even once nothing's selected (confirmed
+            # on-device: a screenshot with the legend and aircraft count both
+            # showing -- nothing selected -- but the crosshair still cut
+            # short at the old panel edge).
+            log("ui: refreshing", self.settings.DISPLAY_MODE,
+                "backdrop for selection change (view_cx unchanged at", cx, ")")
             self._backdrop_dirty = True
         if p is not None:
             routes.request(p)
