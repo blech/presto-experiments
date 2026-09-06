@@ -152,8 +152,8 @@ def _ac_to_plane(ac):
 def _find_in(ac_list, hex_id, callsign):
     for ac in ac_list:
         h = (ac.get("hex") or "").lower()
-        cs = (ac.get("flight") or "").strip()
-        if (hex_id and h == hex_id.lower()) or (callsign and cs == callsign):
+        cs = (ac.get("flight") or "").strip().upper()
+        if (hex_id and h == hex_id.lower()) or (callsign and cs == callsign.upper()):
             return ac
     return None
 

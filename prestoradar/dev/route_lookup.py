@@ -48,8 +48,9 @@ async def find_plane(hex_id, callsign, radius_km):
         return None, "feed fetch failed -- see the log lines above"
 
     hex_id = hex_id.lower() if hex_id else None
+    callsign = callsign.upper() if callsign else None
     for p in planes:
-        if (hex_id and p["hex"].lower() == hex_id) or (callsign and p["callsign"] == callsign):
+        if (hex_id and p["hex"].lower() == hex_id) or (callsign and p["callsign"].upper() == callsign):
             if not p["callsign"] or p["callsign"].lower() == p["hex"].lower():
                 return None, f"{hex_id or callsign} is in range but isn't broadcasting a usable callsign right now"
             return p, None
