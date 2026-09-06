@@ -50,7 +50,7 @@ async def find_plane(hex_id, callsign, radius_km):
     hex_id = hex_id.lower() if hex_id else None
     for p in planes:
         if (hex_id and p["hex"].lower() == hex_id) or (callsign and p["callsign"] == callsign):
-            if not p["callsign"] or routes.is_hex_id(p["callsign"]):
+            if not p["callsign"] or p["callsign"].lower() == p["hex"].lower():
                 return None, f"{hex_id or callsign} is in range but isn't broadcasting a usable callsign right now"
             return p, None
     who = hex_id or callsign

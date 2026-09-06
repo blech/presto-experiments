@@ -17,7 +17,7 @@ _cache = {}
 
 
 def is_hex_id(cs):
-    return len(cs) == 6 and all(c in "0123456789abcdefABCDEF" for c in cs)
+    return len(cs) == 6 and all(c in "0123456789ABCDEF" for c in cs.upper())
 
 
 # --- great-circle plausibility check ----------------------------------
@@ -137,11 +137,14 @@ async def _fetch(callsign, lat, lon, track):
 
 def request(p):
     """Kick off a route lookup for plane dict p if one isn't already cached
-    or in flight. A no-op for a bare ICAO hex id (never a real callsign
-    broadcast over ADS-B) or an empty string -- callers can pass a plane
-    straight through even before its callsign field is known to be real."""
+    or in flight. A no-op when the plane isn't broadcasting a callsign --
+    feed.py falls back to the ICAO hex id in that case, so p["callsign"] ==
+    p["hex"], and that's never a route to look up -- or when it's an empty
+    string. (Can't just test is_hex_id(cs): a real callsign like ACA568 is
+    six characters that all happen to be hex digits.) Callers can pass a
+    plane straight through even before its callsign is known to be real."""
     cs = (p["callsign"] or "").strip()
-    if cs and not is_hex_id(cs) and cs not in _cache:
+    if cs and cs.lower() != (p.get("hex") or "").lower() and cs not in _cache:
         _cache[cs] = ""            # pending
         lat, lon = geometry.unproject(p["e"], p["n"])
         asyncio.create_task(_fetch(cs, lat, lon, p.get("heading")))
