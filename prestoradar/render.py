@@ -338,7 +338,7 @@ class Renderer:
 
     def _fmt_route(self, cs):
         rc = routes.get(cs)
-        if rc == "":
+        if rc == "" or routes.retrying(cs):
             return "..."
         if isinstance(rc, tuple):
             return "%s-%s" % rc

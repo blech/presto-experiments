@@ -15,6 +15,15 @@ EARTH_RADIUS_KM = 6371.0
 # callsign -> (origin, dest) | None (unknown) | "" (pending) | absent (never requested)
 _cache = {}
 
+# callsign -> lookups spent so far, while still unresolved. adsb.lol's route
+# data is routinely stale or missing for the first ~2 min of a flight and then
+# fills in with the real rotation, so a None result isn't final: request() will
+# re-fetch it, up to _MAX_TRIES times. The selection is re-request()ed once per
+# feed fetch (ui.on_feed_update -> set_selected), so this is ~_MAX_TRIES feed
+# cycles. Cleared once a route resolves; a plausible hit is never re-checked.
+_tries = {}
+_MAX_TRIES = 4
+
 
 def is_hex_id(cs):
     return len(cs) == 6 and all(c in "0123456789ABCDEF" for c in cs.upper())
@@ -132,25 +141,43 @@ async def _fetch(callsign, lat, lon, track):
         log("route lookup failed:", callsign, repr(e))
         route = None
     _cache[callsign] = route
-    log("route", callsign, "->", route)
+    if route is not None:
+        _tries.pop(callsign, None)
+    log("route", callsign, "->", route, "(try", _tries.get(callsign, 0), "of", _MAX_TRIES, ")")
 
 
 def request(p):
-    """Kick off a route lookup for plane dict p if one isn't already cached
+    """Kick off a route lookup for plane dict p if one isn't already resolved
     or in flight. A no-op when the plane isn't broadcasting a callsign --
     feed.py falls back to the ICAO hex id in that case, so p["callsign"] ==
     p["hex"], and that's never a route to look up -- or when it's an empty
     string. (Can't just test is_hex_id(cs): a real callsign like ACA568 is
     six characters that all happen to be hex digits.) Callers can pass a
-    plane straight through even before its callsign is known to be real."""
+    plane straight through even before its callsign is known to be real.
+
+    Re-callable: a still-unresolved route (cached None) is re-fetched, with
+    p's current position/heading, until it resolves or _MAX_TRIES is hit."""
     cs = (p["callsign"] or "").strip()
-    if cs and cs.lower() != (p.get("hex") or "").lower() and cs not in _cache:
-        _cache[cs] = ""            # pending
-        lat, lon = geometry.unproject(p["e"], p["n"])
-        asyncio.create_task(_fetch(cs, lat, lon, p.get("heading")))
+    if not cs or cs.lower() == (p.get("hex") or "").lower():
+        return
+    cached = _cache.get(cs, "absent")
+    if cached == "" or isinstance(cached, tuple):
+        return                                  # in flight, or already resolved
+    if cached is None and _tries.get(cs, 0) >= _MAX_TRIES:
+        return                                  # looked up, unknown, gave up
+    _cache[cs] = ""                             # pending
+    _tries[cs] = _tries.get(cs, 0) + 1
+    lat, lon = geometry.unproject(p["e"], p["n"])
+    asyncio.create_task(_fetch(cs, lat, lon, p.get("heading")))
 
 
 def get(callsign):
     """Current cached state for callsign: an (origin, dest) tuple, None
     (looked up, unknown), "" (pending), or "absent" (never requested)."""
     return _cache.get(callsign, "absent")
+
+
+def retrying(callsign):
+    """True while a None (unknown) result still has request() re-fetches
+    left -- i.e. "keep showing 'looking...', not 'unknown' yet"."""
+    return _cache.get(callsign) is None and _tries.get(callsign, 0) < _MAX_TRIES
