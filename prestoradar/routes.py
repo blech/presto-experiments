@@ -84,14 +84,28 @@ def _plausible(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon):
 
 # --- route sources -------------------------------------------------------
 
+async def _get_json(host, path):
+    """GET and parse a JSON object, or None on any failure -- unreachable
+    host, non-200, an unparseable body, or a bare `null` (adsb.lol's
+    airport endpoint has been seen to answer 200 with `null` when its
+    backend is unhappy). Returning None rather than raising lets one flaky
+    source fall through to the next in the same _fetch() pass."""
+    try:
+        status, body = await net.http_get(host, path, settings.USER_AGENT)
+        if status != 200:
+            return None
+        data = json.loads(body)
+    except Exception as e:  # noqa: BLE001
+        log("route source error:", host, path, repr(e))
+        return None
+    return data if isinstance(data, dict) else None
+
+
 async def _fetch_adsbdb(callsign):
     """One (code, lat, lon, code, lat, lon) leg, or None if adsbdb has
     nothing (or something without coordinates)."""
-    status, body = await net.http_get(
-        ADSBDB_HOST, "/v0/callsign/" + callsign, settings.USER_AGENT)
-    if status != 200:
-        return None
-    resp = json.loads(body).get("response")
+    data = await _get_json(ADSBDB_HOST, "/v0/callsign/" + callsign)
+    resp = (data or {}).get("response")
     fr = resp.get("flightroute") if isinstance(resp, dict) else None
     if not fr:
         return None
@@ -108,13 +122,13 @@ async def _fetch_adsblol_legs(callsign, lat, lon):
     unlike adsbdb, which only ever has one remembered leg. lat/lon only feed
     adsb.lol's own (unusable, see module docstring) `plausible` field; this
     ignores it and scores every leg itself."""
-    status, body = await net.http_get(
-        ADSBLOL_HOST, "/api/0/route/%s/%s/%s" % (callsign, lat, lon), settings.USER_AGENT)
-    if status != 200:
-        return []
-    airports = json.loads(body).get("_airports") or []
+    data = await _get_json(
+        ADSBLOL_HOST, "/api/0/route/%s/%s/%s" % (callsign, lat, lon))
+    airports = (data or {}).get("_airports") or []
     legs = []
     for a, b in zip(airports, airports[1:]):
+        if a.get("lat") is None or b.get("lat") is None:
+            continue
         a_code = a.get("iata") or a.get("icao") or "?"
         b_code = b.get("iata") or b.get("icao") or "?"
         legs.append((a_code, a["lat"], a["lon"], b_code, b["lat"], b["lon"]))

@@ -129,11 +129,27 @@ def score_leg(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon):
 # search around settings.py's centre -- the kind route_lookup.py and
 # list_aircraft.py do -- in case the global index is lagging or missing it.
 
+async def _get_json(host, path):
+    """GET and parse a JSON object, or None on any failure -- unreachable
+    host, non-200, an unparseable body, or a bare `null` (adsb.lol's
+    airport endpoint has been seen to answer 200 with `null` when its
+    backend is unhappy). Keeps one flaky source from aborting the whole
+    cross-check with a traceback."""
+    try:
+        status, body = await net.http_get(host, path, USER_AGENT)
+        if status != 200:
+            return None
+        data = json.loads(body)
+    except Exception:  # noqa: BLE001
+        return None
+    return data if isinstance(data, dict) else None
+
+
 async def _fetch_ac_list(path):
-    status, body = await net.http_get(ADSBLOL_HOST, path, USER_AGENT)
-    if status != 200:
-        return None, f"adsb.lol HTTP {status}"
-    return json.loads(body).get("ac") or [], None
+    data = await _get_json(ADSBLOL_HOST, path)
+    if data is None:
+        return None, f"adsb.lol returned no usable data for {path}"
+    return data.get("ac") or [], None
 
 
 def _ac_to_plane(ac):
@@ -194,10 +210,8 @@ async def find_aircraft(hex_id=None, callsign=None, radius_km=RADIUS_KM):
 async def fetch_adsbdb(callsign):
     """[(a_code, a_lat, a_lon, b_code, b_lat, b_lon)], or [] if adsbdb has
     nothing on file."""
-    status, body = await net.http_get(ADSBDB_HOST, "/v0/callsign/" + callsign, USER_AGENT)
-    if status != 200:
-        return []
-    resp = json.loads(body).get("response")
+    data = await _get_json(ADSBDB_HOST, "/v0/callsign/" + callsign)
+    resp = (data or {}).get("response")
     fr = resp.get("flightroute") if isinstance(resp, dict) else None
     if not fr:
         return []
@@ -210,11 +224,8 @@ async def fetch_adsbdb(callsign):
 
 
 async def _airport_latlon(icao):
-    status, body = await net.http_get(ADSBLOL_HOST, f"/api/0/airport/{icao}", USER_AGENT)
-    if status != 200:
-        return None
-    data = json.loads(body)
-    if data.get("lat") is None:
+    data = await _get_json(ADSBLOL_HOST, f"/api/0/airport/{icao}")
+    if not data or data.get("lat") is None:
         return None
     return data["lat"], data["lon"]
 
@@ -224,10 +235,8 @@ async def fetch_hexdb(callsign):
     coordinates, so this makes two follow-up calls to adsb.lol's static
     airport lookup (independent of the plausibility question -- it's just a
     name/lat/lon table, not adsb.lol's own route guess)."""
-    status, body = await net.http_get(HEXDB_HOST, "/api/v1/route/icao/" + callsign, USER_AGENT)
-    if status != 200:
-        return []
-    route = json.loads(body).get("route") or ""
+    data = await _get_json(HEXDB_HOST, "/api/v1/route/icao/" + callsign)
+    route = (data or {}).get("route") or ""
     if "-" not in route:
         return []
     a_code, b_code = route.split("-", 1)
@@ -242,15 +251,14 @@ async def fetch_adsblol_route(callsign, lat, lon):
     only feed adsb.lol's own (unreliable, see module docstring) `plausible`
     field, which this ignores -- passed through anyway, as the real
     position, so as not to seed their route cache with a bogus one."""
-    status, body = await net.http_get(
-        ADSBLOL_HOST, f"/api/0/route/{callsign}/{lat}/{lon}", USER_AGENT)
-    if status != 200:
-        return []
-    data = json.loads(body)
-    airports = data.get("_airports") or []
+    data = await _get_json(ADSBLOL_HOST, f"/api/0/route/{callsign}/{lat}/{lon}")
+    airports = (data or {}).get("_airports") or []
     legs = []
     for a, b in zip(airports, airports[1:]):
-        legs.append((a["icao"], a["lat"], a["lon"], b["icao"], b["lat"], b["lon"]))
+        if a.get("lat") is None or b.get("lat") is None:
+            continue
+        legs.append((a.get("icao") or "?", a["lat"], a["lon"],
+                     b.get("icao") or "?", b["lat"], b["lon"]))
     return legs
 
 
@@ -273,13 +281,19 @@ async def run(args):
     print(f"{callsign} (hex {plane['hex']}) at {plane['lat']:.4f}, {plane['lon']:.4f}, "
           f"track {track_str}, alt {plane['alt']}\n")
 
+    # return_exceptions=True: the fetchers above are hardened not to raise,
+    # but a surprise in one source still shouldn't sink the other two.
     sources = await asyncio.gather(
         fetch_adsbdb(callsign), fetch_hexdb(callsign),
-        fetch_adsblol_route(callsign, plane["lat"], plane["lon"]))
+        fetch_adsblol_route(callsign, plane["lat"], plane["lon"]),
+        return_exceptions=True)
     names = ("adsbdb", "hexdb.io", "adsb.lol")
 
     rows = []  # (source, a_code, b_code, score, leg_label)
     for name, legs in zip(names, sources):
+        if isinstance(legs, Exception):
+            rows.append((name, f"(lookup errored: {legs!r})", None, None, None))
+            continue
         if not legs:
             rows.append((name, None, None, None, None))
             continue
@@ -293,7 +307,7 @@ async def run(args):
           f"{'track diff':>10}  leg")
     for name, a_code, b_code, score, label in rows:
         if score is None:
-            print(f"{name:9} {'(no route on file)':17}")
+            print(f"{name:9} {a_code or '(no route on file)':17}")
             continue
         route_str = f"{a_code} -> {b_code}"
         td = f"{score['track_diff_deg']:.0f}°" if score["track_diff_deg"] is not None else "--"
