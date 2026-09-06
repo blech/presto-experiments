@@ -164,7 +164,12 @@ async def find_aircraft(hex_id=None, callsign=None, radius_km=RADIUS_KM):
     if err:
         return None, err
 
-    ac = ac_list[0] if ac_list else None
+    # Validate the global-index hit rather than trusting ac_list[0]:
+    # /v2/callsign/<cs> can match on adsb.lol's own standing data and hand
+    # back an aircraft whose live `flight` is blank (or, with callsign
+    # reuse, more than one aircraft), and analysing the wrong plane's
+    # position yields a silently bogus plausibility verdict.
+    ac = _find_in(ac_list, hex_id, callsign)
     if ac is None:
         radius_nm = round(radius_km / 1.852)
         local_path = f"/v2/point/{CENTER_LAT}/{CENTER_LON}/{radius_nm}"
