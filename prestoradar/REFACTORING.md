@@ -470,6 +470,33 @@ this refers to the current module names:
   two "raster failed/missing" fallback branches within "map" mode, which
   had the identical gap) before `draw_vector()` runs.
 
+  **Fourth on-device finding, and the actual resolution of the
+  instant-vs-atomic tension this section opened with: even with the grid
+  and coastline agreeing with each other, a trace showed a `presto.update()`
+  landing *between* the tap and the backdrop rebuild -- one physical frame
+  where the aircraft (and the selection ring) had already jumped to the new
+  `view_cx`, but the backdrop underneath them hadn't. Not a bug in the
+  earlier fixes, but a real limit of the design they shared: `to_screen()`
+  read `UI.view_cx` directly, and that's updated the instant a tap decides
+  on a shift, before anything backdrop-related has had a chance to catch
+  up. The fix generalizes `vector_view_cx` (renamed `display_view_cx`) from
+  "what the coastline cache is projected for" to "what *everything on
+  screen* currently agrees on": `to_screen()` itself now reads
+  `backdrop.display_view_cx`, not `UI.view_cx`, so aircraft/ring positions
+  are gated exactly the same way the grid already was. `UI.view_cx` is now
+  purely the *target* -- updated immediately so the panel (whose layout
+  doesn't depend on `view_cx` at all) and `selected` still respond
+  instantly -- while `display_view_cx` only advances once
+  `UI._rebuild_backdrop()` finishes, moving the aircraft, ring, grid, and
+  coastline/raster all together, in the same frame, rather than the
+  aircraft moving first. Panel and ring still appear immediately at the
+  tap -- just at the *current* (not-yet-shifted) position, giving instant
+  confirmation a tap landed, with the actual shift arriving as one clean
+  jump shortly after rather than a two-step motion. This also incidentally
+  fixes the dismiss blank-space bug from earlier in this section: the
+  exposed panel-side strip is never visible mid-transition, since the
+  backdrop and the foreground now change together or not at all.
+
   **`_MAX_SHIFT` raised from 112 to the theoretical 224, to retest.** The
   112 cap dated from before `UI._target_view_cx()` -- and its `int()` cast
   on every returned `view_cx` -- existed; the original diagnosis ("jpegdec

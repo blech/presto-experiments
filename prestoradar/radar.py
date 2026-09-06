@@ -81,13 +81,20 @@ def log_init():
 
 
 def to_screen(east_km, north_km):
-    # Metric frame -> 480x480 pixels; north is up. _ui.view_cx is the x-pixel
-    # that km-east 0 maps to -- screen centre normally, shifted left while
-    # the detail sidebar is open (see ui.UI.set_selected). _ui doesn't exist
-    # yet at this point in the file (it's built after _renderer/_backdrop,
-    # which this function is itself injected into) but by the time this is
-    # actually called -- during rendering, well after boot -- it does.
-    return int(_ui.view_cx + east_km * PX_PER_KM), int(240 - north_km * PX_PER_KM)
+    # Metric frame -> 480x480 pixels; north is up. backdrop.display_view_cx
+    # is the x-pixel that km-east 0 maps to right now -- not _ui.view_cx (the
+    # *target* view_cx, updated the instant a tap decides on a shift) but
+    # the value everything currently drawn actually agrees on, which only
+    # catches up to the target once UI._rebuild_backdrop() finishes. Reading
+    # the live target here instead used to let aircraft (and the ring/grid)
+    # jump to the new position a frame or two before the backdrop caught up
+    # -- on-device this showed as a visible, if brief, mismatch rather than
+    # a clean atomic move. _backdrop doesn't exist yet at this point in the
+    # file (built after this function is defined, which it's itself injected
+    # into) but by the time this is actually called -- during rendering,
+    # well after boot -- it does.
+    return (int(_backdrop.display_view_cx + east_km * PX_PER_KM),
+            int(240 - north_km * PX_PER_KM))
 
 print("radar.py: importing done, basemap =", "loaded" if basemap_data else "none")
 

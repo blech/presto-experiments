@@ -441,15 +441,13 @@ class Renderer:
             d.set_pen(self.TRANSPARENT_PEN)
             d.clear()
         else:
-            # backdrop.vector_view_cx, not the live view_cx: draw_vector() below
+            # backdrop.display_view_cx, not a live target: draw_vector() below
             # replays a coastline cache projected for whatever view_cx it was
-            # last rebuilt at, which can briefly lag view_cx after a shift
-            # (REFACTORING.md #4) -- drawing the grid at the live value instead
-            # would put the crosshairs and rings ahead of the coastline for a
-            # frame or two. Aircraft (drawn below via to_screen()) aren't
-            # affected -- that's the point of the redraw-immediacy fix -- only
-            # this backdrop's own two pieces need to agree with each other.
-            self.draw_radar_grid(self.backdrop.vector_view_cx, selected)
+            # last rebuilt at, and to_screen() (aircraft, below) reads the same
+            # value -- so the grid, coastline, and aircraft all move together
+            # exactly when UI._rebuild_backdrop() advances it, never one ahead
+            # of another (REFACTORING.md #4).
+            self.draw_radar_grid(self.backdrop.display_view_cx, selected)
             self.backdrop.draw_vector()
         self.basemap_ms = time.ticks_diff(time.ticks_ms(), t)
         d.set_pen(self.theme()["text"])

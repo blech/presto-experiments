@@ -80,18 +80,20 @@ class UI:
             log("ui: shifting", mode, "by", abs(cx - self.view_cx), "pixels", direction,
                 "(view_cx", self.view_cx, "->", cx, ")")
             self.view_cx = cx
-            # Both backdrops are pre-rendered through to_screen()/view_cx, so
-            # both need a rebuild on a shift -- the vector cache re-projects
-            # its segments; the raster re-decodes onto layer 0 at the new
-            # offset (Backdrop.redraw). That decode is ~380ms (PLAN item 8):
-            # flagged dirty here, not kicked off directly, so it can't ever
-            # run ahead of the redraw it would otherwise block. radar.py's
-            # _render_loop draws the immediate ring/panel at the (already
-            # updated) view_cx first, *then* calls maybe_rebuild_backdrop()
-            # -- scheduling the task any earlier than that left its actual
-            # start order relative to the render loop's own wake-up down to
-            # asyncio implementation details, which on-device turned out not
-            # to reliably favour the redraw (REFACTORING.md #4).
+            # self.view_cx is the *target* now, updated immediately; the
+            # panel (fixed layout, doesn't care about view_cx) and `selected`
+            # itself still take effect on the very next frame, so a tap's
+            # response is still instant where it can be. But radar.py's
+            # to_screen() -- and, in single-layer mode, the grid -- read
+            # backdrop.display_view_cx, not this, for actual pixel positions:
+            # aircraft/ring/backdrop only move once _rebuild_backdrop()
+            # advances display_view_cx to match, all together in the same
+            # frame, rather than the aircraft jumping to the new position
+            # while the backdrop (raster ~380ms decode, or the vector cache
+            # rebuild) is still catching up. Flagged dirty here, not kicked
+            # off directly -- see maybe_rebuild_backdrop()'s docstring for why
+            # that ordering has to go through _render_loop rather than being
+            # started right here (REFACTORING.md #4).
             self._backdrop_dirty = True
         if p is not None:
             routes.request(p)
@@ -117,14 +119,18 @@ class UI:
             log("ui: updating coast vector")
             self.backdrop.build_vector_cache()
             log("ui: coast vector updated")
-            # Only advanced once the cache it describes is actually ready --
-            # draw_scene()'s non-map_layers path draws the radar grid at this
-            # value too, so the grid and the coastline it's drawn on top of
-            # always agree on which view_cx they're at (never one shifted and
-            # the other not).
-            log("ui: updating reticle")
-            self.backdrop.vector_view_cx = self.view_cx
-            log("ui: reticle updated")
+        # Only advanced once the backdrop actually reflects it -- to_screen()
+        # (aircraft/ring positions) and, in single-layer mode, the grid both
+        # read backdrop.display_view_cx rather than the live self.view_cx, so
+        # a shift only becomes visible once everything that needs to move
+        # can move together in the same frame, instead of the aircraft
+        # jumping to the new position while the backdrop is still catching
+        # up (which is what "instant tap, laggy background" actually looked
+        # like on-device: a plane at the wrong spot relative to the map/grid
+        # underneath it for the ~0.3-0.9s the rebuild takes).
+        log("ui: updating reticle")
+        self.backdrop.display_view_cx = self.view_cx
+        log("ui: reticle updated")
         self.request_redraw()   # show the corrected backdrop as soon as it's ready
 
     def dismiss_if_hidden(self):
