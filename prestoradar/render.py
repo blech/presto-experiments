@@ -3,6 +3,7 @@ import time
 
 import geometry
 import routes
+from netlog import log
 
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
 _VAL_DX = 96   # panel value column: px from the label's x, clears the widest label
@@ -445,4 +446,12 @@ class Renderer:
             self.draw_settings_btn()
         if settings_open:
             self.draw_settings_panel()
+        # to_screen(0, 0)[0] reads back whatever view_cx this frame actually
+        # drew with -- draw_scene() doesn't take view_cx as a parameter (it
+        # isn't needed for anything else here), but logging it against
+        # `selected` on every physical update() is exactly what's needed to
+        # tell "selection and shift land in the same displayed frame" apart
+        # from "selection shows first, shift catches up next update()".
+        log("update: view_cx", self.to_screen(0, 0)[0], "selected",
+            selected["callsign"] if selected is not None else None)
         self.presto.update()
