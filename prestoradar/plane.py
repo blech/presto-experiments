@@ -151,7 +151,7 @@ class Plane:
         """Readable model -- "Boeing 737-800". The feed's own `desc` when it
         sent one, else a lookup on the ICAO type code (`type`) in
         aircraft_types_data.py, else None. Live value wins, per
-        DATA-TODOS.md #2's `live > local` order. Zero-storage: the table and
+        DATA_TODOS.md #2's `live > local` order. Zero-storage: the table and
         its cache live in aircraft_types.py, not on the instance (Plane is
         rebuilt every fetch; the table is shared across all of them)."""
         return self.desc or aircraft_types.describe(self.type)

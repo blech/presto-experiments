@@ -2,7 +2,7 @@
 
 Handoff notes for adding a per-aircraft position-history trail to Presto Radar
 (the "breadcrumb behind the selected plane" that `feed.py`'s wholesale list
-replacement currently made impossible -- see `DATA-TODOS.md` item 4).
+replacement currently made impossible -- see `DATA_TODOS.md` item 4).
 
 This document is the result of comparing three candidate trace sources and
 running a live check against the chosen one on 2026-09-08. A separate agent
@@ -170,7 +170,7 @@ part of the poll loop.
    ~30-60 points, oldest->newest.
 5. **Cache:** by hex, ~60-120 s TTL (a trace "barely changes over a few
    minutes"). Re-tap within TTL reuses it. Bound the cache (a few entries) --
-   same unbounded-dict caution as `routes._cache` (`DATA-TODOS.md` item 3).
+   same unbounded-dict caution as `routes._cache` (`DATA_TODOS.md` item 3).
 6. **Fallback -- the RAM trail:** independently of the fetch, keep the last N
    live fixes per selected hex from the poll loop (`feed.py` already computes
    `(ve, vn)`; appending `(e, n, alt)` each successful fetch is cheap). Render

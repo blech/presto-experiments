@@ -38,7 +38,7 @@ class Feed:
         # identity: an aircraft still in range keeps the same Plane instance
         # across fetches, so its `trail` of past fixes survives (DATA_TRACE.md
         # item 6). An aircraft that drops out loses its object and its trail;
-        # carry-forward for a one-fetch gap (DATA-TODOS.md #4) is separate and
+        # carry-forward for a one-fetch gap (DATA_TODOS.md #4) is separate and
         # not done here.
         self._by_hex = {}
 
