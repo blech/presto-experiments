@@ -26,8 +26,12 @@ persistence) easier to land, plus two concrete bugs it happens to fix
 (theme table) are done and verified on-device. §1 (file split) is
 **complete** -- `net.py`, `geometry.py`, `routes.py`, `feed.py`,
 `backdrop.py`, `render.py` and `ui.py` are all out and verified. §4 (touch
-latency) is still proposal only. §9 (persistent aircraft identity + trail
-history) is a new proposal, not part of the original split.
+latency) is **done** and verified on-device (seven on-device findings, all
+written up in that section). §6's cleanups are partly done -- the pure
+math/formatting split landed with §1, but the route-cache cap, the
+`SKIP_NETWORK` dual-loop unification and the `_safe_loop` wrapper are all
+still open. §9 (persistent aircraft identity + trail history) and §10
+(`Plane` class) are new proposals, not part of the original split.
 
 ---
 
@@ -758,6 +762,13 @@ cheap, not worth a cross-module dict-to-attribute rename to remove). Worth
 revisiting only if something else independently wants persistent
 per-aircraft identity later; not proposed as its own step here.
 
+**Update:** the `Plane` *class* half of that (a typed replacement for the
+per-aircraft dict) *is* now proposed on its own, in §10 below -- motivated
+by off-device-testable parsing and self-documenting fields, not by
+identity. The `Feed`-wide `hex -> Plane` registry and the carry-forward
+merge it would enable (DATA-TODOS.md #4) stay unscheduled; §10 keeps
+`Feed.planes` a plain list, just of objects instead of dicts.
+
 Open items to settle while implementing (not before):
 
 - **Which pen/theme.** A dim, desaturated line reads as "history" against
@@ -852,3 +863,141 @@ here -- flagged so it doesn't get lost, not proposed for the current pass.
 4. The phosphor-echo idea, and anything to do with a `Feed`-wide `Plane`
    registry, stay unscheduled -- revisit only if a concrete need for
    either comes up on its own.
+
+---
+
+## 10. Turn the per-aircraft dict into a `Plane` object
+
+**Not started -- proposal only.** This is the one piece of §2's original
+"encapsulate in objects" table that never landed: every other same-named
+pile of globals became a class (`Settings`, `Feed`, `Backdrop`,
+`Renderer`, `UI`), but the aircraft record itself is still the 19-key
+`dict` literal built in `feed.py:110` and read by string subscript
+everywhere downstream. §9 twice talked itself out of a `Plane` class
+because it was reasoning about *identity* (a `hex -> Plane` registry, trail
+memory) -- which really isn't needed. The case for the class on its own,
+separate from identity, is different and stronger:
+
+- **Testable parsing.** §1's stated payoff for `feed.py` was "import it and
+  test the parse against a canned adsb.lol fixture on a laptop". That's
+  half-true today: `Feed._fetch()` can be called off-device, but its
+  output is an untyped dict, so a test can only spot-check individual keys
+  and silently passes when a field is renamed or dropped. `Plane.from_feed(
+  aircraft, level_rate_fpm)` -- the per-aircraft body of the `for` loop,
+  lifted verbatim into a classmethod -- gives the parse a single
+  documented output shape a test can assert against field by field. This
+  is the concrete reason to do it.
+- **A written-down schema.** The 19 keys currently exist only as a dict
+  literal in one function and ~34 subscript sites spread over `render.py`
+  (22), `ui.py` (5), `routes.py` (4), `radar.py` (3), `geometry.alt_key`,
+  and three `dev/` scripts. A typo like `p["headnig"]` is a `KeyError`
+  only on the frame that branch runs -- `render.py`'s own comment at
+  line 265 already works around one sharp edge of `p["vstate"]` being a
+  bare subscript. `__slots__` on the class turns every such typo into an
+  immediate `AttributeError` at first touch, on-device *and* in a laptop
+  test.
+- **Behaviour that belongs with the record is scattered across modules.**
+  Dead reckoning mutates `p["e"]/p["n"]` from `p["ve"]/p["vn"]` in
+  `radar.py`'s render loop (214-216); `_hidden()`'s ground test
+  (`radar.py:167`) re-derives `alt in (0, "ground") or gs == 0`, a copy of
+  which also lives in `dev/list_aircraft.py` and `dev/overhead.py`;
+  `geometry.alt_key` reaches into `p["alt"]`; `callsign or hex or "?"` is
+  spelled out at `render.py:361`, `ui.py:270` and inside `routes.py`.
+  These are all methods/properties of one aircraft.
+
+### Shape
+
+A plain mutable class with `__slots__` -- **not** a `namedtuple`
+(MicroPython has `collections.namedtuple`, but it's immutable and the
+render loop mutates `e`/`n` every ~0.5 s dead-reckon tick) and **not** a
+`dataclass` (not in MicroPython). Lives in its own `plane.py` (keeps
+`feed.py` a fetch/loop module; `plane.py` imports only `geometry` +
+`math`, so it's laptop-importable with no display stack).
+
+```python
+class Plane:
+    __slots__ = ("callsign", "e", "n", "ve", "vn", "heading", "gs",
+                 "vstate", "cat", "hex", "reg", "type", "desc", "alt",
+                 "vrate", "squawk", "emergency", "dst", "dir")
+
+    @classmethod
+    def from_feed(cls, ac, level_rate_fpm):
+        """The body of feed.py._fetch()'s `for aircraft in ...` loop,
+        moved here unchanged. Returns a Plane, or None to skip (no
+        lat/lon), so _fetch() becomes `p = Plane.from_feed(ac, rate);
+        if p: planes.append(p)`."""
+
+    def advance(self, dt):                 # was radar.py:214-216
+        self.e += self.ve * dt
+        self.n += self.vn * dt
+
+    @property
+    def on_ground(self):                   # the data half of _hidden()
+        return self.alt in (0, "ground") or self.gs == 0
+
+    @property
+    def label(self):                       # callsign or hex or "?"
+        return self.callsign or self.hex or "?"
+
+    @property
+    def alt_sort_key(self):                # was geometry.alt_key(p)
+        a = self.alt
+        return a if isinstance(a, (int, float)) else -1
+```
+
+Deliberately **not** on the class: `_hidden()` itself stays in `radar.py`
+(it also reads `SETTINGS.HIDE_ON_GROUND` live -- it becomes
+`SETTINGS.HIDE_ON_GROUND and p.on_ground`, keeping the settings coupling
+out of `plane.py`); no `__eq__`/`__hash__` (where identity matters -- the
+`on_feed_update` re-point search -- it's explicitly by the `hex` string,
+same as today); no per-field validation or coercion beyond what `_fetch()`
+already does; a property only for the three or four fields with real logic,
+not a getter wall.
+
+### Cost / MicroPython notes
+
+- Attribute lookup is marginally slower than a dict subscript, already
+  covered by §2's note -- ~2 fps render, 20 Hz touch, nowhere near
+  measurable. The per-frame cost is still `jpegdec` + coastline segments.
+- `__slots__` is accepted by MicroPython but its RAM benefit vs. a
+  per-instance `__dict__` is build-dependent -- **worth one on-device
+  `gc.mem_free()` before/after** with ~35 instances live, the same kind of
+  check §4's findings kept making. If it turns out not to help, the slots
+  still earn their place as the typo guard.
+- `@property` and `@classmethod` both work on this firmware (already used
+  by `Feed`/`Renderer`).
+
+### Suggested order
+
+Each step independently deployable and on-device verified, per §8's
+convention.
+
+1. **Add `plane.py` with `Plane` + `from_feed()`, unused.** `_fetch()`
+   still builds dicts. Write the first real off-device parse test:
+   `Plane.from_feed()` against a saved adsb.lol `ac[]` fixture, asserting
+   every field. Pure addition, zero behaviour change, nothing imports it
+   yet.
+2. **Flip `Feed._fetch()` to emit `Plane`s**, with a temporary
+   `__getitem__`/`__setitem__` shim on the class so existing `p["e"]` /
+   `p["e"] = ...` sites keep working. This makes step 2 a small, safe diff
+   (`feed.py` only) and lets the call-site sweep land module by module
+   instead of as one ~34-site big bang. `feed.py`'s own dead-reckoning
+   note and `dev/list_aircraft.py` / `dev/overhead.py` / `dev/route_lookup.py`
+   keep running unchanged through this step.
+3. **Sweep subscripts to attributes, one module per commit:** `render.py`,
+   then `ui.py`, `routes.py`, `radar.py`, `geometry` (delete `alt_key`,
+   callers use `key=lambda p: p.alt_sort_key`), then the `dev/` scripts.
+   `py_compile` + a `grep -n '\["' ` audit per module; on-device check
+   after each.
+4. **Move behaviour onto the class and delete the duplicates:** the
+   dead-reckon loop in `radar.py` becomes `for p in _feed.planes:
+   p.advance(dt)`; `_hidden()` becomes `... and p.on_ground`; the three
+   `callsign or hex` spellings become `p.label`. Each is its own tiny
+   follow-up.
+5. **Remove the `__getitem__`/`__setitem__` shim** once step 3 leaves no
+   subscript sites. Grep confirms; `Plane` is now attribute-only.
+
+Steps 1-2 are the safe, high-value core (testable parse, schema, typo
+guard). 3-5 are mechanical cleanup that can trail behind if something more
+interesting comes up. None of it needs or implies §9's registry -- if that
+ever lands, it builds on this rather than competing with it.
