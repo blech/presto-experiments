@@ -11,7 +11,6 @@ from backdrop import _clip_segment   # Cohen-Sutherland viewport clip, shared wi
 #                                      backdrop.py's note on the same hazard)
 
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
-_VAL_DX = 96   # panel value column: px from the label's x, clears the widest label
 
 # Top-down airliner for "map" mode. Local coords: +x = right wing, +y = nose;
 # ~14 px nose-to-tail. Every wing/tailplane root overlaps the fuselage quad, so
@@ -60,6 +59,19 @@ def _data_block(p):
     else:
         lvl = "---"
     return (cs, "%s %dkt" % (lvl, round(p.gs or 0)), p.type or "?")
+
+
+_CARD_W, _CARD_H = 212, 200
+
+
+def _card_corner(bx, by):
+    """Top-left (x, y) of the detail card: the corner diagonally opposite
+    the selected blip (bx, by), inset 4 px, so the card covers neither the
+    blip nor (usually) its trail. Ties (blip on a mid-line) fall to the
+    right / bottom."""
+    x = 4 if bx > 240 else WIDTH - _CARD_W - 4
+    y = 4 if by > 240 else HEIGHT - _CARD_H - 4
+    return x, y
 
 
 class Renderer:
@@ -506,54 +518,57 @@ class Renderer:
             return "unknown"
         return "-"
 
-    def draw_panel(self, p):
+    def _blip_xy(self, p):
+        # Where p's marker was drawn this frame (last_drawn is set by
+        # draw_planes, which runs before the card). Falls back to centre.
+        for x, y, q in self.last_drawn:
+            if q is p:
+                return x, y
+        return 240, 240
+
+    def draw_card(self, p, corner_xy):
+        # Compact detail card (decision 1): opaque, bordered, in a screen
+        # corner rather than a full-height sidebar. Fields trimmed to what's
+        # glanceable (decision 2): no SQWK / ICAO / TRACK.
         d = self.display
+        x, y = corner_xy
         d.set_pen(self.PANEL_BG)
-        d.rectangle(self.panel_x, 0, WIDTH - self.panel_x, HEIGHT)
+        d.rectangle(x, y, _CARD_W, _CARD_H)
         d.set_pen(self.PANEL_BORDER)
-        d.line(self.panel_x, 0, self.panel_x, HEIGHT)
+        d.rectangle(x, y, _CARD_W, 1)
+        d.rectangle(x, y + _CARD_H - 1, _CARD_W, 1)
+        d.rectangle(x, y, 1, _CARD_H)
+        d.rectangle(x + _CARD_W - 1, y, 1, _CARD_H)
 
-        tx = self.panel_x + 8
-        vx = tx + _VAL_DX
-        rh = 22
-        y = 8
-
-        self._ptext(p.label, tx, y, 16, self.RADAR_TEXT_PEN)
-        y += 22
+        tx = x + 8
+        vx = tx + 78
+        row = y + 8
+        self._ptext(p.label, tx, row, 16, self.RADAR_TEXT_PEN)
+        row += 20
         op = p.operator
         if op:
-            self._ptext(op, tx, y, 16, self.PANEL_LABEL, clip=True)
-            y += 22
-        y += 6
-
+            self._ptext(op, tx, row, 14, self.PANEL_LABEL, clip=True)
+            row += 17
         em = p.emergency
         if em and em != "none":
-            self._ptext("! " + str(em).upper(), tx, y, 16, self.EMERG_PEN)
-            y += rh
-
-        hdg = p.heading
-        vr = p.vrate
+            self._ptext("! " + str(em).upper(), tx, row, 14, self.EMERG_PEN)
+            row += 17
         td = p.type_description
+        vr = p.vrate
         rows = (
             ("REG", p.reg or "-"),
-            ("TYPE", p.type or "-", td if td and td != p.type else None),
+            ("TYPE", (td or p.type or "-")),
             ("RTE", self._fmt_route((p.callsign or "").strip())),
             ("ALT", self._fmt_alt(p.alt)),
             ("VS", ("%+d" % vr) if vr else "level"),
-            ("SPEED", "%d kt" % (p.gs or 0)),
-            ("TRACK", ("%d" % round(hdg)) if hdg is not None else "-"),
+            ("SPD", "%d kt" % (p.gs or 0)),
             ("DIST", ("%dnm %s" % (round(p.dst), geometry.compass(p.dir)))
                      if p.dst is not None else "-"),
-            ("SQWK", p.squawk or "-"),
-            ("ICAO", (p.hex or "-").upper()),
         )
-        for row in rows:
-            self._ptext(row[0], tx, y, 16, self.PANEL_LABEL)
-            self._ptext(row[1], vx, y, 16, self.RADAR_TEXT_PEN)
-            y += rh
-            if len(row) > 2 and row[2]:
-                self._ptext(row[2], tx, y, 16, self.PANEL_LABEL, clip=True)
-                y += rh
+        for label, val in rows:
+            self._ptext(label, tx, row, 14, self.PANEL_LABEL)
+            self._ptext(val, vx, row, 14, self.RADAR_TEXT_PEN, clip=True)
+            row += 17
 
     def _status_text(self, planes):
         if self.feed.fetch_count == 0:
@@ -632,7 +647,7 @@ class Renderer:
             trace = traces.points_for(selected)
         self.draw_planes(planes, selected, detail_level, trace)
         if selected is not None and detail_level >= 3:
-            self.draw_panel(selected)
+            self.draw_card(selected, _card_corner(*self._blip_xy(selected)))
         elif selected is None and not settings_open:
             self.draw_settings_btn()
         if settings_open:
