@@ -41,6 +41,11 @@ def _trace_pen_index(seg_idx, n_segs, n_pens):
     return min(n_pens - 1, seg_idx * n_pens // n_segs)
 
 
+_TAG_SCALE = 2      # bitmap6 scale for callsign tags on the scope
+_TAG_CH_W = 8       # ~px per character at that scale
+_TAG_H = 16         # ~px tall
+
+
 class Renderer:
     """Owns every pen and every draw_* routine -- everything that decides
     what the screen actually looks like each frame. Two kinds of state this
@@ -243,6 +248,48 @@ class Renderer:
         d.set_pen(self.BG_COLOR)
         d.circle(cx, cy, r - thickness)
 
+    def _label_box(self, x, y, text):
+        # The rect a callsign tag for `text` occupies, anchored at the blip
+        # the way _tag() draws it: top-left at (x + 8, y - 8).
+        return (x + 8, y - 8, len(text) * _TAG_CH_W, _TAG_H)
+
+    def _ambient_label_set(self, order):
+        # Indices into `order` ([(x, y, plane), ...]) whose callsign tag
+        # should be drawn: greedily placed nearest-the-centre first, skipping
+        # any whose box overlaps one already placed, and skipping blanks.
+        # O(n^2) over ~30 aircraft. Nearest-first is a stable relevance order
+        # (the crosshair centre is what the display is "about"); flip the key
+        # to q.alt_sort_key for lowest-altitude-first instead.
+        ranked = sorted(
+            range(len(order)),
+            key=lambda i: (order[i][0] - 240) ** 2 + (order[i][1] - 240) ** 2)
+        placed = []
+        keep = set()
+        for i in ranked:
+            x, y, p = order[i]
+            if not p.callsign:
+                continue
+            bx, by, bw, bh = self._label_box(x, y, p.callsign)
+            if any(bx < ox + ow and ox < bx + bw and by < oy + oh and oy < by + bh
+                   for (ox, oy, ow, oh) in placed):
+                continue
+            placed.append((bx, by, bw, bh))
+            keep.add(i)
+        return keep
+
+    def _tag(self, x, y, text):
+        # One callsign tag: a 1 px dark box (so it reads over the coastline)
+        # then the text, at the standard (x + 8, y - 8) anchor.
+        if not text:
+            return
+        d = self.display
+        tx, ty = x + 8, y - 8
+        w = len(text) * _TAG_CH_W
+        d.set_pen(self.BG_COLOR)
+        d.rectangle(tx - 1, ty - 1, w + 2, _TAG_H)
+        d.set_pen(self.RADAR_TEXT_PEN)
+        d.text(text, tx, ty, WIDTH, _TAG_SCALE)
+
     def draw_radar_grid(self, view_cx, selected):
         d = self.display
         d.set_pen(self.BG_COLOR)
@@ -311,22 +358,23 @@ class Renderer:
         return theme["icon"]
 
     def _draw_planes_radar(self, order, selected, trace_active):
-        # Scope style: blip, track arrow, callsign tag. When a trace is drawn
-        # behind the selected aircraft (trace_active), that aircraft's track
-        # arrow is suppressed -- the trail already shows where it's been and,
-        # by point spacing, how fast -- and every callsign tag except the
-        # selected one is dropped, so the trail isn't buried in a field of
-        # labels.
+        # Scope style: blip, track arrow, callsign tag. Ambient callsign tags
+        # are culled to the non-overlapping nearest-centre set (decision 7).
+        # When a trace is drawn behind the selected aircraft, that aircraft's
+        # track arrow is suppressed and every other callsign tag is dropped
+        # -- the trail must not be buried in labels.
         d = self.display
-        for x, y, p in order:
+        labelled = set() if selected is not None else self._ambient_label_set(order)
+        for i, (x, y, p) in enumerate(order):
             pen = self.plane_pen(p)
             d.set_pen(pen)
             d.circle(x, y, 3)
             if p.heading is not None and p.gs > 20 and not (trace_active and p is selected):
                 self.draw_track_arrow(x, y, p.heading, p.gs, pen)
-            if not trace_active or p is selected:
-                d.set_pen(self.RADAR_TEXT_PEN)
-                d.text(p.callsign, x + 8, y - 8, WIDTH, 2)
+            if p is selected:
+                self._tag(x, y, p.callsign)
+            elif i in labelled:
+                self._tag(x, y, p.callsign)
 
     def _draw_trace(self, trace, selected):
         # Polyline through the selected aircraft's recent fixes, oldest ->
