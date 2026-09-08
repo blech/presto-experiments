@@ -85,6 +85,19 @@ class Plane:
     def __repr__(self):
         return "<Plane %s %s alt=%s>" % (self.callsign or "?", self.hex or "?", self.alt)
 
+    # --- Temporary dict shim (REFACTORING.md #10, removed at step 5) -------
+    # Lets the ~34 `p["field"]` / `p["field"] = ...` call sites keep working
+    # while they're swept to attribute access one module at a time. Nothing
+    # new should use these.
+    def __getitem__(self, k):
+        return getattr(self, k)
+
+    def __setitem__(self, k, v):
+        setattr(self, k, v)
+
+    def get(self, k, default=None):
+        return getattr(self, k, default)
+
     def advance(self, dt):
         """Dead-reckon `dt` seconds along the last known velocity. Was the
         inline `p["e"] += p["ve"] * dt` loop in radar.py's _render_loop."""

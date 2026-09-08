@@ -1,15 +1,12 @@
 import asyncio
 import gc
 import json
-import math
 import sys
 import time
 
-import geometry
 import net
 from netlog import log
-
-_KNOT_TO_KM_S = 1.852 / 3600.0        # knots -> km travelled per second
+from plane import Plane
 
 
 class Feed:
@@ -39,10 +36,10 @@ class Feed:
     async def _fetch(self):
         """Pull the current aircraft list from adsb.lol.
 
-        Returns a list of plane dicts holding position in the metric frame
-        (e, n) and a per-second velocity (ve, vn) for dead reckoning between
-        fetches, or None if the fetch/parse failed (the caller keeps
-        animating the old list).
+        Returns a list of Plane objects (see plane.py) holding position in
+        the metric frame (e, n) and a per-second velocity (ve, vn) for dead
+        reckoning between fetches, or None if the fetch/parse failed (the
+        caller keeps animating the old list).
         """
         gc.collect()
         try:
@@ -65,64 +62,16 @@ class Feed:
             body = None
             gc.collect()
 
+        # Per-aircraft decode lives in Plane.from_feed() (REFACTORING.md
+        # #10) -- it returns None for an entry with no position, which used
+        # to be a `continue` here. HIDE_ON_GROUND is still a draw-time
+        # filter in radar.py's _hidden() (REFACTORING.md #5), not applied
+        # here: every aircraft the feed returns is real data.
         planes = []
         for aircraft in data.get("ac", []) or []:
-            lat = aircraft.get("lat")
-            lon = aircraft.get("lon")
-            if lat is None or lon is None:
-                continue
-
-            altitude = aircraft.get("alt_baro")  # feet, or the string "ground"
-            gs = aircraft.get("gs") or 0.0       # ground speed, knots
-            # HIDE_ON_GROUND is a draw-time filter, applied by radar.py's
-            # _hidden(), not here (REFACTORING.md #5) -- every aircraft the
-            # feed returns is real data, not a presentation choice.
-
-            callsign = (aircraft.get("flight") or aircraft.get("hex", "")).strip()
-
-            # "track" is the direction of travel over the ground; it's absent for
-            # stationary aircraft, so fall back to nose heading. ("dir" in the feed
-            # is the bearing from the radar centre to the aircraft, not where it's
-            # heading, so it isn't what we want here.)
-            heading = aircraft.get("track")
-            if heading is None:
-                heading = aircraft.get("true_heading")
-
-            # Vertical state from the reported climb/descent rate.
-            vrate = aircraft.get("baro_rate")
-            if vrate is None:
-                vrate = aircraft.get("geom_rate")
-            if vrate is None or abs(vrate) < self.level_rate_fpm:
-                vstate = "level"
-            elif vrate > 0:
-                vstate = "climb"
-            else:
-                vstate = "descent"
-
-            east, north = geometry.project(lat, lon)
-            if heading is not None and gs:
-                hr = math.radians(heading)
-                speed = gs * _KNOT_TO_KM_S
-                ve, vn = speed * math.sin(hr), speed * math.cos(hr)
-            else:
-                ve = vn = 0.0
-
-            planes.append({
-                "callsign": callsign, "e": east, "n": north,
-                "ve": ve, "vn": vn, "heading": heading, "gs": gs, "vstate": vstate,
-                "cat": aircraft.get("category"),   # ADS-B emitter category, e.g. "A5", "A7"
-                # Detail fields for the tap-to-inspect panel (item 2a).
-                "hex": aircraft.get("hex", ""),
-                "reg": aircraft.get("r"),
-                "type": aircraft.get("t"),
-                "desc": aircraft.get("desc"),
-                "alt": altitude,
-                "vrate": vrate,
-                "squawk": aircraft.get("squawk"),
-                "emergency": aircraft.get("emergency"),
-                "dst": aircraft.get("dst"),   # nm from centre
-                "dir": aircraft.get("dir"),   # bearing from centre, degrees
-            })
+            p = Plane.from_feed(aircraft, self.level_rate_fpm)
+            if p is not None:
+                planes.append(p)
         return planes
 
     async def run(self):
