@@ -3,6 +3,12 @@ import time
 
 import geometry
 import routes
+import traces
+from backdrop import _clip_segment   # Cohen-Sutherland viewport clip, shared with the
+#                                      coastline draw -- a fast aircraft's ~5 min trace
+#                                      runs well off a 30 km scope and the graphics lib
+#                                      mustn't get coordinates hundreds of px out (see
+#                                      backdrop.py's note on the same hazard)
 
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
 _VAL_DX = 96   # panel value column: px from the label's x, clears the widest label
@@ -139,6 +145,12 @@ class Renderer:
         self.PANEL_LABEL = display.create_pen(192, 192, 192)  # row labels, dimmer than values
         self.SELECT_PEN = display.create_pen(255, 235, 90)    # ring: distinct from vstate pens
         self.EMERG_PEN = display.create_pen(255, 70, 70)
+        # Selected-aircraft position trail (radar mode). One muted blue-grey
+        # that reads as "history" against the dark scope -- altitude colouring
+        # is a possible later pass (DATA_TRACE.md step 7). It replaces the
+        # heading/speed arrow while it's shown, so it doesn't need to compete
+        # with the vstate pens.
+        self.TRACE_PEN = display.create_pen(70, 110, 130)
 
     def theme(self):
         return self.THEMES["map"] if self.backdrop.showing_raster else self.THEMES["radar"]
@@ -286,17 +298,43 @@ class Renderer:
             return theme["vstate"].get(p.vstate, theme["icon"])
         return theme["icon"]
 
-    def _draw_planes_radar(self, order):
-        # Scope style: blip, track arrow, callsign tag.
+    def _draw_planes_radar(self, order, selected, trace_active):
+        # Scope style: blip, track arrow, callsign tag. When a trace is drawn
+        # behind the selected aircraft (trace_active), that aircraft's track
+        # arrow is suppressed -- the trail already shows where it's been and,
+        # by point spacing, how fast -- and every callsign tag except the
+        # selected one is dropped, so the trail isn't buried in a field of
+        # labels.
         d = self.display
         for x, y, p in order:
             pen = self.plane_pen(p)
             d.set_pen(pen)
             d.circle(x, y, 3)
-            if p.heading is not None and p.gs > 20:
+            if p.heading is not None and p.gs > 20 and not (trace_active and p is selected):
                 self.draw_track_arrow(x, y, p.heading, p.gs, pen)
-            d.set_pen(self.RADAR_TEXT_PEN)
-            d.text(p.callsign, x + 8, y - 8, WIDTH, 2)
+            if not trace_active or p is selected:
+                d.set_pen(self.RADAR_TEXT_PEN)
+                d.text(p.callsign, x + 8, y - 8, WIDTH, 2)
+
+    def _draw_trace(self, trace, selected):
+        # Polyline through the selected aircraft's recent fixes, oldest ->
+        # newest, then on to its current dead-reckoned position so the line
+        # meets the marker. `trace` is traces.points_for()'s pick: the network
+        # trace_recent seed when it resolved, else the in-RAM trail feed.py
+        # accumulates. Drawn before the markers so a marker sits on top; every
+        # segment is viewport-clipped (a jet's 5 min trace reaches well past a
+        # 30 km scope).
+        d = self.display
+        d.set_pen(self.TRACE_PEN)
+        pts = [self.to_screen(e, n) for (e, n, _alt) in trace]
+        if selected is not None:
+            pts.append(self.to_screen(selected.e, selected.n))
+        px, py = pts[0]
+        for cx, cy in pts[1:]:
+            seg = _clip_segment(px, py, cx, cy)
+            if seg is not None:
+                d.line(int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3]))
+            px, py = cx, cy
 
     def _draw_planes_map(self, order):
         # Map style: an icon along the track, no label; a plain blip when there's
@@ -318,7 +356,7 @@ class Renderer:
                 a = math.radians(heading)
                 self._icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
 
-    def draw_planes(self, planes, selected):
+    def draw_planes(self, planes, selected, trace=None):
         # Lowest altitude first, so where two overlap the higher aircraft is
         # drawn on top -- it's the one nearer the viewer looking down.
         order = []
@@ -328,8 +366,13 @@ class Renderer:
             x, y = self.to_screen(p.e, p.n)
             if -40 <= x <= 520 and -40 <= y <= 520:
                 order.append((x, y, p))
-        (self._draw_planes_map if self.settings.DISPLAY_MODE == "map"
-         else self._draw_planes_radar)(order)
+        trace_active = trace is not None and len(trace) >= 2
+        if trace_active:
+            self._draw_trace(trace, selected)      # under the markers
+        if self.settings.DISPLAY_MODE == "map":
+            self._draw_planes_map(order)
+        else:
+            self._draw_planes_radar(order, selected, trace_active)
         self.last_drawn = order
 
         # Ring the selected aircraft, on top of everything. Outer/inner discs
@@ -480,7 +523,14 @@ class Renderer:
         d.text(self._status_text(planes), 5, 10, WIDTH, 2)
         if self.settings.COLOUR_MODE == "alt" and selected is None:
             self.draw_legend_alt()
-        self.draw_planes(planes, selected)
+        # Trace behind the selected aircraft: radar mode only (the user's
+        # scope), and only when traces.points_for() has something -- the
+        # network trace_recent seed or the in-RAM live trail. Reaching into
+        # traces here mirrors how _fmt_route() already reaches into routes.
+        trace = None
+        if selected is not None and self.settings.DISPLAY_MODE == "radar":
+            trace = traces.points_for(selected)
+        self.draw_planes(planes, selected, trace)
         if selected is not None:
             self.draw_panel(selected)
         elif not settings_open:

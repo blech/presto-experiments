@@ -1,6 +1,7 @@
 import asyncio
 
 import routes
+import traces
 from netlog import log
 
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
@@ -116,6 +117,12 @@ class UI:
             self._backdrop_dirty = True
         if p is not None:
             routes.request(p)
+            # Seed the position trail from adsb.lol's trace_recent. Lazy and
+            # cached with a TTL like routes.request(), so being re-called for
+            # the same aircraft every fetch (via on_feed_update) is cheap. A
+            # no-op when settings.TRACE_SEED is 0 -- the in-RAM trail still
+            # accumulates and renders.
+            traces.request(p)
 
     def maybe_rebuild_backdrop(self):
         """Called once per frame by radar.py's _render_loop, right after
