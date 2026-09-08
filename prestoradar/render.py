@@ -54,6 +54,11 @@ class Renderer:
                  radius_km, px_per_km, panel_x, settings_btn, spanel,
                  sp_row0, sp_rowh, sp_valdx):
         self.display = display
+        # bitmap6 (PicoGraphics' default, made explicit) everywhere on the
+        # scope -- status line, alt legend, map callsign tags, airport labels.
+        # draw_scene() reasserts it each frame; _ptext() switches to the
+        # chunkier bitmap8 just for the inspect / settings panels.
+        display.set_font("bitmap6")
         self.presto = presto
         self.settings = settings
         self.feed = feed
@@ -154,6 +159,7 @@ class Renderer:
         s = str(s)
         scale = max(1, size // 8)
         avail = WIDTH - x - 2
+        self.display.set_font("bitmap8")   # panels only; draw_scene() resets to bitmap6
         if clip:
             while s and self.display.measure_text(s, scale) > avail:
                 s = s[:-1]
@@ -454,6 +460,7 @@ class Renderer:
 
     def draw_scene(self, planes, selected, settings_open):
         d = self.display
+        d.set_font("bitmap6")             # _ptext() flips to bitmap8 for the panels
         t = time.ticks_ms()
         if self.backdrop.map_layers:
             d.set_layer(1)             # aircraft layer; layer 0 holds the backdrop
