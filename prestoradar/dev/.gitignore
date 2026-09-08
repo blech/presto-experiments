@@ -1,0 +1,4 @@
+# Add an image ignore here so lots of screenshots can be stashed, at the cost
+# of manually overriding it at `git add` time
+*.png
+*.jpg

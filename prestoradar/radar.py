@@ -1,10 +1,6 @@
 import asyncio
-import gc
-import json
-import math
 import sys
 import network
-import ssl
 import time
 from presto import Presto
 
@@ -15,19 +11,37 @@ from presto import Presto
 if "/prestoradar" not in sys.path:
     sys.path.insert(0, "/prestoradar")
 
-# User-tunable configuration (centre, radius, intervals, flags, ...).
+import feed                             # sibling module: fetch/parse (feed.Feed)
+import backdrop                         # sibling module: vector cache + raster (backdrop.Backdrop)
+import render                           # sibling module: pens + all draw_* (render.Renderer)
+import ui                               # sibling module: touch/selection/settings (ui.UI)
+
+# User-tunable configuration (centre, radius, intervals, flags, ...). Only
+# DISPLAY_MODE / COLOUR_MODE / HIDE_ON_GROUND ever change after boot (the
+# on-device settings overlay, ui.UI.toggle_setting()) -- everything else
+# here is read once at import time and stays a plain module-level name.
+import settings as _settings_module
 from settings import *  # noqa: F401,F403
 
-# Tolerate a settings.py that predates a newer setting (settings.py is
-# per-location and gitignored, so it can lag settings_example.py).
-try:
-    DISPLAY_MODE  # noqa: F821  "radar" (scope + callsign tags) or "map" (plane icons)
-except NameError:
-    DISPLAY_MODE = "radar"
-try:
-    COLOUR_MODE  # noqa: F821  "mono" (all radar-green) or "alt" (colour by vstate)
-except NameError:
-    COLOUR_MODE = "alt"
+
+class Settings:
+    """The runtime-mutable slice of settings.py. `ui.UI.toggle_setting()`
+    mutates attributes on this one instance (`SETTINGS.DISPLAY_MODE = ...`)
+    instead of `global DISPLAY_MODE`, so any code holding a reference to SETTINGS --
+    including, eventually, a module that doesn't do its own `from settings
+    import *` -- sees a toggle immediately rather than a copy frozen at its
+    own import time. See REFACTORING.md #2."""
+
+    def __init__(self, module):
+        # getattr(..., default) tolerates a settings.py that predates a newer
+        # setting -- settings.py is per-location and gitignored, so it can lag
+        # settings_example.py.
+        self.DISPLAY_MODE = getattr(module, "DISPLAY_MODE", "radar")  # "radar" | "map"
+        self.COLOUR_MODE = getattr(module, "COLOUR_MODE", "alt")      # "mono" | "alt"
+        self.HIDE_ON_GROUND = getattr(module, "HIDE_ON_GROUND", 1)
+
+
+SETTINGS = Settings(_settings_module)
 
 import screenshot                       # shared, deployed to :lib/
 import netlog                           # shared UDP telemetry, deployed to :lib/
@@ -52,12 +66,12 @@ RADAR_HOST = "api.adsb.lol"
 RADAR_PATH = f"/v2/point/{CENTER_LAT}/{CENTER_LON}/{RADIUS_NM}"
 RADAR_URL = f"https://{RADAR_HOST}{RADAR_PATH}"  # kept for logging / radar_debug.py
 
-# Flat local frame: 1 degree of latitude is 60 nm; a degree of longitude shrinks
-# by cos(latitude).
-KM_PER_DEG_LAT = 60.0 * 1.852
-KM_PER_DEG_LON = KM_PER_DEG_LAT * math.cos(math.radians(CENTER_LAT))
-KNOT_TO_KM_S = 1.852 / 3600.0        # knots -> km travelled per second
 PX_PER_KM = 230.0 / RADIUS_KM        # outer ring sits at RADIUS_KM
+
+# Fetch/parse lives in feed.py (REFACTORING.md #1); this instance is the one
+# mutable source of truth for the aircraft list, replacing the module
+# globals (_planes/_fetch_count/_fetch_ok) radar.py used to hold directly.
+_feed = feed.Feed(RADAR_HOST, RADAR_PATH, USER_AGENT, LEVEL_RATE_FPM, FETCH_INTERVAL_MS)
 
 def log_init():
     # Open netlog's multicast socket once the network is up. Best-effort; on
@@ -66,453 +80,74 @@ def log_init():
         netlog.init(port=LOG_UDP_PORT)
 
 
-def project(lat, lon):
-    # Geographic position -> kilometres east / north of the centre.
-    east = (lon - CENTER_LON) * KM_PER_DEG_LON
-    north = (lat - CENTER_LAT) * KM_PER_DEG_LAT
-    return east, north
-
 def to_screen(east_km, north_km):
-    # Metric frame -> 480x480 pixels; north is up. _view_cx is the x-pixel that
-    # km-east 0 maps to -- screen centre normally, shifted left while the detail
-    # sidebar is open (see _set_selected).
-    return int(_view_cx + east_km * PX_PER_KM), int(240 - north_km * PX_PER_KM)
+    # Metric frame -> 480x480 pixels; north is up. backdrop.display_view_cx
+    # is the x-pixel that km-east 0 maps to right now -- not _ui.view_cx (the
+    # *target* view_cx, updated the instant a tap decides on a shift) but
+    # the value everything currently drawn actually agrees on, which only
+    # catches up to the target once UI._rebuild_backdrop() finishes. Reading
+    # the live target here instead used to let aircraft (and the ring/grid)
+    # jump to the new position a frame or two before the backdrop caught up
+    # -- on-device this showed as a visible, if brief, mismatch rather than
+    # a clean atomic move. _backdrop doesn't exist yet at this point in the
+    # file (built after this function is defined, which it's itself injected
+    # into) but by the time this is actually called -- during rendering,
+    # well after boot -- it does.
+    return (int(_backdrop.display_view_cx + east_km * PX_PER_KM),
+            int(240 - north_km * PX_PER_KM))
 
 print("radar.py: importing done, basemap =", "loaded" if basemap_data else "none")
 
 # --- INITIALIZE PRESTO ---
-presto = Presto(full_res=True, ambient_light=True)
+# "map" mode draws a pre-rendered raster backdrop (PLAN item 8): the 480x480
+# image sits on PicoGraphics layer 0, the aircraft are redrawn on layer 1 every
+# frame, and presto.update() does its tear-free beam-raced composite of the two.
+# So map mode boots with 2 layers; the scope keeps 1. (An earlier single-layer
+# direct_to_fb blit of the backdrop strobed the moving icons -- the whole-frame
+# restore left each icon erased for ~5% of every frame.) The layer count is
+# fixed at boot, so the raster wants DISPLAY_MODE = "map" set in settings.py;
+# toggling to map from the on-device overlay keeps the vector basemap.
+_RASTER_OK = SETTINGS.DISPLAY_MODE == "map" and bool(DRAW_BASEMAP)
+presto = Presto(full_res=True, ambient_light=True, layers=2 if _RASTER_OK else 1)
 display = presto.display
 WIDTH, HEIGHT = 480, 480
-print("radar.py: Presto display ready")
-
-# Pen Colors (RGB)
-BG_COLOR = display.create_pen(10, 20, 10)
-RADAR_GREEN = display.create_pen(0, 230, 70)
-TEXT_COLOR = display.create_pen(200, 255, 200)
-COAST_PEN = display.create_pen(60, 90, 120)     # muted blue-grey coastline
-AIRPORT_PEN = display.create_pen(150, 130, 170)  # muted violet airport marks
-
-# Vertical-state colours: level / cruising, climbing (departing), descending
-# (approaching). Keyed by the "vstate" string set in fetch_planes().
-VSTATE_PENS = {
-    "level": display.create_pen(235, 235, 235),   # white
-    "climb": display.create_pen(60, 200, 255),    # cyan
-    "descent": display.create_pen(255, 160, 40),  # amber
-}
+print("radar.py: Presto display ready  (layers=%d)" % (2 if _RASTER_OK else 1))
 
 # Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
-# selected aircraft.
+# selected aircraft. view_cx (the x-pixel that km-east 0 maps to, see
+# to_screen) is ui.UI instance state -- shifted left while the sidebar is
+# open so the visible radar re-centres in what's left; the basemap cache is
+# rebuilt on change since its segments are pre-projected.
 PANEL_X = 256                                      # sidebar spans PANEL_X..WIDTH (~224 px)
-# x-pixel that km-east 0 maps to (see to_screen). Shifts left by half the panel
-# width while the sidebar is open so the visible radar re-centres in what's left;
-# the basemap cache is rebuilt on change since its segments are pre-projected.
-_view_cx = WIDTH // 2
-PANEL_BG = display.create_pen(16, 26, 16)
-PANEL_BORDER = display.create_pen(0, 150, 50)
-PANEL_LABEL = display.create_pen(192, 192, 192)    # row labels, dimmer than values
-SELECT_PEN = display.create_pen(255, 235, 90)      # ring: distinct from vstate pens
-EMERG_PEN = display.create_pen(255, 70, 70)
 HIT_RADIUS = 26                                    # px; generous finger target
 
-# Panel text stays on the bitmap font. Tried on this firmware and rejected:
-#   - PicoVector + Roboto-Medium.af (e49dede): NotImplementedError: opcode
-#   - PicoGraphics "sans" vector font (9edd5c4): renders as a scribble of strokes
-def _ptext(s, x, y_top, size, pen):
-    # One line of panel text, top-left at (x, y_top); size is a pixel height
-    # mapped to the nearest bitmap8 integer scale.
-    display.set_pen(pen)
-    display.text(str(s), x, y_top, WIDTH - x - 2, max(1, size // 8))
-
-def draw_track_arrow(x, y, heading_deg, speed_kt, pen):
-    # heading_deg is degrees clockwise from north (the aircraft's track over the
-    # ground). Screen y grows downwards, so north maps to -y.
-    a = math.radians(heading_deg)
-    dx, dy = math.sin(a), -math.cos(a)
-    length = min(60, max(12, speed_kt * 0.15))  # ~knots -> pixels, clamped
-    tip_x, tip_y = int(x + dx * length), int(y + dy * length)
-    display.set_pen(pen)
-    display.line(int(x), int(y), tip_x, tip_y)
-    # Arrowhead: two short barbs splayed back from the tip.
-    for barb_deg in (heading_deg + 148, heading_deg - 148):
-        b = math.radians(barb_deg)
-        display.line(tip_x, tip_y,
-                     int(tip_x + math.sin(b) * 7), int(tip_y - math.cos(b) * 7))
-
-# Top-down airliner for "map" mode. Local coords: +x = right wing, +y = nose;
-# ~14 px nose-to-tail. Every wing/tailplane root overlaps the fuselage quad, so
-# the shape stays connected at any rotation. Convex triangles -- display.polygon()
-# only fills convex reliably, display.triangle() is always exact.
-_ICON_TRIS = (
-    (-1.5, -6.0), (1.5, -6.0), (1.5, 5.5),     # fuselage
-    (-1.5, -6.0), (1.5, 5.5), (-1.5, 5.5),
-    (-1.5, 5.5), (1.5, 5.5), (0.0, 7.5),       # nose
-    (1.4, 2.6), (1.4, -3.0), (8.8, -1.8),      # right wing (~30 deg sweep)
-    (-1.4, 2.6), (-1.4, -3.0), (-8.8, -1.8),   # left wing
-    (1.5, -3.5), (1.5, -6.0), (3.8, -7.0),     # right tailplane
-    (-1.5, -3.5), (-1.5, -6.0), (-3.8, -7.0),  # left tailplane
-)
-
-def _icon_pass(x, y, ca, sa, scale):
-    # Fill the icon's triangles at the current pen, rotated by (ca, sa) =
-    # (cos, sin) of the heading and multiplied by `scale`. Caller sets the pen.
-    t = _ICON_TRIS
-    for i in range(0, len(t), 3):
-        (ax, ay), (bx, by), (cx, cy) = t[i], t[i + 1], t[i + 2]
-        display.triangle(
-            int(x + (ax * ca + ay * sa) * scale), int(y + (ax * sa - ay * ca) * scale),
-            int(x + (bx * ca + by * sa) * scale), int(y + (bx * sa - by * ca) * scale),
-            int(x + (cx * ca + cy * sa) * scale), int(y + (cx * sa - cy * ca) * scale),
-        )
-
-# Emitter-category (ADS-B "category") -> fixed-wing icon scale. A1 light .. A5
-# heavy; anything not listed (incl. not broadcast) draws at 1.0.
-_CAT_SCALE = {"A1": 0.72, "A2": 0.88, "A3": 1.0, "A4": 1.2, "A5": 1.35}
-
-def _draw_rotor(x, y, heading_deg, scale):
-    # Top-down helicopter for category A7: hub, a tail boom pointing aft, and a
-    # two-blade rotor set 45 degrees off the heading so it doesn't read as a
-    # fixed wing. Caller has set the pen.
-    display.circle(x, y, max(2, int(2 * scale)))
-    ba = math.radians(heading_deg + 180)
-    boom = int(8 * scale)
-    display.line(x, y, int(x + math.sin(ba) * boom), int(y - math.cos(ba) * boom))
-    blade = int(7 * scale)
-    for off in (45, 135):
-        a = math.radians(heading_deg + off)
-        bx, by = math.sin(a) * blade, -math.cos(a) * blade
-        display.line(int(x - bx), int(y - by), int(x + bx), int(y + by))
-
-def ring(cx, cy, r, thickness=3):
-    # PicoGraphics circles are filled, so draw an outline as an outer disc with
-    # a background-coloured disc punched out of the middle.
-    display.set_pen(RADAR_GREEN)
-    display.circle(cx, cy, r)
-    display.set_pen(BG_COLOR)
-    display.circle(cx, cy, r - thickness)
-
-def draw_radar_grid():
-    display.set_pen(BG_COLOR)
-    display.clear()
-    # Concentric rings at RADIUS_KM and half that
-    ring(_view_cx, 240, int(RADIUS_KM * PX_PER_KM))
-    ring(_view_cx, 240, int(RADIUS_KM * 0.5 * PX_PER_KM))
-    # Crosshairs -- stop the horizontal one at the sidebar when it's open
-    x_right = PANEL_X - 4 if _selected is not None else WIDTH - 10
-    display.set_pen(RADAR_GREEN)
-    display.line(_view_cx, 10, _view_cx, 470)
-    display.line(10, 240, x_right, 240)
-
-# Cohen-Sutherland: clip a segment to [0, WIDTH) x [0, HEIGHT) before it reaches
-# display.line(). The coastline rings run out to a 50 km clip box (~+/-620 px),
-# and feeding coordinates that far off-screen into the graphics library is the
-# suspected cause of the freeze.
-_L, _R, _B, _T = 1, 2, 4, 8
-
-def _outcode(x, y):
-    c = 0
-    if x < 0:
-        c |= _L
-    elif x > WIDTH - 1:
-        c |= _R
-    if y < 0:
-        c |= _B
-    elif y > HEIGHT - 1:
-        c |= _T
-    return c
-
-def _clip_segment(x0, y0, x1, y1):
-    c0, c1 = _outcode(x0, y0), _outcode(x1, y1)
-    while True:
-        if not (c0 | c1):
-            return x0, y0, x1, y1
-        if c0 & c1:
-            return None
-        c = c0 or c1
-        if c & _T:
-            x = x0 + (x1 - x0) * (HEIGHT - 1 - y0) / (y1 - y0)
-            y = HEIGHT - 1
-        elif c & _B:
-            x = x0 + (x1 - x0) * (0 - y0) / (y1 - y0)
-            y = 0
-        elif c & _R:
-            y = y0 + (y1 - y0) * (WIDTH - 1 - x0) / (x1 - x0)
-            x = WIDTH - 1
-        else:
-            y = y0 + (y1 - y0) * (0 - x0) / (x1 - x0)
-            x = 0
-        if c == c0:
-            x0, y0, c0 = x, y, _outcode(x, y)
-        else:
-            x1, y1, c1 = x, y, _outcode(x, y)
-
-# The basemap never changes shape at runtime -- fixed centre, fixed projection --
-# so project and viewport-clip every coastline/lake segment ONCE, at import, into
-# screen-space integer endpoints. draw_basemap() then just replays a list of
-# display.line() calls: no float maths, no Cohen-Sutherland per segment, and
-# off-screen geometry has already been discarded. Doing this every frame (the
-# NYC coastline alone is ~1800 vertices) was the bulk of the per-frame draw cost
-# at ANIM_INTERVAL.
-_BASEMAP_SEGS = None   # [(x0, y0, x1, y1), ...] ints, clipped to the viewport
-_BASEMAP_MARKS = ()    # [(x, y, name), ...] airports inside the viewport
-
-def _cache_rings(rings, out):
-    for r in rings:
-        px, py = to_screen(*r[0])
-        for point in r[1:]:
-            cx, cy = to_screen(*point)
-            seg = _clip_segment(px, py, cx, cy)
-            if seg is not None:
-                out.append((int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3])))
-            px, py = cx, cy
-
-def build_basemap_cache():
-    global _BASEMAP_SEGS, _BASEMAP_MARKS
-    try:
-        if basemap_data is None:
-            _BASEMAP_SEGS = []
-            return
-        segs = []
-        _cache_rings(basemap_data.COASTLINE, segs)
-        _cache_rings(getattr(basemap_data, "LAKES", ()), segs)
-        marks = []
-        for name, e, n in getattr(basemap_data, "AIRPORTS", ()):
-            x, y = to_screen(e, n)
-            if 0 <= x < WIDTH and 0 <= y < HEIGHT:
-                marks.append((x, y, name))
-        _BASEMAP_SEGS, _BASEMAP_MARKS = segs, marks
-    except Exception as e:  # noqa: BLE001 -- the basemap is optional, don't die for it
-        print("build_basemap_cache failed:", repr(e))
-        _BASEMAP_SEGS = []
-    gc.collect()
-
-def draw_basemap():
-    if not DRAW_BASEMAP or not _BASEMAP_SEGS:
-        return
-    display.set_pen(COAST_PEN)
-    for s in _BASEMAP_SEGS:
-        display.line(s[0], s[1], s[2], s[3])
-    if _BASEMAP_MARKS:
-        display.set_pen(AIRPORT_PEN)
-        for x, y, name in _BASEMAP_MARKS:
-            display.circle(x, y, 3)
-            display.text(name, x + 5, y - 4, WIDTH, 1)
-
-def show_message(text):
-    display.set_pen(BG_COLOR)
-    display.clear()
-    display.set_pen(TEXT_COLOR)
-    display.text(f"{text}", 5, 10, WIDTH, 2)
-    presto.update()
-
-
-async def _http_get(host, path, port=443, timeout=15):
-    """Minimal async HTTPS GET. Returns (status:int, body:bytes). The socket I/O
-    is non-blocking, so the animation keeps running during the transfer; only
-    the TLS handshake (~0.3 s) and json.loads still hitch. No cert check --
-    urequests didn't verify either, and there's no CA bundle on the device."""
-    try:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.verify_mode = ssl.CERT_NONE
-    except Exception:  # noqa: BLE001 -- older ssl module: fall back to a plain flag
-        ctx = True
-
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(host, port, ssl=ctx), timeout)
-    try:
-        writer.write(("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
-                      "Connection: close\r\n\r\n" % (path, host, USER_AGENT)).encode())
-        await writer.drain()
-
-        status = int((await asyncio.wait_for(reader.readline(), timeout)).split()[1])
-        clen = None
-        chunked = False
-        while True:
-            h = await asyncio.wait_for(reader.readline(), timeout)
-            if h in (b"\r\n", b"\n", b""):
-                break
-            hl = h.lower()
-            if hl.startswith(b"content-length:"):
-                clen = int(h.split(b":", 1)[1])
-            elif hl.startswith(b"transfer-encoding:") and b"chunked" in hl:
-                chunked = True
-
-        parts = []
-        if chunked:
-            while True:
-                n = int((await reader.readline()).strip() or b"0", 16)
-                if n == 0:
-                    await reader.readline()
-                    break
-                got = 0
-                while got < n:
-                    b = await reader.read(min(2048, n - got))
-                    if not b:
-                        break
-                    parts.append(b)
-                    got += len(b)
-                await reader.readline()  # chunk trailing CRLF
-        else:
-            want = clen if clen is not None else (1 << 30)
-            got = 0
-            while got < want:
-                b = await reader.read(min(2048, want - got))
-                if not b:
-                    break
-                parts.append(b)
-                got += len(b)
-        return status, b"".join(parts)
-    finally:
-        writer.close()
-        await writer.wait_closed()
-
-
-async def fetch_planes():
-    """Pull the current aircraft list from adsb.lol.
-
-    Returns a list of plane dicts holding position in the metric frame (e, n)
-    and a per-second velocity (ve, vn) for dead reckoning between fetches, or
-    None if the fetch/parse failed (the caller keeps animating the old list).
-    """
-    gc.collect()
-    try:
-        status, body = await _http_get(RADAR_HOST, RADAR_PATH)
-    except Exception as e:  # noqa: BLE001
-        log("fetch: request failed:", repr(e))
-        return None
-
-    log("fetch: HTTP", status, len(body), "bytes")
-    if status != 200:
-        log("fetch: HTTP", status, body[:200])
-        return None
-
-    try:
-        data = json.loads(body)
-    except ValueError as e:
-        log("fetch: bad JSON:", repr(e), len(body), "bytes")
-        return None
-    finally:
-        body = None
-        gc.collect()
-
-    planes = []
-    for aircraft in data.get("ac", []) or []:
-        lat = aircraft.get("lat")
-        lon = aircraft.get("lon")
-        if lat is None or lon is None:
-            continue
-
-        altitude = aircraft.get("alt_baro")  # feet, or the string "ground"
-        gs = aircraft.get("gs") or 0.0       # ground speed, knots
-        if HIDE_ON_GROUND and (altitude in (0, "ground") or gs == 0):
-            continue
-
-        callsign = (aircraft.get("flight") or aircraft.get("hex", "")).strip()
-
-        # "track" is the direction of travel over the ground; it's absent for
-        # stationary aircraft, so fall back to nose heading. ("dir" in the feed
-        # is the bearing from the radar centre to the aircraft, not where it's
-        # heading, so it isn't what we want here.)
-        heading = aircraft.get("track")
-        if heading is None:
-            heading = aircraft.get("true_heading")
-
-        # Vertical state from the reported climb/descent rate.
-        vrate = aircraft.get("baro_rate")
-        if vrate is None:
-            vrate = aircraft.get("geom_rate")
-        if vrate is None or abs(vrate) < LEVEL_RATE_FPM:
-            vstate = "level"
-        elif vrate > 0:
-            vstate = "climb"
-        else:
-            vstate = "descent"
-
-        east, north = project(lat, lon)
-        if heading is not None and gs:
-            hr = math.radians(heading)
-            speed = gs * KNOT_TO_KM_S
-            ve, vn = speed * math.sin(hr), speed * math.cos(hr)
-        else:
-            ve = vn = 0.0
-
-        planes.append({
-            "callsign": callsign, "e": east, "n": north,
-            "ve": ve, "vn": vn, "heading": heading, "gs": gs, "vstate": vstate,
-            "cat": aircraft.get("category"),   # ADS-B emitter category, e.g. "A5", "A7"
-            # Detail fields for the tap-to-inspect panel (item 2a).
-            "hex": aircraft.get("hex", ""),
-            "reg": aircraft.get("r"),
-            "type": aircraft.get("t"),
-            "desc": aircraft.get("desc"),
-            "alt": altitude,
-            "vrate": vrate,
-            "squawk": aircraft.get("squawk"),
-            "emergency": aircraft.get("emergency"),
-            "dst": aircraft.get("dst"),   # nm from centre
-            "dir": aircraft.get("dir"),   # bearing from centre, degrees
-        })
-    return planes
-
-
-# --- Tap to inspect (item 2a) --------------------------------------------------
-_selected = None          # the selected plane dict, or None
-_last_drawn = []           # [(x, y, plane), ...] from the last draw_planes()
-_route_cache = {}          # callsign -> (origin, dest) | None (unknown) | "" (pending)
-
-# How far to shift the radar left while the sidebar is open, so the visible part
-# re-centres in the remaining width instead of just being cropped.
-_PANEL_SHIFT = (WIDTH - PANEL_X) // 2
-
-_COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-
-
-def _compass(deg):
-    if deg is None:
-        return "?"
-    return _COMPASS[int((deg % 360) / 45 + 0.5) % 8]
-
-
-def _is_hex_id(cs):
-    return len(cs) == 6 and all(c in "0123456789abcdefABCDEF" for c in cs)
-
-
-async def _fetch_route(callsign):
-    try:
-        status, body = await _http_get("api.adsbdb.com", "/v0/callsign/" + callsign)
-        route = None
-        if status == 200:
-            resp = json.loads(body).get("response")
-            fr = resp.get("flightroute") if isinstance(resp, dict) else None
-            if fr:
-                o = (fr.get("origin") or {})
-                d = (fr.get("destination") or {})
-                route = (o.get("iata_code") or o.get("icao_code") or "?",
-                         d.get("iata_code") or d.get("icao_code") or "?")
-        _route_cache[callsign] = route
-        log("route", callsign, "->", route)
-    except Exception as e:  # noqa: BLE001
-        log("route lookup failed:", callsign, repr(e))
-        _route_cache[callsign] = None
-
-
-def _set_selected(p):
-    # Select p (or None to dismiss), shift the view, and kick a route lookup.
-    global _selected, _view_cx
-    _selected = p
-    cx = (WIDTH // 2) - (_PANEL_SHIFT if p is not None else 0)
-    if cx != _view_cx:
-        _view_cx = cx
-        build_basemap_cache()   # its segments are pre-projected through to_screen
-    if p is not None:
-        cs = (p["callsign"] or "").strip()
-        if cs and not _is_hex_id(cs) and cs not in _route_cache:
-            _route_cache[cs] = ""            # pending
-            asyncio.create_task(_fetch_route(cs))
-
+# Shifting the view while the sidebar is open used to be a flat offset, which
+# was wrong for anything except a plane that started near centre: already clear
+# of the panel, it got shifted anyway (risking the left edge); already under
+# where the panel lands, it often stayed there. UI._target_view_cx() instead
+# shifts left only as far as the *selected* plane needs to clear the panel.
+_PANEL_MARGIN = 20                    # clearance kept between the plane and PANEL_X
+# How far left the view is ever allowed to shift. The raster only strictly
+# needs offset_x >= PANEL_X - WIDTH (so the map-mode backdrop -- one 480px
+# jpegdec decode starting at the shift -- still reaches PANEL_X); with
+# PANEL_X=256 that's -224, so this is set to the theoretical limit rather
+# than clamped short of it.
+#
+# This used to be capped at 112: a plane needing more shift than that made
+# the backdrop disappear instead of just clipping, and the cause was never
+# pinned down further than "something in jpegdec.decode()'s negative-x
+# handling, somewhere between 112 and 224". That was diagnosed before
+# UI._target_view_cx() existed, back when the shift was applied as a flat,
+# hand-written offset rather than always going through one int()-casting
+# choke point -- plausibly the same float-related freeze seen elsewhere in
+# this app during development, not a real jpegdec magnitude limit. Worth
+# re-verifying on-device at the full 224 before reintroducing a clamp; if
+# the backdrop still disappears well short of it, put the cap back with
+# whatever value this testing finds, not blindly back at 112.
+_MAX_SHIFT = 224
+_MIN_VIEW_CX = WIDTH // 2 - _MAX_SHIFT
 
 # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
-_settings_open = False
 SETTINGS_BTN = (WIDTH - 40, HEIGHT - 36, 36, 32)      # x, y, w, h  (bottom-right)
 _SPANEL = (WIDTH - 288, HEIGHT - 172, 284, 168)       # x, y, w, h  (~60% wide;
 #                                                       right/bottom edges kept
@@ -522,258 +157,53 @@ _SP_ROW0 = _SPANEL[1] + 44                            # top y of the first value
 _SP_ROWH = 30
 _SP_VALDX = 120                                       # value column, px from label x
 
-def _in_rect(px, py, r):
-    return r[0] <= px <= r[0] + r[2] and r[1] <= py <= r[1] + r[3]
+def _hidden(p):
+    # Applied at draw time, not fetch time, so toggling HIDE_ON_GROUND takes
+    # effect on the next redraw (<= ANIM_INTERVAL) instead of the next fetch
+    # (<= FETCH_INTERVAL_MS). Same condition feed.py's _fetch() used to filter
+    # with (REFACTORING.md #5). Lives here, not render.py or ui.py: it's used
+    # by both (Renderer's draw-time filter, UI's selection re-pointing) and
+    # neither owns the underlying settings check -- Plane.on_ground is just
+    # the data half.
+    return SETTINGS.HIDE_ON_GROUND and p.on_ground
 
-def _toggle_setting(row):
-    global DISPLAY_MODE, COLOUR_MODE, HIDE_ON_GROUND
-    if row == 0:
-        DISPLAY_MODE = "radar" if DISPLAY_MODE == "map" else "map"
-    elif row == 1:
-        COLOUR_MODE = "mono" if COLOUR_MODE == "alt" else "alt"
-    elif row == 2:
-        HIDE_ON_GROUND = 0 if HIDE_ON_GROUND else 1   # takes effect next fetch
-    log("settings:", DISPLAY_MODE, COLOUR_MODE,
-        "ground", "hide" if HIDE_ON_GROUND else "show")
+# All pens and every draw_* routine live in render.py; the vector cache and
+# raster backdrop live in backdrop.py (REFACTORING.md #1). Renderer needs
+# Backdrop (for showing_raster) but Backdrop's constructor needs Renderer's
+# pens and its draw_radar_grid method -- so Renderer is built first with
+# backdrop left unset, Backdrop is built using pieces off it, then
+# Renderer.backdrop is assigned. Same two-phase pattern as _feed.on_update.
+_renderer = render.Renderer(display, presto, SETTINGS, _feed, to_screen, _hidden,
+                             RADIUS_KM, PX_PER_KM, PANEL_X, SETTINGS_BTN, _SPANEL,
+                             _SP_ROW0, _SP_ROWH, _SP_VALDX)
+_backdrop = backdrop.Backdrop(display, SETTINGS, _RASTER_OK, DRAW_BASEMAP, basemap_data,
+                               to_screen, _renderer.draw_radar_grid,
+                               _renderer.BG_COLOR, _renderer.COAST_PEN, _renderer.AIRPORT_PEN)
+_renderer.backdrop = _backdrop
 
-def _settings_tap(tx, ty):
-    global _settings_open
-    if not _in_rect(tx, ty, _SPANEL):
-        _settings_open = False                        # tap outside closes
-        return
-    row = (ty - _SP_ROW0) // _SP_ROWH
-    if 0 <= row <= 2:
-        _toggle_setting(row)                          # cycle value, stay open
-    else:
-        _settings_open = False                        # title / footer taps close
-
-
-def handle_tap(tx, ty):
-    global _settings_open
-    if _settings_open:
-        _settings_tap(tx, ty)
-        return
-    if _in_rect(tx, ty, SETTINGS_BTN):
-        _settings_open = True
-        _set_selected(None)          # settings and the detail panel are exclusive
-        return
-    # A tap inside the open sidebar is for the panel, not a dismiss.
-    if _selected is not None and tx >= PANEL_X:
-        return
-    best, best_d = None, HIT_RADIUS * HIT_RADIUS
-    for x, y, p in _last_drawn:
-        d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
-        if d < best_d:
-            best, best_d = p, d
-    _set_selected(best)          # None => tapped empty space => dismiss
-
-
-def draw_legend_alt():
-    for i, (state, label) in enumerate((("level", "level"),
-                                        ("climb", "climb"),
-                                        ("descent", "descent"))):
-        row_y = 414 + i * 20
-        display.set_pen(VSTATE_PENS[state])
-        display.circle(14, row_y + 6, 3)
-        display.set_pen(TEXT_COLOR)
-        display.text(label, 24, row_y, WIDTH, 2)
-
-
-_basemap_ms = 0
-
-def plane_pen(p):
-    # Pen for an aircraft mark under the current COLOUR_MODE. "mono" keeps the
-    # scope look (everything RADAR_GREEN); "alt" colours by vertical state.
-    # Extra schemes go here.
-    if COLOUR_MODE == "alt":
-        return VSTATE_PENS[p["vstate"]]
-    return RADAR_GREEN
-
-def _draw_planes_radar(order):
-    # Scope style: blip, track arrow, callsign tag.
-    for x, y, p in order:
-        pen = plane_pen(p)
-        display.set_pen(pen)
-        display.circle(x, y, 3)
-        if p["heading"] is not None and p["gs"] > 20:
-            draw_track_arrow(x, y, p["heading"], p["gs"], pen)
-        display.set_pen(TEXT_COLOR)
-        display.text(p["callsign"], x + 8, y - 8, WIDTH, 2)
-
-def _draw_planes_map(order):
-    # Map style: an icon along the track, no label; a plain blip when there's no
-    # usable heading. Shape/size come from the ADS-B emitter category -- A7 is a
-    # helicopter, A1..A5 scale the fixed-wing icon light..heavy. Nearest is drawn
-    # last (order is pre-sorted) so a dense in-trail stream reads as an
-    # overlapping line rather than a pile of text.
-    for x, y, p in order:
-        display.set_pen(plane_pen(p))
-        heading = p["heading"]
-        if heading is None or p["gs"] <= 20:
-            display.circle(x, y, 3)
-            continue
-        cat = p["cat"]
-        if cat == "A7":
-            _draw_rotor(x, y, heading, 1.0)
-        else:
-            a = math.radians(heading)
-            _icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
-
-def _alt_key(p):
-    a = p["alt"]
-    return a if isinstance(a, (int, float)) else -1   # "ground" / None sort lowest
-
-def draw_planes(planes):
-    global _last_drawn
-    # Lowest altitude first, so where two overlap the higher aircraft is drawn on
-    # top -- it's the one nearer the viewer looking down.
-    order = []
-    for p in sorted(planes, key=_alt_key):
-        x, y = to_screen(p["e"], p["n"])
-        if -40 <= x <= 520 and -40 <= y <= 520:
-            order.append((x, y, p))
-    (_draw_planes_map if DISPLAY_MODE == "map" else _draw_planes_radar)(order)
-    _last_drawn = order
-
-    # Ring the selected aircraft, on top of everything. Outer/inner discs make an
-    # outline; kept small (r 7) so it doesn't reach the callsign tag at (x+8, y-8).
-    for x, y, p in order:
-        if p is _selected:
-            display.set_pen(SELECT_PEN)
-            display.circle(x, y, 7)
-            display.set_pen(BG_COLOR)
-            display.circle(x, y, 5)
-            display.set_pen(plane_pen(p))
-            display.circle(x, y, 3)   # put the marker back inside the ring
-            break
-
-_VAL_DX = 96   # value column: px from the label's x, clears the widest label
-
-def _fmt_alt(alt):
-    if alt in (0, "ground"):
-        return "ground"
-    return "%sft" % alt
-
-def _fmt_route(cs):
-    rc = _route_cache.get(cs, "absent")
-    if rc == "":
-        return "..."
-    if isinstance(rc, tuple):
-        return "%s-%s" % rc
-    if cs and not _is_hex_id(cs):
-        return "unknown"
-    return "-"
-
-def draw_panel(p):
-    display.set_pen(PANEL_BG)
-    display.rectangle(PANEL_X, 0, WIDTH - PANEL_X, HEIGHT)
-    display.set_pen(PANEL_BORDER)
-    display.line(PANEL_X, 0, PANEL_X, HEIGHT)
-
-    tx = PANEL_X + 8
-    vx = tx + _VAL_DX
-    rh = 22
-    y = 8
-
-    _ptext(p["callsign"] or p["hex"] or "?", tx, y, 16, TEXT_COLOR)
-    y += 28
-
-    em = p["emergency"]
-    if em and em != "none":
-        _ptext("! " + str(em).upper(), tx, y, 16, EMERG_PEN)
-        y += rh
-
-    hdg = p["heading"]
-    vr = p["vrate"]
-    rows = (
-        ("REG", p["reg"] or "-"),
-        ("TYPE", p["type"] or "-"),
-        ("RTE", _fmt_route((p["callsign"] or "").strip())),
-        ("ALT", _fmt_alt(p["alt"])),
-        ("VS", ("%+d" % vr) if vr else "level"),
-        ("SPEED", "%d kt" % (p["gs"] or 0)),
-        ("TRACK", ("%d" % round(hdg)) if hdg is not None else "-"),
-        ("DIST", ("%dnm %s" % (round(p["dst"]), _compass(p["dir"])))
-                 if p["dst"] is not None else "-"),
-        ("SQWK", p["squawk"] or "-"),
-        ("ICAO", (p["hex"] or "-").upper()),
-    )
-    for label, value in rows:
-        _ptext(label, tx, y, 16, PANEL_LABEL)
-        _ptext(value, vx, y, 16, TEXT_COLOR)
-        y += rh
-
-def _status_text(planes):
-    if _fetch_count == 0:
-        return "Connecting..."          # nothing fetched yet
-    if not _fetch_ok:                   # last fetch failed -- planes may be stale
-        return ("Aircraft: %d (stale)" % len(planes)) if planes else "Fetch failed"
-    return "Aircraft: %d" % len(planes)  # 0 is legitimate: a quiet sky
-
-def draw_settings_btn():
-    bx, by, bw, bh = SETTINGS_BTN
-    display.set_pen(PANEL_BG)
-    display.rectangle(bx, by, bw, bh)
-    display.set_pen(PANEL_BORDER)
-    for i in range(3):                    # hamburger glyph
-        ly = by + 10 + i * 6
-        display.line(bx + 8, ly, bx + bw - 8, ly)
-
-def draw_settings_panel():
-    px, py, pw, ph = _SPANEL
-    display.set_pen(PANEL_BG)
-    display.rectangle(px, py, pw, ph)
-    display.set_pen(PANEL_BORDER)
-    display.line(px, py, px + pw, py)
-    display.line(px, py + ph, px + pw, py + ph)
-    display.line(px, py, px, py + ph)
-    display.line(px + pw, py, px + pw, py + ph)
-
-    _ptext("SETTINGS", px + 10, py + 10, 16, TEXT_COLOR)
-    display.set_pen(PANEL_BORDER)
-    display.line(px + 8, py + 36, px + pw - 8, py + 36)
-
-    rows = (("mode", DISPLAY_MODE),
-            ("colour", COLOUR_MODE),
-            ("ground", "hide" if HIDE_ON_GROUND else "show"))
-    y = _SP_ROW0
-    for label, value in rows:
-        _ptext(label, px + 10, y, 16, PANEL_LABEL)
-        _ptext(str(value).upper(), px + 10 + _SP_VALDX, y, 16, TEXT_COLOR)
-        y += _SP_ROWH
-    _ptext("tap away to close", px + 10, y + 6, 8, PANEL_LABEL)
-
-def draw_scene(planes):
-    global _basemap_ms
-    draw_radar_grid()
-    t = time.ticks_ms()
-    draw_basemap()
-    _basemap_ms = time.ticks_diff(time.ticks_ms(), t)
-    display.set_pen(TEXT_COLOR)
-    display.text(_status_text(planes), 5, 10, WIDTH, 2)
-    if COLOUR_MODE == "alt" and _selected is None:
-        draw_legend_alt()
-    draw_planes(planes)
-    if _selected is not None:
-        draw_panel(_selected)
-    elif not _settings_open:
-        draw_settings_btn()
-    if _settings_open:
-        draw_settings_panel()
-    presto.update()
-
-
-# Shared between the two tasks below. asyncio on MicroPython is cooperative and
-# single-threaded, so _fetch_loop reassigning these and _render_loop reading them
-# can't tear -- no lock needed.
-_planes = []
-_fetch_count = 0     # completed fetch attempts, any outcome (0 == still loading)
-_fetch_ok = False    # did the most recent attempt succeed?
+# Touch/selection/settings-overlay live in ui.py -- the last piece of the
+# split. Unlike Backdrop/Renderer, this *is* the natural owner of
+# selected/view_cx/settings_open (they were passed around as arguments
+# everywhere else precisely because nothing else was), so they become real
+# instance state here instead of module globals. Built last since it holds
+# references to both _backdrop and _renderer.
+#
+# _redraw: set by UI whenever a tap actually changes something, so
+# _render_loop can wake up immediately instead of waiting out ANIM_INTERVAL
+# (REFACTORING.md #4). Owned here, not by UI, since it's what lets two
+# independent tasks (_touch_loop, _render_loop) hand off across radar.py's
+# asyncio.gather -- same reason on_update is wired up as a callback rather
+# than UI reaching into feed.py directly.
+_redraw = asyncio.Event()
+_ui = ui.UI(SETTINGS, _backdrop, _renderer, _hidden, _redraw.set,
+            PX_PER_KM, PANEL_X, HIT_RADIUS, _PANEL_MARGIN, _MAX_SHIFT, _MIN_VIEW_CX,
+            SETTINGS_BTN, _SPANEL, _SP_ROW0, _SP_ROWH)
+_feed.on_update = _ui.on_feed_update
 
 
 async def _render_loop():
     # Dead-reckon each aircraft along its last velocity and redraw every
-    # ANIM_INTERVAL. Runs uninterrupted while _fetch_loop is awaiting the
+    # ANIM_INTERVAL. Runs uninterrupted while _feed.run() is awaiting the
     # network, so a fetch no longer freezes the animation.
     last = time.ticks_ms()
     frame = 0
@@ -782,28 +212,48 @@ async def _render_loop():
             now = time.ticks_ms()
             dt = time.ticks_diff(now, last) / 1000.0
             last = now
-            for p in _planes:
-                p["e"] += p["ve"] * dt
-                p["n"] += p["vn"] * dt
+            for p in _feed.planes:
+                p.advance(dt)
+
+            _ui.dismiss_if_hidden()
 
             t = time.ticks_ms()
-            draw_scene(_planes)
+            _renderer.draw_scene(_feed.planes, _ui.selected, _ui.settings_open)
             frame += 1
             if frame <= 3 or frame % 20 == 0:
                 log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
-                    "ms  basemap", _basemap_ms, "ms")
+                    "ms  basemap", _renderer.basemap_ms, "ms")
+
+            # Only after this frame's own draw -- see maybe_rebuild_backdrop()'s
+            # docstring for why the ordering matters (REFACTORING.md #4).
+            _ui.maybe_rebuild_backdrop()
 
             screenshot.serve_poll(display, presto.presto)
         except Exception as e:  # noqa: BLE001
             log("RENDER ERROR:", repr(e))
             if hasattr(sys, "print_exception"):
                 sys.print_exception(e)
-        await asyncio.sleep(ANIM_INTERVAL)
+        # Redraw on the next ANIM_INTERVAL tick as before, or as soon as
+        # _touch_loop sets _redraw -- whichever comes first -- instead of
+        # always waiting out the full interval after a tap (REFACTORING.md
+        # #4). wait_for is already relied on elsewhere on this firmware
+        # (net.py's http_get); Event itself is new here and worth confirming
+        # on-device.
+        try:
+            await asyncio.wait_for(_redraw.wait(), ANIM_INTERVAL)
+        except Exception:  # noqa: BLE001 -- timeout is the expected/common case
+            pass
+        _redraw.clear()
 
 
 async def _touch_loop():
     # Polled faster than the redraw so a quick tap isn't missed; acts on the
-    # rising edge (untouched -> touched).
+    # rising edge (untouched -> touched). The 250 ms debounce is on top of,
+    # not instead of, that edge check -- was/touched already stops a held
+    # finger from re-firing, so this was only ever costing latency on a
+    # legitimate quick second tap. Shortened rather than removed outright:
+    # worth confirming on-device that no spurious double-fires come back
+    # before cutting it further (REFACTORING.md #4).
     was = False
     last_ms = 0
     while True:
@@ -811,72 +261,53 @@ async def _touch_loop():
             presto.touch.poll()
             touched = presto.touch.state
             if touched and not was:
+                log("touch: down at", presto.touch.x, presto.touch.y)
                 now = time.ticks_ms()
-                if time.ticks_diff(now, last_ms) > 250:   # debounce
+                since = time.ticks_diff(now, last_ms)
+                if since > 80:   # debounce
                     last_ms = now
-                    handle_tap(presto.touch.x, presto.touch.y)
+                    log("touch: debounce passed, dispatching")
+                    _ui.handle_tap(presto.touch.x, presto.touch.y)
+                else:
+                    log("touch: debounced,", since, "ms since last accepted tap")
             was = touched
         except Exception as e:  # noqa: BLE001
             log("TOUCH ERROR:", repr(e))
         await asyncio.sleep_ms(50)
 
 
-async def _fetch_loop():
-    global _planes, _fetch_count, _fetch_ok
-    while True:
-        log("fetch...")
-        t = time.ticks_ms()
-        try:
-            fresh = await fetch_planes()
-        except Exception as e:  # noqa: BLE001
-            log("FETCH ERROR:", repr(e))
-            if hasattr(sys, "print_exception"):
-                sys.print_exception(e)
-            fresh = None
-        _fetch_count += 1
-        _fetch_ok = fresh is not None
-        if fresh is not None:
-            _planes = fresh
-            # Re-point the selection at the same aircraft in the fresh list, or
-            # clear it (and un-shift the view) if that aircraft has dropped off.
-            if _selected is not None:
-                h = _selected["hex"]
-                _set_selected(next((q for q in fresh if q["hex"] == h), None))
-            log("fetch done:", len(_planes), "planes",
-                time.ticks_diff(time.ticks_ms(), t), "ms  mem", gc.mem_free())
-        await asyncio.sleep_ms(FETCH_INTERVAL_MS)
-
-
 async def _amain():
-    await asyncio.gather(_render_loop(), _fetch_loop(), _touch_loop())
+    await asyncio.gather(_render_loop(), _feed.run(), _touch_loop())
 
 
 def main():
-    print("main: start  display:", DISPLAY_MODE, " colour:", COLOUR_MODE)
+    print("main: start  display:", SETTINGS.DISPLAY_MODE, " colour:", SETTINGS.COLOUR_MODE)
 
-    build_basemap_cache()
-    print("main: basemap cache:", len(_BASEMAP_SEGS or ()), "segments,",
-          len(_BASEMAP_MARKS), "marks")
+    _backdrop.build_vector_cache()
+    _backdrop.load(_ui.view_cx, _ui.selected)
+    print("main: basemap cache:", len(_backdrop.segs or ()), "segments,",
+          len(_backdrop.marks), "marks; map layers",
+          "on" if _backdrop.map_layers else "off")
 
     if SKIP_NETWORK:
         print("main: SKIP_NETWORK -- drawing grid + basemap only")
         frame = 0
         while True:
             t = time.ticks_ms()
-            draw_scene([])
+            _renderer.draw_scene([], _ui.selected, _ui.settings_open)
             frame += 1
             print("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
-                  "ms  basemap", _basemap_ms, "ms")
+                  "ms  basemap", _renderer.basemap_ms, "ms")
             time.sleep(1)
 
-    show_message("Connecting...")
+    _renderer.show_message("Connecting...")
 
     try:
         wifi = presto.connect()
     except Exception as e:  # noqa: BLE001
         print("main: connect failed:", repr(e))
         while True:
-            show_message("WiFi: %s" % e)
+            _renderer.show_message("WiFi: %s" % e)
             time.sleep(3)
 
     log_init()
@@ -886,7 +317,8 @@ def main():
     if basemap_data is not None:
         log("basemap rings", len(basemap_data.COASTLINE),
             "airports", len(getattr(basemap_data, "AIRPORTS", ())),
-            "cached segs", len(_BASEMAP_SEGS or ()), "marks", len(_BASEMAP_MARKS))
+            "cached segs", len(_backdrop.segs or ()), "marks", len(_backdrop.marks))
+    log("map layers", "on" if _backdrop.map_layers else "off")
 
     try:
         ip = network.WLAN(network.STA_IF).ifconfig()[0]

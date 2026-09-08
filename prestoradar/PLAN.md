@@ -1,6 +1,10 @@
 # presto-radar — planned work
 
 Running list of larger pieces not yet started. Smaller tweaks go straight in.
+For the shape of the code itself (splitting fetch/parse from drawing,
+encapsulating state in objects, colour/theme handling, touch latency, live
+settings toggles) see `REFACTORING.md` instead — that's a reorganisation
+proposal, not a new feature.
 
 ---
 
@@ -146,10 +150,11 @@ re-tapping the same plane; airline name / `desc` wrapping could be nicer.
 
 **Phase 1 done (in-memory).** A hamburger button bottom-right opens a small
 overlay (`draw_settings_panel` / `_settings_tap`) with tap-to-cycle rows for
-`DISPLAY_MODE`, `COLOUR_MODE` and `HIDE_ON_GROUND` — display-only tunables that
-just change the next `draw_scene` (ground filter applies on the next fetch).
-Reuses the item 2a touch plumbing; mutually exclusive with the detail panel.
-Changes are lost on reboot.
+`DISPLAY_MODE`, `COLOUR_MODE` and `HIDE_ON_GROUND` — all three now take effect
+on the next `draw_scene`, including the ground filter (moved from `fetch_planes`
+to a draw-time `_hidden()` check, REFACTORING.md #5 -- it used to wait for the
+next fetch). Reuses the item 2a touch plumbing; mutually exclusive with the
+detail panel. Changes are lost on reboot.
 
 **Phase 2 (persistence) is blocked.** `settings.py` is still edit-and-redeploy
 for anything that must survive a reboot. The plan was a JSON overrides file, but
@@ -427,39 +432,189 @@ parks, place names -- baked in, drawn as a static background at essentially zero
 per-frame cost. Worth having as **an alternative mode**, not a replacement: the
 green-rings scope look still suits sparse airspace and the retro feel.
 
-**Build side.** A `make_basemap_raster.py` (or a `--raster` mode on the existing
-tool) renders a square image in the same kilometres-east/north frame radar.py
-projects into, keyed on centre / `RADIUS_KM` / `--if-stale` like the vector
-build. Source options: Natural Earth raster (public domain, coarse), a local
-tile render, or a one-off static-map export (mind tile-usage terms +
-attribution). Output as **`PEN_P8` palette** (1 byte/px, ~230 KB at 480x480, vs
-460 KB for RGB565; 256 colours is plenty for a map) plus its palette, or plain
-RGB565.
+**Done (first cut).** `dev/raster_basemap_probe.py` measured three ways to get a
+backdrop under the aircraft; `make_basemap.py --raster` and `radar.py` ship a
+fourth assembled from what they showed (route B's layer split, kept at 480x480).
 
-**Device side -- the blit is the crux.** PicoGraphics has no "draw this
-bytearray as the background". Two routes:
+**The probe (`dev/raster_basemap_probe.py`, three routes, one Presto init each):**
 
-- **240x240, non-`full_res` -> 2 layers.** Put the raster on layer 0 once, draw
-  only planes (and optional rings) on layer 1 each frame. Cleanest; half the
-  resolution. The right first prototype.
-- **`full_res` `PEN_P8`, single layer + a resident copy.** Hold a ~230 KB
-  `bytearray` of the rendered background; each frame
-  `memoryview(fb)[:] = background` then draw planes on top. Needs
-  `direct_to_fb=True` to expose the framebuffer as writable (see item 4's
-  notes). ~230 KB on top of the framebuffer -- check `gc.mem_free()` against the
-  TLS + fetch-body pressure first.
+| route | resolution | backdrop / frame | frame total | RAM over baseline | blocks the loop? |
+|---|---|---|---|---|---|
+| A `full_res` + per-frame `jpegdec` decode | 480x480 | 380 ms decode | 407 ms (~2.5 fps) | none (in place) | **yes, 380 ms/frame** |
+| B 240x240, backdrop on layer 0 once, planes on layer 1 | 240x240 | ~0 | fast | ~115 KB layer | no |
+| C `full_res` + `direct_to_fb`, resident RGB565 blit | 480x480 | 24 ms `buffer[:] = bg` | 25 ms | 460 KB copy | no |
 
-**RAM, not CPU, is the blocker.** TLS, the response body and the framebuffer
-already stress the Pico; a second full-frame buffer may not fit at `full_res`,
-which is why the 240x240 `PEN_P8` route is the one to try first.
+**The "RAM, not CPU, is the blocker" premise was wrong for this firmware:**
+`gc.mem_free()` is ~8 MB at boot (the MicroPython heap is in PSRAM), so a
+full-res second buffer costs 460 KB out of 8 MB and the ~60 KB JSON body + TLS
+buffers are noise. That killed the reason route B dropped to 240x240.
 
-**As a mode.** Fold into the existing `settings.DISPLAY_MODE` (item 7) rather
-than a separate `BASEMAP_MODE`: `"map"` gains the raster background (blit the
-image, skip the green grid), `"radar"` keeps the vector scope. `draw_scene()`
-already branches on `DISPLAY_MODE` for aircraft; this extends that branch to the
-backdrop. Items 6 and 7 already ship the no-labels + icon half of the mode; this
-is the backdrop half.
+**Route C looked best on the probe but strobes in the real radar.** With
+`direct_to_fb` there is one buffer and no atomic present: `draw_scene()`'s
+whole-frame `presto.buffer[:] = _raster_bg` restore erases every icon and takes
+~24 ms, during which the scanout DMA shows the icon-free backdrop. Each moving
+icon is then absent for ~5% of every 500 ms frame -- a visible 2 Hz flicker.
+Route A's per-frame decode has the same "absent" window, 15x worse.
 
-**Lean:** prototype `raster` at 240x240 `PEN_P8` with two layers and Natural
-Earth raster; decide from that whether the resolution and RAM headroom justify
-the `full_res` `direct_to_fb` copy.
+**Shipped: route B's structure at full res.** `jpegdec` decodes `basemap.jpg`
+onto PicoGraphics **layer 0** once at boot; `draw_scene()` clears **layer 1**
+and draws the aircraft there each frame; `presto.update()` does its beam-raced
+composite (`*dst = layer1 ? layer1 : layer0`, `st7701.cpp`) -- tear-free, no
+per-frame backdrop cost, and 480x480 is kept because nothing forces `layers=1`
+at `full_res`, only the `Presto()` default does (overridden with `layers=2`).
+Cost is ~1.4 MB more PicoGraphics buffer (two full-res layers) -- fine against
+8 MB. **Confirmed on-device:** `full_res` + `layers=2` is accepted and
+composites cleanly -- the overlay (legend, selected-plane icon, settings
+button) all sit correctly over the backdrop with no corruption, tearing, or
+flicker. The 240x240 fallback was not needed.
+
+**What shipped:**
+
+- **Build, fetch (no key):** `make_basemap.py --raster-fetch` GETs
+  `basemap.jpg` from an ArcGIS World MapServer's public `export` endpoint
+  (`--raster-style topo/street/imagery`; `topo` default), standard library only.
+  First cut requested the radar frame's bbox with `bboxSR=imageSR=4326` (plain
+  lat/lon), expecting ArcGIS to render it as a linear equirectangular raster
+  matching radar.py's own projection. **On device it came out visibly stretched
+  vertically** -- these services are Web-Mercator-tiled, and reprojecting the
+  cache to 4326 on the fly does its own aspect handling in the native SR,
+  which didn't line up with a bbox only made square via the degrees-times-
+  cos(lat) trick. Fixed by fetching in the service's **native SR (3857)**
+  instead (`frame_bbox_3857()`): Web Mercator is locally conformal, so a bbox
+  built by applying one local scale factor (`sec(CENTER_LAT)`) to the target
+  ground distance in both directions is square in Mercator metres too, and
+  over a radar-sized extent (tens of km) that factor barely varies across the
+  bbox -- no server-side reprojection, no distortion, confirmed by eye against
+  the pre-fix fetch. Natural Earth raster was considered and rejected: its
+  finest tier is ~2 km/px, far too coarse for a 60-190 km radar frame
+  (world/continent scale, not this zoom).
+- **Build, bring-your-own:** `make_basemap.py --raster <image>` (needs Pillow,
+  the `raster` optional-dependency extra) instead conforms an image you already
+  have -- resize so the short side is 480, centre-crop to 480x480, save
+  baseline JPEG. Unlike `--raster-fetch` it does **not** know the image's
+  geographic bounds, so alignment is on you: the source must already cover the
+  radar frame in the same flat projection.
+  Both write `prestoradar/basemap.jpg` + a `basemap.jpg.json` sidecar of their
+  params for `--if-stale`, and short-circuit the whole GSHHG/airport path.
+- **Deploy:** `radar_deploy.sh` copies `basemap.jpg` to `:prestoradar/` if
+  present. `basemap.jpg` + sidecar are gitignored like `basemap_data.py`.
+- **Device:** `radar.py` boots `Presto(..., layers=2 if _RASTER_OK else 1)`
+  where `_RASTER_OK = DISPLAY_MODE == "map" and DRAW_BASEMAP`.
+  `load_raster_basemap()` decodes onto layer 0 via `_draw_map_backdrop()` (or
+  draws the vector grid there if `basemap.jpg` is missing); `draw_scene()`
+  branches on `_map_layers` to clear+draw on layer 1.
+- **Panel shift, both modes.** `_set_selected()` shifts `_view_cx` the same way
+  in map mode as in scope mode -- `_draw_map_backdrop()` re-decodes the JPEG
+  onto layer 0 at the new x offset (`_view_cx - WIDTH/2`) so the raster stays
+  registered with the aircraft instead of drifting under them. One ~380 ms
+  decode, paid only on selection change like the vector cache rebuild it
+  mirrors, not per frame. **Confirmed on-device:** `jpegdec.decode()` clips a
+  negative x cleanly on this firmware.
+- **Panel shift, adaptive.** The first cut shifted by a flat `_PANEL_SHIFT`
+  whenever anything was selected -- correct only for a plane that started near
+  centre. A plane already clear of the panel got shifted anyway (risking the
+  left edge); a plane already under where the panel lands often stayed there
+  after only a fixed 112 px move. `_target_view_cx(p)` replaces it: shift left
+  only as far as needed to bring `p` to `_PANEL_MARGIN` (20 px) clear of
+  `PANEL_X` -- zero shift if it's already clear.
+
+  Clamping this to the raster's theoretical limit (`PANEL_X - WIDTH`, so the
+  map-mode backdrop -- one 480 px `jpegdec` decode starting at the shift --
+  still reaches `PANEL_X`) instead made the backdrop **disappear** for a plane
+  far enough right to need close to that much shift, rather than just clip.
+  The magnitude involved (up to -224) was larger than the old flat shift ever
+  asked for (-112, confirmed working); something in `jpegdec.decode()`'s
+  negative-x handling likely breaks down somewhere in between, not yet pinned
+  down. `_MAX_SHIFT` now clamps to that smaller, previously-working magnitude
+  instead -- **mitigates, not confirmed fixed**: a plane needing more shift
+  than that still lands partly under the panel (the lesser failure), but the
+  backdrop itself should never vanish. Watch the device log
+  (`_draw_map_backdrop`'s `offset_x` print) if it does -- narrowing where it
+  actually breaks would let `_MAX_SHIFT` come back up.
+
+  A second, distinct bug turned up alongside it: `_target_view_cx()` did
+  float arithmetic (`p["e"] * PX_PER_KM`) and could return a `float` whenever
+  an actual shift was needed. `_view_cx` then fed uncast into
+  `jpegdec.decode()`'s `offset_x` and, via the vector-grid fallback,
+  `display.circle()`/`line()` -- both want ints, and MicroPython's C
+  extensions raise rather than coerce, surfacing as
+  `TypeError("can't convert float to int")` from the touch handler on
+  selection. The old flat-shift formula was pure integer arithmetic so this
+  only appeared with the adaptive rewrite; fixed with a single `int(...)` on
+  `_target_view_cx()`'s return.
+- **Legend/status contrast in map mode.** `TEXT_COLOR` (pale green, tuned for
+  the dark scope background) and `VSTATE_PENS["level"]` (near-white) both
+  washed out over light map colours. `MAP_TEXT_PEN` (near-black -- deliberately
+  not pure black, which is `TRANSPARENT_PEN`'s value and would show layer 0
+  through the mark instead of drawing over it) is used for the legend labels,
+  the status line, and (via `MAP_VSTATE_PENS`, which reuses `VSTATE_PENS` for
+  climb/descent) the "level" dot -- in the legend *and* on the aircraft itself,
+  via `plane_pen()`, so the swatch keeps matching what's drawn. A dark halo
+  behind each legend dot besides. climb/descent (cyan/amber) weren't touched --
+  saturated enough to read on the basemap styles tried so far. The
+  detail/settings panels already have their own opaque background so weren't
+  affected. Not yet re-examined: the callsign tag in `_draw_planes_radar`
+  (scope-only, not reachable in map mode)
+  and any other bare text drawn straight onto the raster.
+
+**Still open:**
+
+- **`--raster` (bring-your-own) alignment.** Still trusts you to supply an
+  image of the right box in the right projection -- `--raster-fetch` sidesteps
+  this entirely, so it's only a gap for a custom source. Printing
+  `frame_bbox_deg()`'s box for the user to export/crop to, or accepting the
+  source's own bounds + projection and reprojecting, would close it. A visual
+  overlay check (raster + vector coastline on top) would catch a mis-scaled or
+  off-centre source either way.
+- **Runtime toggle restores the whole look, not just the icons.** Toggling
+  `DISPLAY_MODE` from the on-device settings overlay always changed the
+  aircraft icon shape (`draw_planes()` already read it every frame), but nothing
+  else followed along, in two separate ways found back to back:
+
+  1. The **backdrop** stayed on whatever it booted with -- `_draw_map_backdrop()`
+     only ever ran from boot and from the panel-shift path, never from the
+     toggle itself, and even when it did run for `"radar"` it only drew
+     `draw_radar_grid()` (rings), not `draw_basemap()` (coastline/airports) --
+     so toggling to `"radar"` showed rings on a blank field instead of the full
+     scope look. Fixed: `_toggle_setting()` now calls `_draw_map_backdrop()`
+     too, and both its branches draw the *complete* look for their mode
+     (raster, or `draw_radar_grid()` + `draw_basemap()` together) -- the same
+     pairing `draw_scene()`'s non-2-layer path already draws every frame.  This
+     only works from a **`"map"` boot** (2 layers): a **`"radar"` boot** (1
+     layer) has no layer 0 to redraw into, so toggling into `"map"` from there
+     still can't get the raster -- that half needs a second `Presto` bring-up,
+     or always booting `layers=2` (and paying the extra buffer in scope mode
+     too).
+
+  2. Separately, `plane_pen()`, `draw_legend_alt()` and the status line all
+     picked their pens off `_map_layers` -- true forever once booted with 2
+     layers, regardless of which mode was *currently* showing -- so toggling to
+     `"radar"` from a `"map"` boot kept the near-black `MAP_TEXT_PEN`/
+     `MAP_VSTATE_PENS` meant for a light raster, now sitting on a dark scope
+     background (illegible). `_showing_raster`, a new flag `_draw_map_backdrop()`
+     sets to reflect what it actually just drew (true only after a successful
+     raster decode, false for the vector-grid fallback, `"radar"`, or no `"map"`
+     boot at all), replaces `_map_layers` at all three call sites -- contrast
+     now tracks what's actually behind the text/dots/icons rather than what the
+     hardware is capable of.
+- **Regen on centre/radius change.** `deploy.sh` copies `basemap.jpg` but cannot
+  rebuild it. `--raster-fetch` makes this a one-line re-run, no state needed;
+  `--raster`'s sidecar records the source path so a `--raster-refresh` that
+  re-runs from it is possible there too.
+- **Attribution.** `--raster-fetch` prints the required Esri/OSM credit line but
+  nothing shows it on-device -- fine for a personal desk display, would need a
+  small always-on label if this were ever shared or shipped.
+
+---
+
+Scratch notes
+
+* Add '--run' option to radar_deploy.sh to call `mpremote run --no-follow ...`
+* Add brightness control (slider?) to settings - particularly for map mode
+* Add path for selected aircraft (with altitude colours?)
+* Resolve incorrect routes
+* Add 'speed' mode to alt/mono?
+* Shadow for current altitude in map mode (requires new plane colour)
+* Fix map not being available when starting in radar mode
+* Disable LEDs option (settings.py only at first?)
+* Retire `-raster` in favour of `-raster-fetch` (which can be renamed)

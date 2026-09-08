@@ -52,7 +52,12 @@ BASEMAP_AIRPORTS = "medium"
 #   "radar" - scope style: a blip, a track arrow, and the callsign next to it.
 #   "map"   - a small plane icon pointed along the track, no callsign. Better
 #             for busy airspace where callsign tags pile up (e.g. a runway
-#             approach). A richer basemap for this mode is planned -- PLAN item 8.
+#             approach). If a raster backdrop has been built
+#             (`make_basemap.py --raster <image>` -> basemap.jpg, deployed) it
+#             replaces the green grid, composited under the aircraft on a second
+#             layer. The layer count is fixed at boot, so this only engages when
+#             "map" is set *here* -- toggling to map from the on-device settings
+#             overlay keeps the vector basemap.
 DISPLAY_MODE = "radar"
 
 # Aircraft colour:

@@ -13,9 +13,15 @@ dependencies = [
     "mpremote>=1.22",
 ]
 
-# prestoradar/make_basemap.py, radar_debug.py, radar_listen.py and
-# screenshot_pull.py are standard-library only (screenshot_pull.py also shells
-# out to macOS `sips`), so nothing beyond CPython is needed to run them.
+# prestoradar/make_basemap.py (default vector build), radar_debug.py,
+# radar_listen.py and screenshot_pull.py are standard-library only
+# (screenshot_pull.py also shells out to macOS `sips`), so nothing beyond
+# CPython is needed to run them.
+
+[project.optional-dependencies]
+# make_basemap.py --raster (PLAN item 8: bake basemap.jpg for map mode) reads
+# and resizes an image. Install with:  uv sync --extra raster
+raster = ["pillow>=9.1"]
 
 [tool.uv]
 package = false

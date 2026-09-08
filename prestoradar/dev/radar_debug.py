@@ -19,7 +19,8 @@ import sys
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# settings.py lives in prestoradar/, one level up from this dev/ dir.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from settings import CENTER_LAT, CENTER_LON, RADIUS_KM
 
 WIDTH = HEIGHT = 480

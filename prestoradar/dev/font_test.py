@@ -2,7 +2,7 @@
 Font rendering report for the Presto at full res: what actually draws *legibly*
 on THIS firmware?
 
-    ../venv/bin/mpremote run prestoradar/font_test.py
+    ../venv/bin/mpremote run prestoradar/dev/font_test.py
 
 Tries each backend in its own try/except and holds the sample on screen for a
 few seconds. IMPORTANT: "OK" in the log only means "no exception" -- a font can

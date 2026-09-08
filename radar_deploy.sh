@@ -11,7 +11,8 @@
 #   * no main.py is deployed -- the stock Pimoroni launcher is left untouched
 #
 # Desktop-only files (radar_debug.py, make_basemap.py, radar_listen.py,
-# basemap_test.py, screenshot_pull.py) are never copied.
+# dev/*, screenshot_pull.py) are never copied. basemap_data.py and, if built,
+# basemap.jpg (the map-mode raster backdrop) go into /prestoradar/.
 #
 # Usage:  ./radar_deploy.sh
 # Then:   mpremote run presto_radar.py      (or reset and use the launcher)
@@ -45,15 +46,39 @@ mpremote cp lib/screenshot.py :lib/screenshot.py
 # Older deploys put screenshot.py in :prestoradar/, which would shadow :lib/.
 mpremote rm :prestoradar/screenshot.py 2>/dev/null || true
 
-echo "Copying prestoradar/radar.py + settings.py ..."
+echo "Copying prestoradar/radar.py + net.py + geometry.py + plane.py + routes.py + feed.py + backdrop.py + render.py + ui.py + aircraft_types.py + airlines.py + settings.py ..."
 mpremote cp prestoradar/radar.py :prestoradar/radar.py
+mpremote cp prestoradar/net.py :prestoradar/net.py
+mpremote cp prestoradar/geometry.py :prestoradar/geometry.py
+mpremote cp prestoradar/plane.py :prestoradar/plane.py
+mpremote cp prestoradar/routes.py :prestoradar/routes.py
+mpremote cp prestoradar/feed.py :prestoradar/feed.py
+mpremote cp prestoradar/backdrop.py :prestoradar/backdrop.py
+mpremote cp prestoradar/render.py :prestoradar/render.py
+mpremote cp prestoradar/ui.py :prestoradar/ui.py
+mpremote cp prestoradar/aircraft_types.py :prestoradar/aircraft_types.py
+mpremote cp prestoradar/airlines.py :prestoradar/airlines.py
 mpremote cp prestoradar/settings.py :prestoradar/settings.py
 
-if [ -f prestoradar/basemap_data.py ]; then
-    echo "Copying prestoradar/basemap_data.py ..."
-    mpremote cp prestoradar/basemap_data.py :prestoradar/basemap_data.py
-else
-    echo "Skipping basemap_data.py (not generated yet -- run make_basemap.py)"
+# Generated lookup tables (make_basemap.py / make_aircraft_types.py /
+# make_airlines.py). aircraft_types.py and airlines.py import their _data
+# sibling at boot, so a missing table is a hard ImportError on-device, not a
+# soft blank like the basemap -- generate them before first deploy.
+for data in basemap_data aircraft_types_data airlines_data; do
+    if [ -f "prestoradar/$data.py" ]; then
+        echo "Copying prestoradar/$data.py ..."
+        mpremote cp "prestoradar/$data.py" ":prestoradar/$data.py"
+    else
+        echo "Skipping $data.py (not generated yet -- run make_${data%_data}.py)"
+    fi
+done
+
+# Raster backdrop for DISPLAY_MODE = "map" (PLAN item 8). Built out-of-band with
+# `make_basemap.py --raster <image>`; regenerate it by hand when the centre or
+# radius changes -- this script only copies whatever is present.
+if [ -f prestoradar/basemap.jpg ]; then
+    echo "Copying prestoradar/basemap.jpg (raster map-mode backdrop) ..."
+    mpremote cp prestoradar/basemap.jpg :prestoradar/basemap.jpg
 fi
 
 echo "Copying presto_radar.py (root entry shim) ..."
