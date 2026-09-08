@@ -86,3 +86,10 @@ SCREENSHOT_PORT = 8011
 # rate; "geom_rate" is the GPS-derived fallback. Anything within this band of
 # zero -- or with no rate reported -- counts as flying level.
 LEVEL_RATE_FPM = 256
+
+# Position-history trail for the selected aircraft (radar mode). When 1, tapping
+# an aircraft seeds its trail from adsb.lol's trace_recent (the last ~5 min of
+# real track). When 0, the trail is built live from the poll loop instead --
+# one fix per fetch. The in-RAM live trail is always kept either way; this only
+# toggles the network seed. See DATA_TRACE.md.
+TRACE_SEED = 1

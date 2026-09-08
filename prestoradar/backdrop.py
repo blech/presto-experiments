@@ -150,6 +150,7 @@ class Backdrop:
             self.display.line(s[0], s[1], s[2], s[3])
         if self.marks:
             self.display.set_pen(self.airport_pen)
+            self.display.set_font("bitmap6")   # rebuilds can run mid-frame, after a bitmap8 panel draw
             for x, y, name in self.marks:
                 self.display.circle(x, y, 3)
                 self.display.text(name, x + 5, y - 4, WIDTH, 1)
