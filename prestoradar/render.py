@@ -32,6 +32,15 @@ _ICON_TRIS = (
 _CAT_SCALE = {"A1": 0.72, "A2": 0.88, "A3": 1.0, "A4": 1.2, "A5": 1.35}
 
 
+def _trace_pen_index(seg_idx, n_segs, n_pens):
+    """Pen index in [0, n_pens) for trail segment seg_idx (0 = oldest) of
+    n_segs. Oldest segment -> 0 (dimmest), newest -> n_pens - 1, so the line
+    fades in from where the aircraft has been to where it is now."""
+    if n_segs <= 1:
+        return n_pens - 1
+    return min(n_pens - 1, seg_idx * n_pens // n_segs)
+
+
 class Renderer:
     """Owns every pen and every draw_* routine -- everything that decides
     what the screen actually looks like each frame. Two kinds of state this
@@ -145,12 +154,15 @@ class Renderer:
         self.PANEL_LABEL = display.create_pen(192, 192, 192)  # row labels, dimmer than values
         self.SELECT_PEN = display.create_pen(255, 235, 90)    # ring: distinct from vstate pens
         self.EMERG_PEN = display.create_pen(255, 70, 70)
-        # Selected-aircraft position trail (radar mode). One muted blue-grey
-        # that reads as "history" against the dark scope -- altitude colouring
-        # is a possible later pass (DATA_TRACE.md step 7). It replaces the
-        # heading/speed arrow while it's shown, so it doesn't need to compete
-        # with the vstate pens.
-        self.TRACE_PEN = display.create_pen(70, 110, 130)
+        # Trail ramp: dim -> bright, oldest -> newest, so the line reads
+        # directionally. Keyed to SELECT_PEN's yellow (the ring around the
+        # same target) -- clear of COAST_PEN's blue-grey and the vstate pens.
+        self.TRACE_PENS = (
+            display.create_pen(70, 65, 25),
+            display.create_pen(120, 110, 45),
+            display.create_pen(170, 155, 65),
+            display.create_pen(215, 200, 90),
+        )
 
     def theme(self):
         return self.THEMES["map"] if self.backdrop.showing_raster else self.THEMES["radar"]
@@ -323,16 +335,21 @@ class Renderer:
         # trace_recent seed when it resolved, else the in-RAM trail feed.py
         # accumulates. Drawn before the markers so a marker sits on top; every
         # segment is viewport-clipped (a jet's 5 min trace reaches well past a
-        # 30 km scope).
+        # 30 km scope) and pen-ramped by age.
         d = self.display
-        d.set_pen(self.TRACE_PEN)
         pts = [self.to_screen(e, n) for (e, n, _alt) in trace]
         if selected is not None:
             pts.append(self.to_screen(selected.e, selected.n))
+        n_segs = len(pts) - 1
+        if n_segs < 1:
+            return
+        pens = self.TRACE_PENS
         px, py = pts[0]
-        for cx, cy in pts[1:]:
+        for i in range(1, len(pts)):
+            cx, cy = pts[i]
             seg = _clip_segment(px, py, cx, cy)
             if seg is not None:
+                d.set_pen(pens[_trace_pen_index(i - 1, n_segs, len(pens))])
                 d.line(int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3]))
             px, py = cx, cy
 
