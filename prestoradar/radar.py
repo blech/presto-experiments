@@ -113,39 +113,12 @@ display = presto.display
 WIDTH, HEIGHT = 480, 480
 print("radar.py: Presto display ready  (layers=%d)" % (2 if _RASTER_OK else 1))
 
-# Tap-to-inspect (PLAN item 2a): a right-hand detail sidebar and a ring on the
-# selected aircraft. view_cx (the x-pixel that km-east 0 maps to, see
-# to_screen) is ui.UI instance state -- shifted left while the sidebar is
-# open so the visible radar re-centres in what's left; the basemap cache is
-# rebuilt on change since its segments are pre-projected.
-PANEL_X = 256                                      # sidebar spans PANEL_X..WIDTH (~224 px)
+# Tap-to-inspect (PLAN item 2a): a compact detail card in a screen corner and a
+# ring on the selected aircraft. view_cx (the x-pixel that km-east 0 maps to,
+# see to_screen) is ui.UI instance state, fixed at centre -- the corner card
+# needs no room made for it, so the scene is never nudged sideways any more
+# (UI-TRAILS.md decision 9).
 HIT_RADIUS = 26                                    # px; generous finger target
-
-# Shifting the view while the sidebar is open used to be a flat offset, which
-# was wrong for anything except a plane that started near centre: already clear
-# of the panel, it got shifted anyway (risking the left edge); already under
-# where the panel lands, it often stayed there. UI._target_view_cx() instead
-# shifts left only as far as the *selected* plane needs to clear the panel.
-_PANEL_MARGIN = 20                    # clearance kept between the plane and PANEL_X
-# How far left the view is ever allowed to shift. The raster only strictly
-# needs offset_x >= PANEL_X - WIDTH (so the map-mode backdrop -- one 480px
-# jpegdec decode starting at the shift -- still reaches PANEL_X); with
-# PANEL_X=256 that's -224, so this is set to the theoretical limit rather
-# than clamped short of it.
-#
-# This used to be capped at 112: a plane needing more shift than that made
-# the backdrop disappear instead of just clipping, and the cause was never
-# pinned down further than "something in jpegdec.decode()'s negative-x
-# handling, somewhere between 112 and 224". That was diagnosed before
-# UI._target_view_cx() existed, back when the shift was applied as a flat,
-# hand-written offset rather than always going through one int()-casting
-# choke point -- plausibly the same float-related freeze seen elsewhere in
-# this app during development, not a real jpegdec magnitude limit. Worth
-# re-verifying on-device at the full 224 before reintroducing a clamp; if
-# the backdrop still disappears well short of it, put the cap back with
-# whatever value this testing finds, not blindly back at 112.
-_MAX_SHIFT = 224
-_MIN_VIEW_CX = WIDTH // 2 - _MAX_SHIFT
 
 # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) ----
 SETTINGS_BTN = (WIDTH - 40, HEIGHT - 36, 36, 32)      # x, y, w, h  (bottom-right)
@@ -174,7 +147,7 @@ def _hidden(p):
 # backdrop left unset, Backdrop is built using pieces off it, then
 # Renderer.backdrop is assigned. Same two-phase pattern as _feed.on_update.
 _renderer = render.Renderer(display, presto, SETTINGS, _feed, to_screen, _hidden,
-                             RADIUS_KM, PX_PER_KM, PANEL_X, SETTINGS_BTN, _SPANEL,
+                             RADIUS_KM, PX_PER_KM, SETTINGS_BTN, _SPANEL,
                              _SP_ROW0, _SP_ROWH, _SP_VALDX)
 _backdrop = backdrop.Backdrop(display, SETTINGS, _RASTER_OK, DRAW_BASEMAP, basemap_data,
                                to_screen, _renderer.draw_radar_grid,
@@ -196,7 +169,7 @@ _renderer.backdrop = _backdrop
 # than UI reaching into feed.py directly.
 _redraw = asyncio.Event()
 _ui = ui.UI(SETTINGS, _backdrop, _renderer, _hidden, _redraw.set,
-            PX_PER_KM, PANEL_X, HIT_RADIUS, _PANEL_MARGIN, _MAX_SHIFT, _MIN_VIEW_CX,
+            PX_PER_KM, HIT_RADIUS,
             SETTINGS_BTN, _SPANEL, _SP_ROW0, _SP_ROWH)
 _feed.on_update = _ui.on_feed_update
 

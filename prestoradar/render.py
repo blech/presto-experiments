@@ -99,7 +99,7 @@ class Renderer:
     """
 
     def __init__(self, display, presto, settings, feed, to_screen, hidden,
-                 radius_km, px_per_km, panel_x, settings_btn, spanel,
+                 radius_km, px_per_km, settings_btn, spanel,
                  sp_row0, sp_rowh, sp_valdx):
         self.display = display
         # bitmap6 (PicoGraphics' default, made explicit) everywhere on the
@@ -114,7 +114,6 @@ class Renderer:
         self.hidden = hidden
         self.radius_km = radius_km
         self.px_per_km = px_per_km
-        self.panel_x = panel_x
         self.settings_btn = settings_btn
         self.spanel = spanel
         self.sp_row0 = sp_row0
@@ -334,14 +333,15 @@ class Renderer:
             d.text(line, tx, ty, WIDTH, _TAG_SCALE)
 
     def draw_radar_grid(self, view_cx, selected):
+        # selected: unused since the sidebar was removed; kept for backdrop.py's call
         d = self.display
         d.set_pen(self.BG_COLOR)
         d.clear()
         # Concentric rings at RADIUS_KM and half that
         self._ring(view_cx, 240, int(self.radius_km * self.px_per_km))
         self._ring(view_cx, 240, int(self.radius_km * 0.5 * self.px_per_km))
-        # Crosshairs -- stop the horizontal one at the sidebar when it's open
-        x_right = self.panel_x - 4 if selected is not None else WIDTH - 10
+        # Full-width crosshair -- no sidebar to clear any more
+        x_right = WIDTH - 10
         d.set_pen(self.RADAR_ICON_COLOR)
         d.line(view_cx, 10, view_cx, 470)
         d.line(10, 240, x_right, 240)
