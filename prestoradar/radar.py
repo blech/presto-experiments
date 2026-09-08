@@ -218,7 +218,7 @@ async def _render_loop():
             _ui.dismiss_if_hidden()
 
             t = time.ticks_ms()
-            _renderer.draw_scene(_feed.planes, _ui.selected, _ui.settings_open)
+            _renderer.draw_scene(_feed.planes, _ui.selected, _ui.settings_open, _ui.detail_level)
             frame += 1
             if frame <= 3 or frame % 20 == 0:
                 log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
@@ -294,7 +294,7 @@ def main():
         frame = 0
         while True:
             t = time.ticks_ms()
-            _renderer.draw_scene([], _ui.selected, _ui.settings_open)
+            _renderer.draw_scene([], _ui.selected, _ui.settings_open, _ui.detail_level)
             frame += 1
             print("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
                   "ms  basemap", _renderer.basemap_ms, "ms")

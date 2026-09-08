@@ -7,6 +7,21 @@ from netlog import log
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
 
 
+def _advance_selection(selected, level, tapped):
+    """Tap-cycle state machine. `tapped` is the plane under the tap, or None
+    for empty space. Returns (new_selected, new_level):
+
+      - empty space        -> (None, 1)                 dismiss
+      - a different plane   -> (tapped, 1)              select fresh at stage 1
+      - the same plane      -> (selected, level % 3 + 1) cycle 1 -> 2 -> 3 -> 1
+    """
+    if tapped is None:
+        return None, 1
+    if tapped is not selected:
+        return tapped, 1
+    return selected, level % 3 + 1
+
+
 class UI:
     """Owns touch handling, the selected-aircraft state, the view shift that
     follows it, and the settings overlay -- the last piece of
@@ -46,6 +61,7 @@ class UI:
         self.sp_rowh = sp_rowh
 
         self.selected = None      # the selected plane.Plane, or None
+        self.detail_level = 1     # tap-cycle stage 1..3, meaningful while selected
         self.view_cx = WIDTH // 2  # x-pixel that km-east 0 maps to (see radar.py's to_screen)
         self.settings_open = False
         self._backdrop_dirty = False  # set by set_selected() (view_cx changed) or
@@ -91,6 +107,8 @@ class UI:
         # rather than being started right here (REFACTORING.md #4).
         had_selection = self.selected is not None
         self.selected = p
+        if p is None:
+            self.detail_level = 1
         cx = self._target_view_cx(p)
         if cx != self.view_cx:
             mode = self.settings.DISPLAY_MODE
@@ -268,6 +286,17 @@ class UI:
         # A tap inside the open sidebar is for the panel, not a dismiss.
         if self.selected is not None and tx >= self.panel_x:
             return
+        # The already-selected plane gets a larger tap target, so a slightly
+        # off second tap advances the cycle instead of dismissing.
+        if self.selected is not None:
+            for x, y, p in self.renderer.last_drawn:
+                if p is self.selected:
+                    r = self.hit_radius * 1.6
+                    if (x - tx) ** 2 + (y - ty) ** 2 <= r * r:
+                        self.set_selected(self.selected)  # keep route/trace warm
+                        self.detail_level = self.detail_level % 3 + 1
+                        return
+                    break
         best, best_d = None, self.hit_radius * self.hit_radius
         for x, y, p in self.renderer.last_drawn:
             d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
@@ -279,4 +308,8 @@ class UI:
             log("ui: panel dismissed (background tap)")
         else:
             log("ui: background tapped, nothing selected")
-        self.set_selected(best)      # None => tapped empty space => dismiss
+        # Tap-cycle: a second tap on the already-selected plane advances the
+        # detail level; a tap elsewhere selects or dismisses (level resets to
+        # 1 via set_selected / _advance_selection).
+        sel, self.detail_level = _advance_selection(self.selected, self.detail_level, best)
+        self.set_selected(sel)

@@ -46,6 +46,22 @@ _TAG_CH_W = 8       # ~px per character at that scale
 _TAG_H = 16         # ~px tall
 
 
+def _data_block(p):
+    """Three short lines for the stage-2 on-scope ATC tag: callsign, then
+    flight level + ground speed, then ICAO type. Altitude / 100 for FL
+    ("GND" on the ground, "---" if unknown); speed to the nearest knot; "?"
+    for an unknown type."""
+    cs = p.callsign or p.hex or "?"
+    a = p.alt
+    if a in (0, "ground"):
+        lvl = "GND"
+    elif isinstance(a, (int, float)):
+        lvl = "FL%03d" % (int(a) // 100)
+    else:
+        lvl = "---"
+    return (cs, "%s %dkt" % (lvl, round(p.gs or 0)), p.type or "?")
+
+
 class Renderer:
     """Owns every pen and every draw_* routine -- everything that decides
     what the screen actually looks like each frame. Two kinds of state this
@@ -290,6 +306,21 @@ class Renderer:
         d.set_pen(self.RADAR_TEXT_PEN)
         d.text(text, tx, ty, WIDTH, _TAG_SCALE)
 
+    def _draw_data_block(self, x, y, p):
+        # Stage-2 ATC tag: three lines stacked upward from the blip, each on
+        # its own dark backing box. Anchored to the right of the blip like a
+        # plain tag.
+        d = self.display
+        lines = _data_block(p)
+        tx = x + 8
+        for j, line in enumerate(lines):
+            ty = y - 8 - (len(lines) - 1 - j) * _TAG_H
+            w = len(line) * _TAG_CH_W
+            d.set_pen(self.BG_COLOR)
+            d.rectangle(tx - 1, ty - 1, w + 2, _TAG_H)
+            d.set_pen(self.RADAR_TEXT_PEN)
+            d.text(line, tx, ty, WIDTH, _TAG_SCALE)
+
     def draw_radar_grid(self, view_cx, selected):
         d = self.display
         d.set_pen(self.BG_COLOR)
@@ -357,22 +388,26 @@ class Renderer:
             return theme["vstate"].get(p.vstate, theme["icon"])
         return theme["icon"]
 
-    def _draw_planes_radar(self, order, selected, trace_active):
-        # Scope style: blip, track arrow, callsign tag. Ambient callsign tags
-        # are culled to the non-overlapping nearest-centre set (decision 7).
-        # When a trace is drawn behind the selected aircraft, that aircraft's
-        # track arrow is suppressed and every other callsign tag is dropped
-        # -- the trail must not be buried in labels.
+    def _draw_planes_radar(self, order, selected, detail_level, trace_active):
+        # Scope style: blip, track arrow, callsign tag. Ambient tags are
+        # culled to the nearest-centre non-overlapping set; while something
+        # is selected, non-selected aircraft carry no tag at all and the
+        # selected one shows a plain callsign (stage 1) or the ATC data
+        # block (stage 2+). Its track arrow is suppressed once a trace shows.
         d = self.display
         labelled = set() if selected is not None else self._ambient_label_set(order)
         for i, (x, y, p) in enumerate(order):
             pen = self.plane_pen(p)
             d.set_pen(pen)
             d.circle(x, y, 3)
-            if p.heading is not None and p.gs > 20 and not (trace_active and p is selected):
+            is_sel = p is selected
+            if p.heading is not None and p.gs > 20 and not (trace_active and is_sel):
                 self.draw_track_arrow(x, y, p.heading, p.gs, pen)
-            if p is selected:
-                self._tag(x, y, p.callsign)
+            if is_sel:
+                if detail_level >= 2:
+                    self._draw_data_block(x, y, p)
+                else:
+                    self._tag(x, y, p.callsign)
             elif i in labelled:
                 self._tag(x, y, p.callsign)
 
@@ -421,7 +456,7 @@ class Renderer:
                 a = math.radians(heading)
                 self._icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
 
-    def draw_planes(self, planes, selected, trace=None):
+    def draw_planes(self, planes, selected, detail_level, trace=None):
         # Lowest altitude first, so where two overlap the higher aircraft is
         # drawn on top -- it's the one nearer the viewer looking down.
         order = []
@@ -437,7 +472,7 @@ class Renderer:
         if self.settings.DISPLAY_MODE == "map":
             self._draw_planes_map(order)
         else:
-            self._draw_planes_radar(order, selected, trace_active)
+            self._draw_planes_radar(order, selected, detail_level, trace_active)
         self.last_drawn = order
 
         # Ring the selected aircraft, on top of everything. Outer/inner discs
@@ -566,7 +601,7 @@ class Renderer:
             y += self.sp_rowh
         self._ptext("tap away to close", px + 10, y + 6, 8, self.PANEL_LABEL)
 
-    def draw_scene(self, planes, selected, settings_open):
+    def draw_scene(self, planes, selected, settings_open, detail_level):
         d = self.display
         d.set_font("bitmap6")             # _ptext() flips to bitmap8 for the panels
         t = time.ticks_ms()
@@ -595,10 +630,10 @@ class Renderer:
         trace = None
         if selected is not None and self.settings.DISPLAY_MODE == "radar":
             trace = traces.points_for(selected)
-        self.draw_planes(planes, selected, trace)
-        if selected is not None:
+        self.draw_planes(planes, selected, detail_level, trace)
+        if selected is not None and detail_level >= 3:
             self.draw_panel(selected)
-        elif not settings_open:
+        elif selected is None and not settings_open:
             self.draw_settings_btn()
         if settings_open:
             self.draw_settings_panel()
