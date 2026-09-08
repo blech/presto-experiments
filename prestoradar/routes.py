@@ -161,18 +161,18 @@ async def _fetch(callsign, lat, lon, track):
 
 
 def request(p):
-    """Kick off a route lookup for plane dict p if one isn't already resolved
+    """Kick off a route lookup for plane.Plane p if one isn't already resolved
     or in flight. A no-op when the plane isn't broadcasting a callsign --
-    feed.py falls back to the ICAO hex id in that case, so p["callsign"] ==
-    p["hex"], and that's never a route to look up -- or when it's an empty
+    feed.py falls back to the ICAO hex id in that case, so p.callsign ==
+    p.hex, and that's never a route to look up -- or when it's an empty
     string. (Can't just test is_hex_id(cs): a real callsign like ACA568 is
     six characters that all happen to be hex digits.) Callers can pass a
     plane straight through even before its callsign is known to be real.
 
     Re-callable: a still-unresolved route (cached None) is re-fetched, with
     p's current position/heading, until it resolves or _MAX_TRIES is hit."""
-    cs = (p["callsign"] or "").strip()
-    if not cs or cs.lower() == (p.get("hex") or "").lower():
+    cs = (p.callsign or "").strip()
+    if not cs or cs.lower() == (p.hex or "").lower():
         return
     cached = _cache.get(cs, "absent")
     if cached == "" or isinstance(cached, tuple):
@@ -181,8 +181,8 @@ def request(p):
         return                                  # looked up, unknown, gave up
     _cache[cs] = ""                             # pending
     _tries[cs] = _tries.get(cs, 0) + 1
-    lat, lon = geometry.unproject(p["e"], p["n"])
-    asyncio.create_task(_fetch(cs, lat, lon, p.get("heading")))
+    lat, lon = geometry.unproject(p.e, p.n)
+    asyncio.create_task(_fetch(cs, lat, lon, p.heading))
 
 
 def get(callsign):

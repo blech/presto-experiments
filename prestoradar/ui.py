@@ -44,7 +44,7 @@ class UI:
         self.sp_row0 = sp_row0
         self.sp_rowh = sp_rowh
 
-        self.selected = None      # the selected plane dict, or None
+        self.selected = None      # the selected plane.Plane, or None
         self.view_cx = WIDTH // 2  # x-pixel that km-east 0 maps to (see radar.py's to_screen)
         self.settings_open = False
         self._backdrop_dirty = False  # set by set_selected() (view_cx changed) or
@@ -62,11 +62,11 @@ class UI:
         ask jpegdec for more shift than is known to work (see max_shift's
         definition in radar.py). Always returns an int: view_cx feeds
         jpegdec.decode()'s offset_x (and, via the vector-grid fallback,
-        display.circle()/line()) uncast, and p["e"] * px_per_km is a float.
+        display.circle()/line()) uncast, and p.e * px_per_km is a float.
         """
         if p is None:
             return WIDTH // 2
-        x0 = WIDTH // 2 + p["e"] * self.px_per_km    # p's unshifted screen x
+        x0 = WIDTH // 2 + p.e * self.px_per_km    # p's unshifted screen x
         wanted = WIDTH // 2 - max(0, x0 - (self.panel_x - self.panel_margin))
         return int(max(wanted, self.min_view_cx))
 
@@ -176,9 +176,9 @@ class UI:
         # would clear it on the next redraw anyway; doing it here skips that
         # one extra tick of a stale selection).
         if self.selected is not None:
-            h = self.selected["hex"]
+            h = self.selected.hex
             self.set_selected(next((q for q in fresh
-                                     if q["hex"] == h and not self.hidden(q)), None))
+                                     if q.hex == h and not self.hidden(q)), None))
 
     # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) --
 
@@ -267,7 +267,7 @@ class UI:
             if d < best_d:
                 best, best_d = p, d
         if best is not None:
-            log("ui: plane tapped", best["callsign"] or best["hex"])
+            log("ui: plane tapped", best.callsign or best.hex)
         elif self.selected is not None:
             log("ui: panel dismissed (background tap)")
         else:

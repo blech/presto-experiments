@@ -36,7 +36,7 @@ RADAR_HOST = "api.adsb.lol"
 # set: an aircraft is "on the ground" if its altitude reads 0/"ground" or its
 # ground speed is 0.
 def _on_ground(p):
-    return p["alt"] in (0, "ground") or p["gs"] == 0
+    return p.alt in (0, "ground") or p.gs == 0
 
 
 def main():
@@ -67,7 +67,7 @@ def main():
         print("0 aircraft in range")
         return 0
 
-    planes.sort(key=lambda p: p["dst"] if p.get("dst") is not None else 1e9)
+    planes.sort(key=lambda p: p.dst if p.dst is not None else 1e9)
     total = len(planes)
     if args.limit is not None:
         planes = planes[:args.limit]
@@ -75,12 +75,12 @@ def main():
     print(f"{'callsign':9} {'hex':6} {'alt':>7} {'gs':>5} {'hdg':>5} "
           f"{'vstate':7} {'dst':>6} {'dir':>5}  type")
     for p in planes:
-        alt = p["alt"] if p["alt"] is not None else "--"
-        hdg = f"{p['heading']:.0f}" if p["heading"] is not None else "--"
-        dst = f"{p['dst']:.1f}" if p.get("dst") is not None else "--"
-        dirn = f"{p['dir']:.0f}" if p.get("dir") is not None else "--"
-        print(f"{p['callsign']:9} {p['hex']:6} {str(alt):>7} {p['gs']:5.0f} {hdg:>5} "
-              f"{p['vstate']:7} {dst:>6} {dirn:>5}  {p['type'] or ''}")
+        alt = p.alt if p.alt is not None else "--"
+        hdg = f"{p.heading:.0f}" if p.heading is not None else "--"
+        dst = f"{p.dst:.1f}" if p.dst is not None else "--"
+        dirn = f"{p.dir:.0f}" if p.dir is not None else "--"
+        print(f"{p.callsign:9} {p.hex:6} {str(alt):>7} {p.gs:5.0f} {hdg:>5} "
+              f"{p.vstate:7} {dst:>6} {dirn:>5}  {p.type or ''}")
 
     shown = f"{len(planes)} of {total}" if args.limit is not None and len(planes) < total else str(total)
     print(f"\n{shown} aircraft")

@@ -3,13 +3,13 @@
 Desktop (CPython) smoke test for routes.py -- looks up an aircraft's route
 the same way radar.py's tap-to-inspect panel does.
 
-routes.py needs a live plane dict, not just a callsign: since it started
+routes.py needs a live plane.Plane, not just a callsign: since it started
 cross-checking candidate routes against the aircraft's actual position and
 heading (adsbdb alone can hand back a stale or simply wrong route for a
 multi-leg rotation -- see prestoradar/dev/route_check.py, where this was
 prototyped), it needs to know where the plane actually is. So this always
 resolves --hex or --callsign against the live feed (settings.py's
-centre/radius) first, then hands the resulting plane dict to routes.request()
+centre/radius) first, then hands the resulting Plane to routes.request()
 exactly as ui.py does on a tap.
 
     python3 prestoradar/dev/route_lookup.py --callsign BAW123
@@ -50,8 +50,8 @@ async def find_plane(hex_id, callsign, radius_km):
     hex_id = hex_id.lower() if hex_id else None
     callsign = callsign.upper() if callsign else None
     for p in planes:
-        if (hex_id and p["hex"].lower() == hex_id) or (callsign and p["callsign"].upper() == callsign):
-            if not p["callsign"] or p["callsign"].lower() == p["hex"].lower():
+        if (hex_id and p.hex.lower() == hex_id) or (callsign and p.callsign.upper() == callsign):
+            if not p.callsign or p.callsign.lower() == p.hex.lower():
                 return None, f"{hex_id or callsign} is in range but isn't broadcasting a usable callsign right now"
             return p, None
     who = hex_id or callsign
@@ -61,9 +61,9 @@ async def find_plane(hex_id, callsign, radius_km):
 
 async def lookup_route(plane):
     routes.request(plane)
-    while routes.get(plane["callsign"]) == "":
+    while routes.get(plane.callsign) == "":
         await asyncio.sleep(0.25)
-    return routes.get(plane["callsign"])
+    return routes.get(plane.callsign)
 
 
 async def run(args):
@@ -73,13 +73,13 @@ async def run(args):
         print(err)
         return 1
 
-    print(f"{plane['callsign']} (hex {plane['hex']})")
+    print(f"{plane.callsign} (hex {plane.hex})")
     route = await lookup_route(plane)
     if route is None:
-        print(f"{plane['callsign']}: no route on file for this callsign")
+        print(f"{plane.callsign}: no route on file for this callsign")
     else:
         origin, dest = route
-        print(f"{plane['callsign']}: {origin} -> {dest}")
+        print(f"{plane.callsign}: {origin} -> {dest}")
     return 0
 
 

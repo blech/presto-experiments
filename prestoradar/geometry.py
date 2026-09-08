@@ -32,10 +32,3 @@ def compass(deg):
     if deg is None:
         return "?"
     return _COMPASS[int((deg % 360) / 45 + 0.5) % 8]
-
-
-def alt_key(p):
-    # Sort key: lowest altitude first. "ground"/None (not a number) sorts
-    # lowest of all.
-    a = p["alt"]
-    return a if isinstance(a, (int, float)) else -1

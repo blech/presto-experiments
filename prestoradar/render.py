@@ -262,11 +262,11 @@ class Renderer:
         # here.
         theme = self.theme()
         if self.settings.COLOUR_MODE == "alt":
-            # .get(), not [p["vstate"]] -- see draw_legend_alt()'s comment on
+            # .get(), not [p.vstate] -- see draw_legend_alt()'s comment on
             # the same lookup; feed.py only ever sets one of the three known
             # strings, but a bad lookup here shouldn't be able to freeze the
             # whole display either way.
-            return theme["vstate"].get(p["vstate"], theme["icon"])
+            return theme["vstate"].get(p.vstate, theme["icon"])
         return theme["icon"]
 
     def _draw_planes_radar(self, order):
@@ -276,10 +276,10 @@ class Renderer:
             pen = self.plane_pen(p)
             d.set_pen(pen)
             d.circle(x, y, 3)
-            if p["heading"] is not None and p["gs"] > 20:
-                self.draw_track_arrow(x, y, p["heading"], p["gs"], pen)
+            if p.heading is not None and p.gs > 20:
+                self.draw_track_arrow(x, y, p.heading, p.gs, pen)
             d.set_pen(self.RADAR_TEXT_PEN)
-            d.text(p["callsign"], x + 8, y - 8, WIDTH, 2)
+            d.text(p.callsign, x + 8, y - 8, WIDTH, 2)
 
     def _draw_planes_map(self, order):
         # Map style: an icon along the track, no label; a plain blip when there's
@@ -290,11 +290,11 @@ class Renderer:
         d = self.display
         for x, y, p in order:
             d.set_pen(self.plane_pen(p))
-            heading = p["heading"]
-            if heading is None or p["gs"] <= 20:
+            heading = p.heading
+            if heading is None or p.gs <= 20:
                 d.circle(x, y, 3)
                 continue
-            cat = p["cat"]
+            cat = p.cat
             if cat == "A7":
                 self._draw_rotor(x, y, heading, 1.0)
             else:
@@ -305,10 +305,10 @@ class Renderer:
         # Lowest altitude first, so where two overlap the higher aircraft is
         # drawn on top -- it's the one nearer the viewer looking down.
         order = []
-        for p in sorted(planes, key=geometry.alt_key):
+        for p in sorted(planes, key=lambda q: q.alt_sort_key):
             if self.hidden(p):
                 continue
-            x, y = self.to_screen(p["e"], p["n"])
+            x, y = self.to_screen(p.e, p.n)
             if -40 <= x <= 520 and -40 <= y <= 520:
                 order.append((x, y, p))
         (self._draw_planes_map if self.settings.DISPLAY_MODE == "map"
@@ -358,28 +358,28 @@ class Renderer:
         rh = 22
         y = 8
 
-        self._ptext(p["callsign"] or p["hex"] or "?", tx, y, 16, self.RADAR_TEXT_PEN)
+        self._ptext(p.callsign or p.hex or "?", tx, y, 16, self.RADAR_TEXT_PEN)
         y += 28
 
-        em = p["emergency"]
+        em = p.emergency
         if em and em != "none":
             self._ptext("! " + str(em).upper(), tx, y, 16, self.EMERG_PEN)
             y += rh
 
-        hdg = p["heading"]
-        vr = p["vrate"]
+        hdg = p.heading
+        vr = p.vrate
         rows = (
-            ("REG", p["reg"] or "-"),
-            ("TYPE", p["type"] or "-"),
-            ("RTE", self._fmt_route((p["callsign"] or "").strip())),
-            ("ALT", self._fmt_alt(p["alt"])),
+            ("REG", p.reg or "-"),
+            ("TYPE", p.type or "-"),
+            ("RTE", self._fmt_route((p.callsign or "").strip())),
+            ("ALT", self._fmt_alt(p.alt)),
             ("VS", ("%+d" % vr) if vr else "level"),
-            ("SPEED", "%d kt" % (p["gs"] or 0)),
+            ("SPEED", "%d kt" % (p.gs or 0)),
             ("TRACK", ("%d" % round(hdg)) if hdg is not None else "-"),
-            ("DIST", ("%dnm %s" % (round(p["dst"]), geometry.compass(p["dir"])))
-                     if p["dst"] is not None else "-"),
-            ("SQWK", p["squawk"] or "-"),
-            ("ICAO", (p["hex"] or "-").upper()),
+            ("DIST", ("%dnm %s" % (round(p.dst), geometry.compass(p.dir)))
+                     if p.dst is not None else "-"),
+            ("SQWK", p.squawk or "-"),
+            ("ICAO", (p.hex or "-").upper()),
         )
         for label, value in rows:
             self._ptext(label, tx, y, 16, self.PANEL_LABEL)
