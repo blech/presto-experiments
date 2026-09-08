@@ -358,7 +358,7 @@ class Renderer:
         rh = 22
         y = 8
 
-        self._ptext(p.callsign or p.hex or "?", tx, y, 16, self.RADAR_TEXT_PEN)
+        self._ptext(p.label, tx, y, 16, self.RADAR_TEXT_PEN)
         y += 28
 
         em = p.emergency

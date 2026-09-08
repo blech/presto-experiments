@@ -267,7 +267,7 @@ class UI:
             if d < best_d:
                 best, best_d = p, d
         if best is not None:
-            log("ui: plane tapped", best.callsign or best.hex)
+            log("ui: plane tapped", best.label)
         elif self.selected is not None:
             log("ui: panel dismissed (background tap)")
         else:

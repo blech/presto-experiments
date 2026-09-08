@@ -32,13 +32,6 @@ from settings import (  # noqa: E402
 RADAR_HOST = "api.adsb.lol"
 
 
-# Same test radar.py's _hidden() applies at draw time when HIDE_ON_GROUND is
-# set: an aircraft is "on the ground" if its altitude reads 0/"ground" or its
-# ground speed is 0.
-def _on_ground(p):
-    return p.alt in (0, "ground") or p.gs == 0
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--radius", type=float, default=RADIUS_KM,
@@ -61,7 +54,8 @@ def main():
         return 1
 
     if args.exclude_ground:
-        planes = [p for p in planes if not _on_ground(p)]
+        # Same filter radar.py's _hidden() applies when HIDE_ON_GROUND is set.
+        planes = [p for p in planes if not p.on_ground]
 
     if not planes:
         print("0 aircraft in range")

@@ -163,8 +163,9 @@ def _hidden(p):
     # (<= FETCH_INTERVAL_MS). Same condition feed.py's _fetch() used to filter
     # with (REFACTORING.md #5). Lives here, not render.py or ui.py: it's used
     # by both (Renderer's draw-time filter, UI's selection re-pointing) and
-    # neither owns the underlying settings check.
-    return SETTINGS.HIDE_ON_GROUND and (p.alt in (0, "ground") or p.gs == 0)
+    # neither owns the underlying settings check -- Plane.on_ground is just
+    # the data half.
+    return SETTINGS.HIDE_ON_GROUND and p.on_ground
 
 # All pens and every draw_* routine live in render.py; the vector cache and
 # raster backdrop live in backdrop.py (REFACTORING.md #1). Renderer needs
@@ -212,8 +213,7 @@ async def _render_loop():
             dt = time.ticks_diff(now, last) / 1000.0
             last = now
             for p in _feed.planes:
-                p.e += p.ve * dt
-                p.n += p.vn * dt
+                p.advance(dt)
 
             _ui.dismiss_if_hidden()
 
