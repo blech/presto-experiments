@@ -143,11 +143,22 @@ class Renderer:
     # Panel text stays on the bitmap font. Tried on this firmware and rejected:
     #   - PicoVector + Roboto-Medium.af (e49dede): NotImplementedError: opcode
     #   - PicoGraphics "sans" vector font (9edd5c4): renders as a scribble of strokes
-    def _ptext(self, s, x, y_top, size, pen):
+    def _ptext(self, s, x, y_top, size, pen, clip=False):
         # One line of panel text, top-left at (x, y_top); size is a pixel
         # height mapped to the nearest bitmap8 integer scale.
+        #
+        # clip=True trims s with measure_text() until it fits the panel width.
+        # display.text()'s width arg is a word-WRAP point, not a clip -- an
+        # overrunning line (a long operator or type name) would otherwise flow
+        # onto a second line and draw over the next panel row.
+        s = str(s)
+        scale = max(1, size // 8)
+        avail = WIDTH - x - 2
+        if clip:
+            while s and self.display.measure_text(s, scale) > avail:
+                s = s[:-1]
         self.display.set_pen(pen)
-        self.display.text(str(s), x, y_top, WIDTH - x - 2, max(1, size // 8))
+        self.display.text(s, x, y_top, avail, scale)
 
     def draw_track_arrow(self, x, y, heading_deg, speed_kt, pen):
         # heading_deg is degrees clockwise from north (the aircraft's track over
@@ -359,7 +370,12 @@ class Renderer:
         y = 8
 
         self._ptext(p.label, tx, y, 16, self.RADAR_TEXT_PEN)
-        y += 28
+        y += 22
+        op = p.operator
+        if op:
+            self._ptext(op, tx, y, 16, self.PANEL_LABEL, clip=True)
+            y += 22
+        y += 6
 
         em = p.emergency
         if em and em != "none":
@@ -368,9 +384,10 @@ class Renderer:
 
         hdg = p.heading
         vr = p.vrate
+        td = p.type_description
         rows = (
             ("REG", p.reg or "-"),
-            ("TYPE", p.type or "-"),
+            ("TYPE", p.type or "-", td if td and td != p.type else None),
             ("RTE", self._fmt_route((p.callsign or "").strip())),
             ("ALT", self._fmt_alt(p.alt)),
             ("VS", ("%+d" % vr) if vr else "level"),
@@ -381,10 +398,13 @@ class Renderer:
             ("SQWK", p.squawk or "-"),
             ("ICAO", (p.hex or "-").upper()),
         )
-        for label, value in rows:
-            self._ptext(label, tx, y, 16, self.PANEL_LABEL)
-            self._ptext(value, vx, y, 16, self.RADAR_TEXT_PEN)
+        for row in rows:
+            self._ptext(row[0], tx, y, 16, self.PANEL_LABEL)
+            self._ptext(row[1], vx, y, 16, self.RADAR_TEXT_PEN)
             y += rh
+            if len(row) > 2 and row[2]:
+                self._ptext(row[2], tx, y, 16, self.PANEL_LABEL, clip=True)
+                y += rh
 
     def _status_text(self, planes):
         if self.feed.fetch_count == 0:
