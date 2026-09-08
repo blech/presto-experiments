@@ -604,17 +604,3 @@ flicker. The 240x240 fallback was not needed.
 - **Attribution.** `--raster-fetch` prints the required Esri/OSM credit line but
   nothing shows it on-device -- fine for a personal desk display, would need a
   small always-on label if this were ever shared or shipped.
-
----
-
-Scratch notes
-
-* Add '--run' option to radar_deploy.sh to call `mpremote run --no-follow ...`
-* Add brightness control (slider?) to settings - particularly for map mode
-* Add path for selected aircraft (with altitude colours?)
-* Resolve incorrect routes
-* Add 'speed' mode to alt/mono?
-* Shadow for current altitude in map mode (requires new plane colour)
-* Fix map not being available when starting in radar mode
-* Disable LEDs option (settings.py only at first?)
-* Retire `-raster` in favour of `-raster-fetch` (which can be renamed)
