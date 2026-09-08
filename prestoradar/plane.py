@@ -1,5 +1,7 @@
 import math
 
+import aircraft_types
+import airlines
 import geometry
 
 _KNOT_TO_KM_S = 1.852 / 3600.0        # knots -> km travelled per second
@@ -111,3 +113,22 @@ class Plane:
         (not a number) sorting below everything. Was geometry.alt_key(p)."""
         a = self.alt
         return a if isinstance(a, (int, float)) else -1
+
+    @property
+    def type_description(self):
+        """Readable model -- "Boeing 737-800". The feed's own `desc` when it
+        sent one, else a lookup on the ICAO type code (`type`) in
+        aircraft_types_data.py, else None. Live value wins, per
+        DATA-TODOS.md #2's `live > local` order. Zero-storage: the table and
+        its cache live in aircraft_types.py, not on the instance (Plane is
+        rebuilt every fetch; the table is shared across all of them)."""
+        return self.desc or aircraft_types.describe(self.type)
+
+    @property
+    def operator(self):
+        """Airline from the callsign's 3-letter ICAO prefix -- "SkyWest" for
+        "SKW4397" -- or None for a registration or the bare hex-id fallback.
+        Pure table lookup, no network."""
+        if not self.callsign or self.callsign == self.hex:
+            return None
+        return airlines.operator(self.callsign)
