@@ -30,8 +30,10 @@ latency) is **done** and verified on-device (seven on-device findings, all
 written up in that section). §6's cleanups are partly done -- the pure
 math/formatting split landed with §1, but the route-cache cap, the
 `SKIP_NETWORK` dual-loop unification and the `_safe_loop` wrapper are all
-still open. §9 (persistent aircraft identity + trail history) and §10
-(`Plane` class) are new proposals, not part of the original split.
+still open. §10 (`Plane` class) is **landed off-device** (all five steps
+committed; on-device verification pending). §9 (persistent aircraft
+identity + trail history) is a new proposal, not part of the original
+split.
 
 ---
 
@@ -868,7 +870,18 @@ here -- flagged so it doesn't get lost, not proposed for the current pass.
 
 ## 10. Turn the per-aircraft dict into a `Plane` object
 
-**Not started -- proposal only.** This is the one piece of §2's original
+**Landed off-device; on-device verification still pending.** All five
+steps below are committed. Confirmed on a laptop: `py_compile` across
+every module, `dev/test_plane.py`'s field-by-field assertions on
+`Plane.from_feed()`, and a live `dev/list_aircraft.py` run against
+adsb.lol parsing vstate / dst / dir / type and ground detection correctly
+through the full `Feed._fetch()` -> `Plane.from_feed()` -> attribute-access
+path. Not yet flashed to the Presto -- the one thing to watch there is
+whether `__slots__` actually saves RAM on this firmware (a `gc.mem_free()`
+check with the usual ~35 aircraft live), and that the render/touch loops
+behave identically.
+
+This is the one piece of §2's original
 "encapsulate in objects" table that never landed: every other same-named
 pile of globals became a class (`Settings`, `Feed`, `Backdrop`,
 `Renderer`, `UI`), but the aircraft record itself is still the 19-key

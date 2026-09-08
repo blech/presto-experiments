@@ -101,8 +101,8 @@ class Plane:
     @property
     def label(self):
         """Callsign if it's broadcasting one, else the ICAO hex id, else
-        "?". Was spelled out at three call sites (panel title, tap log,
-        route request)."""
+        "?". Was spelled out at the panel title (render.py) and the
+        tap log (ui.py)."""
         return self.callsign or self.hex or "?"
 
     @property
