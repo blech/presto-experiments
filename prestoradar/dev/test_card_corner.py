@@ -17,7 +17,7 @@ def _eq(got, want, what):
         raise AssertionError("%s: got %r, want %r" % (what, got, want))
 
 
-def main():
+def test_card_corner():
     from render import _card_corner, _CARD_W, _CARD_H
 
     W = H = 480
@@ -32,7 +32,24 @@ def main():
     _eq(_card_corner(100, 400), tr, "blip bottom-left -> card top-right")
     _eq(_card_corner(240, 240), br, "blip dead centre -> a defined corner")
 
-    print("render._card_corner: all assertions passed")
+
+def test_blip_xy():
+    # _blip_xy looks p up in last_drawn (set by draw_planes before the card)
+    # and falls back to screen centre. Exercise it without constructing a
+    # Renderer (that needs a display).
+    import render
+
+    r = object.__new__(render.Renderer)
+    obj_a, obj_b, obj_c = object(), object(), object()
+    r.last_drawn = [(100, 120, obj_a), (300, 40, obj_b)]
+    _eq(r._blip_xy(obj_b), (300, 40), "blip found in last_drawn")
+    _eq(r._blip_xy(obj_c), (240, 240), "blip not drawn -> centre fallback")
+
+
+def main():
+    test_card_corner()
+    test_blip_xy()
+    print("render._card_corner + _blip_xy: all assertions passed")
     return 0
 
 

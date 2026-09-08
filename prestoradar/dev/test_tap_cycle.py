@@ -33,10 +33,15 @@ def test_cycle():
     _eq(_advance_selection(None, 1, None), (None, 1), "empty tap with nothing selected")
     _eq(_advance_selection(None, 1, a), (a, 1), "first select -> stage 1")
     _eq(_advance_selection(a, 1, a), (a, 2), "same plane -> stage 2")
-    _eq(_advance_selection(a, 2, a), (a, 3), "same plane -> stage 3")
-    _eq(_advance_selection(a, 3, a), (a, 1), "same plane wraps 3 -> 1")
+    _eq(_advance_selection(a, 2, a), (a, 3), "same plane -> stage 3 (default cycle_len=3)")
+    _eq(_advance_selection(a, 3, a), (a, 1), "same plane wraps 3 -> 1 (default)")
     _eq(_advance_selection(a, 2, b), (b, 1), "different plane -> fresh stage 1")
     _eq(_advance_selection(a, 3, None), (None, 1), "empty tap dismisses, resets level")
+
+    # Map mode: the cycle collapses to 2 stages (UI-TRAILS.md "Map mode notes").
+    _eq(_advance_selection(a, 1, a, cycle_len=2), (a, 2), "map: stage 1 -> 2")
+    _eq(_advance_selection(a, 2, a, cycle_len=2), (a, 1), "map: wraps at 2 -> 1")
+    _eq(_advance_selection(a, 1, b, cycle_len=2), (b, 1), "map: different plane still fresh")
 
 
 def test_data_block():

@@ -41,7 +41,10 @@ def _trace_pen_index(seg_idx, n_segs, n_pens):
 
 
 _TAG_SCALE = 2      # bitmap6 scale for callsign tags on the scope
-_TAG_CH_W = 8       # ~px per character at that scale
+_TAG_CH_W = 8       # eyeballed per-character advance for bitmap6 at _TAG_SCALE (2);
+#                     used by BOTH _label_box (the ambient cull) and _tag (the
+#                     backing box), so a wrong value under-culls and under-covers
+#                     together -- keep the two in sync via this one constant.
 _TAG_H = 16         # ~px tall
 
 
@@ -204,23 +207,29 @@ class Renderer:
     # Panel text stays on the bitmap font. Tried on this firmware and rejected:
     #   - PicoVector + Roboto-Medium.af (e49dede): NotImplementedError: opcode
     #   - PicoGraphics "sans" vector font (9edd5c4): renders as a scribble of strokes
-    def _ptext(self, s, x, y_top, size, pen, clip=False):
+    def _ptext(self, s, x, y_top, size, pen, clip=False, avail=None):
         # One line of panel text, top-left at (x, y_top); size is a pixel
         # height mapped to the nearest bitmap8 integer scale.
         #
-        # clip=True trims s with measure_text() until it fits the panel width.
-        # display.text()'s width arg is a word-WRAP point, not a clip -- an
-        # overrunning line (a long operator or type name) would otherwise flow
-        # onto a second line and draw over the next panel row.
+        # clip=True trims s with measure_text() until it fits the available
+        # width. display.text()'s width arg is a word-WRAP point, not a clip --
+        # an overrunning line (a long operator or type name) would otherwise
+        # flow onto a second line and draw over the next panel row.
+        #
+        # `avail` is the screen x just past the last usable pixel (the caller's
+        # right edge); default None keeps the historic full-height-sidebar
+        # behaviour of clipping to the screen edge. The corner card passes a
+        # card-relative value so its rows clip inside the card border, not 250+
+        # px past it (a left-corner card starts at x = 4).
         s = str(s)
         scale = max(1, size // 8)
-        avail = WIDTH - x - 2
+        w = (avail if avail is not None else WIDTH - x) - 2
         self.display.set_font("bitmap8")   # panels only; draw_scene() resets to bitmap6
         if clip:
-            while s and self.display.measure_text(s, scale) > avail:
+            while s and self.display.measure_text(s, scale) > w:
                 s = s[:-1]
         self.display.set_pen(pen)
-        self.display.text(s, x, y_top, avail, scale)
+        self.display.text(s, x, y_top, w, scale)
 
     def draw_track_arrow(self, x, y, heading_deg, speed_kt, pen):
         # heading_deg is degrees clockwise from north (the aircraft's track over
@@ -448,25 +457,33 @@ class Renderer:
                 d.line(int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3]))
             px, py = cx, cy
 
-    def _draw_planes_map(self, order):
+    def _draw_planes_map(self, order, selected, detail_level):
         # Map style: an icon along the track, no label; a plain blip when there's
         # no usable heading. Shape/size come from the ADS-B emitter category --
         # A7 is a helicopter, A1..A5 scale the fixed-wing icon light..heavy.
         # Nearest is drawn last (order is pre-sorted) so a dense in-trail stream
         # reads as an overlapping line rather than a pile of text.
+        #
+        # The map-mode tap cycle is only 2 stages (UI-TRAILS.md "Map mode
+        # notes"): at stage 1 the selected plane gets a plain callsign tag on
+        # its icon; stage 2 is the corner card (drawn by draw_scene). No ATC
+        # data block in map mode.
         d = self.display
         for x, y, p in order:
             d.set_pen(self.plane_pen(p))
             heading = p.heading
             if heading is None or p.gs <= 20:
                 d.circle(x, y, 3)
-                continue
-            cat = p.cat
-            if cat == "A7":
-                self._draw_rotor(x, y, heading, 1.0)
             else:
-                a = math.radians(heading)
-                self._icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
+                cat = p.cat
+                if cat == "A7":
+                    self._draw_rotor(x, y, heading, 1.0)
+                else:
+                    a = math.radians(heading)
+                    self._icon_pass(x, y, math.cos(a), math.sin(a),
+                                    _CAT_SCALE.get(cat, 1.0))
+            if p is selected and detail_level == 1:
+                self._tag(x, y, p.callsign)
 
     def draw_planes(self, planes, selected, detail_level, trace=None):
         # Lowest altitude first, so where two overlap the higher aircraft is
@@ -482,7 +499,7 @@ class Renderer:
         if trace_active:
             self._draw_trace(trace, selected)      # under the markers
         if self.settings.DISPLAY_MODE == "map":
-            self._draw_planes_map(order)
+            self._draw_planes_map(order, selected, detail_level)
         else:
             self._draw_planes_radar(order, selected, detail_level, trace_active)
         self.last_drawn = order
@@ -542,16 +559,22 @@ class Renderer:
 
         tx = x + 8
         vx = tx + 78
+        # Right inner edge of the card, less a small margin so text clears the
+        # 1 px border. Passed to every _ptext below so clipping is card-
+        # relative, not screen-relative (the card can start at x = 4).
+        avail_tx = x + _CARD_W - tx - 6
+        avail_vx = x + _CARD_W - vx - 6
         row = y + 8
-        self._ptext(p.label, tx, row, 16, self.RADAR_TEXT_PEN)
+        self._ptext(p.label, tx, row, 16, self.RADAR_TEXT_PEN, avail=avail_tx)
         row += 20
         op = p.operator
         if op:
-            self._ptext(op, tx, row, 14, self.PANEL_LABEL, clip=True)
+            self._ptext(op, tx, row, 14, self.PANEL_LABEL, clip=True, avail=avail_tx)
             row += 17
         em = p.emergency
         if em and em != "none":
-            self._ptext("! " + str(em).upper(), tx, row, 14, self.EMERG_PEN)
+            self._ptext("! " + str(em).upper(), tx, row, 14, self.EMERG_PEN,
+                        avail=avail_tx)
             row += 17
         td = p.type_description
         vr = p.vrate
@@ -566,8 +589,8 @@ class Renderer:
                      if p.dst is not None else "-"),
         )
         for label, val in rows:
-            self._ptext(label, tx, row, 14, self.PANEL_LABEL)
-            self._ptext(val, vx, row, 14, self.RADAR_TEXT_PEN, clip=True)
+            self._ptext(label, tx, row, 14, self.PANEL_LABEL, avail=avail_tx)
+            self._ptext(val, vx, row, 14, self.RADAR_TEXT_PEN, clip=True, avail=avail_vx)
             row += 17
 
     def _status_text(self, planes):
@@ -646,7 +669,8 @@ class Renderer:
         if selected is not None and self.settings.DISPLAY_MODE == "radar":
             trace = traces.points_for(selected)
         self.draw_planes(planes, selected, detail_level, trace)
-        if selected is not None and detail_level >= 3:
+        card_stage = 2 if self.settings.DISPLAY_MODE == "map" else 3
+        if selected is not None and detail_level >= card_stage:
             self.draw_card(selected, _card_corner(*self._blip_xy(selected)))
         elif selected is None and not settings_open:
             self.draw_settings_btn()

@@ -169,7 +169,7 @@ _renderer.backdrop = _backdrop
 # than UI reaching into feed.py directly.
 _redraw = asyncio.Event()
 _ui = ui.UI(SETTINGS, _backdrop, _renderer, _hidden, _redraw.set,
-            PX_PER_KM, HIT_RADIUS,
+            HIT_RADIUS,
             SETTINGS_BTN, _SPANEL, _SP_ROW0, _SP_ROWH)
 _feed.on_update = _ui.on_feed_update
 
