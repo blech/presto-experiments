@@ -55,6 +55,18 @@ def _echo_radius(i, n):
     return 2 if i >= n - 1 else 1
 
 
+def _trail_cap(points, limit):
+    """Draw-time cap on the selected-aircraft trail: the last `limit` points,
+    or all of them when `limit` is None or already covers them, or none when
+    `limit` is 0 or less. Storage ceilings (traces._KEEP, plane._TRAIL_MAX)
+    are separate and larger."""
+    if limit is None:
+        return points
+    if limit <= 0:
+        return []
+    return points[-limit:]
+
+
 _TAG_SCALE = 2      # bitmap6 scale for callsign tags on the scope
 _TAG_CH_W = 8       # eyeballed per-character advance for bitmap6 at _TAG_SCALE (2);
 #                     used by BOTH _label_box (the ambient cull) and _tag (the
@@ -703,8 +715,10 @@ class Renderer:
         # network trace_recent seed or the in-RAM live trail. Reaching into
         # traces here mirrors how _fmt_route() already reaches into routes.
         trace = None
-        if selected is not None and self.settings.DISPLAY_MODE == "radar":
-            trace = traces.points_for(selected)
+        if (selected is not None and self.settings.DISPLAY_MODE == "radar"
+                and self.settings.TRAIL_LENGTH != 0):
+            pts = traces.points_for(selected)
+            trace = _trail_cap(pts, self.settings.TRAIL_LENGTH) if pts else None
         self.draw_planes(planes, selected, trace)
         card_stage = 1 if self.settings.DISPLAY_MODE == "map" else 2
         if selected is not None and detail_level >= card_stage:
