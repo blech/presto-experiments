@@ -9,9 +9,10 @@ WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display
 
 def _advance_selection(selected, level, tapped, cycle_len=3):
     """Tap-cycle state machine. `tapped` is the plane under the tap, or None
-    for empty space. `cycle_len` is how many stages the cycle has -- 3 in
-    radar mode, 2 in map mode (UI-TRAILS.md "Map mode notes": map mode has
-    no ATC-data-block rung). Returns (new_selected, new_level):
+    for empty space. `cycle_len` is how many stages the cycle has -- 2 in
+    radar mode (data block -> + corner card), 1 in map mode (select ->
+    corner card; UI-TRAILS.md "Map mode notes"). Returns (new_selected,
+    new_level):
 
       - empty space        -> (None, 1)                 dismiss
       - a different plane   -> (tapped, 1)              select fresh at stage 1
@@ -58,7 +59,7 @@ class UI:
         self.sp_rowh = sp_rowh
 
         self.selected = None      # the selected plane.Plane, or None
-        self.detail_level = 1     # tap-cycle stage 1..3, meaningful while selected
+        self.detail_level = 1     # tap-cycle stage (radar 1..2, map 1), while selected
         self.view_cx = WIDTH // 2  # x-pixel that km-east 0 maps to (see radar.py's to_screen)
         self.settings_open = False
         self._backdrop_dirty = False  # set by toggle_setting() when DISPLAY_MODE
@@ -216,9 +217,9 @@ class UI:
             self.settings_open = True
             self.set_selected(None)      # settings and the detail panel are exclusive
             return
-        # Map mode's tap cycle is 2 stages, radar's is 3 (UI-TRAILS.md
-        # "Map mode notes").
-        cycle_len = 2 if self.settings.DISPLAY_MODE == "map" else 3
+        # Map mode's tap cycle is a single stage (select -> card), radar's is
+        # 2 (data block -> + card) (UI-TRAILS.md "Map mode notes").
+        cycle_len = 1 if self.settings.DISPLAY_MODE == "map" else 2
 
         # Normal nearest-hit search FIRST, so a tap that's clearly on another
         # aircraft selects it even while something else is selected.

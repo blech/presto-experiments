@@ -16,6 +16,7 @@ Switch to left hand side panel (swapping if plane crosses under)
 * Add brightness control (slider?) to settings - particularly for map mode
 * Add altitude colours to the selected-aircraft trail (the trail itself landed
   2026-09-08 -- see DATA_TRACE.md "Status"; drawn in one muted pen for now)
+  - trail fade: undecided -- constant vs. slower fade / more segments; revisit alongside echoes
 * Resolve incorrect routes
   - Include trail - see DATA_TRACE.md_
 * Add 'speed' mode to alt/mono?
