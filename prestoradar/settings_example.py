@@ -94,12 +94,6 @@ LEVEL_RATE_FPM = 256
 # toggles the network seed. See DATA_TRACE.md.
 TRACE_SEED = 1
 
-# Radar-mode "echoes": the last few fetched positions of each non-selected
-# aircraft, drawn as dots trailing behind it (spacing shows speed, the way a
-# slow-sweep radar looks). When 1, these replace the synthetic track arrow;
-# when 0, the arrow is drawn as before and no echoes. Radar mode only.
-ECHOES = 1
-
 # How many points of the selected aircraft's position trail to draw (radar
 # mode). 0 disables the trail entirely. Above ~45 has no extra effect -- the
 # trail is only stored that deep (plane._TRAIL_MAX / the trace_recent

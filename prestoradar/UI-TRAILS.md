@@ -133,9 +133,13 @@ trail shows. If echoes land for all aircraft, retire the arrow at that point
 clutter. Interim tidy: drop the arrowhead barbs, leaving a line plus one
 short tick.
 
-Landed 2026-09-08 (`adsb-radar-echoes`): the arrow is drawn only when
-`ECHOES = 0`; with echoes on it is suppressed for every aircraft. It stays
-in the code (`draw_track_arrow`) as the `ECHOES = 0` fallback.
+Resolved 2026-09-08 (`adsb-radar-echoes`): echoes (decision 5) were tried and
+did not work, so the arrow **stays** -- but **unscaled**. `draw_track_arrow`
+is now a fixed ~18 px line along the track with no barbs (`_TICK_LEN`);
+speed is dropped from the ambient view (it is on the data block / card on
+tap). This keeps the scope aesthetic while removing the scaled-arrow clutter
+that motivated retiring it. Still suppressed for the selected aircraft once
+its trace shows.
 
 
 ## 5. Echoes -- past radar returns
@@ -166,12 +170,19 @@ non-selected aircraft**, behind an `ECHOES` setting; retire the arrow in the
 same change if it reads well on-device. **No echoes in map mode** -- the icon
 already carries direction and dots over the raster read as noise.
 
-Built 2026-09-08 at the per-fetch cadence (one point per 30 s), on-device
-evaluation pending. The per-render-tick ring buffer was considered and
-deferred: three genuine 30 s-apart returns with speed-proportional spacing
-is the intended slow-sweep-radar read, not a defect to escalate. `_echo_marks`
-takes the last 3 fetched fixes minus the most recent (≈ the blip);
-`_echo_radius` steps 1 → 2 oldest → newest; `ECHO_PENS` are two dim greens.
+**Tried and abandoned 2026-09-08** (commit `195f21b` on `adsb-radar-echoes`,
+reverted). Built at the per-fetch cadence: three dots from `Plane.trail`
+(last 3 fixes minus the current), r1/r2, two dim greens. On-device
+(`radar-20260908-1915.png`) it did not read as a tail -- dim green at r≤2 on
+the dark scope is near-invisible, and at 30 s spacing a fast aircraft's
+three dots are scattered across the scope with nothing connecting them, so
+they don't say "direction" or "speed". It also measurably hurt touch
+latency (the extra per-plane `circle()` loop in the synchronous
+`draw_scene`). The per-render-tick ring buffer is not the fix either: its
+between-fetch samples are dead-reckoned, i.e. an arrow drawn as dots (this
+section's own "Real vs extrapolated" point), and it adds *more* per-frame
+cost. **Outcome:** kept the arrow, unscaled -- see decision 4. Revisit
+echoes only if a genuinely higher-cadence real position source appears.
 
 
 ## 6. Extended ATC-style label (callsign + FL + ground speed + type)
@@ -395,10 +406,12 @@ worse than a blip does -- worth doing alongside, not blocking.
 4. **Compact corner card + drop the view-shift** (1, 9, 2) -- the big
    simplification. **Landed `86bf0d3` + `8dee07f`**, tuned in `eda93a3` /
    `ad431e3` / `006657d`.
-5. **Echoes + retire the arrow** (5, 4) -- **in progress, branch
-   `adsb-radar-echoes`.**
-6. **Settings**: `TRAIL_LENGTH` (0 = off), `ECHOES` toggle -- landing with
-   step 5.
+5. **Echoes + retire the arrow** (5, 4) -- **echoes tried and abandoned**
+   (`195f21b`, reverted; see decision 5). Outcome: the arrow **stays,
+   unscaled** -- fixed ~18 px direction tick, no barbs, no speed scaling
+   (`draw_track_arrow` / `_TICK_LEN`). Branch `adsb-radar-echoes`.
+6. **Settings**: `TRAIL_LENGTH` (0 = off). **Landed `ac5d33d`.** (`ECHOES`
+   was added and then removed with the echo revert.)
 7. **Later, separate track:** bounded/batched route fetching, then the
    board mode or list overlay.
 

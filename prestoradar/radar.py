@@ -39,7 +39,6 @@ class Settings:
         self.DISPLAY_MODE = getattr(module, "DISPLAY_MODE", "radar")  # "radar" | "map"
         self.COLOUR_MODE = getattr(module, "COLOUR_MODE", "alt")      # "mono" | "alt"
         self.HIDE_ON_GROUND = getattr(module, "HIDE_ON_GROUND", 1)
-        self.ECHOES = getattr(module, "ECHOES", 1)
         self.TRAIL_LENGTH = getattr(module, "TRAIL_LENGTH", 45)
 
 

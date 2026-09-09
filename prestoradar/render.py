@@ -30,6 +30,8 @@ _ICON_TRIS = (
 # heavy; anything not listed (incl. not broadcast) draws at 1.0.
 _CAT_SCALE = {"A1": 0.72, "A2": 0.88, "A3": 1.0, "A4": 1.2, "A5": 1.35}
 
+_TICK_LEN = 18   # scope-mode direction tick: fixed px, speed is on tap not here
+
 
 def _trace_pen_index(seg_idx, n_segs, n_pens):
     """Pen index in [0, n_pens) for trail segment seg_idx (0 = oldest) of
@@ -38,21 +40,6 @@ def _trace_pen_index(seg_idx, n_segs, n_pens):
     if n_segs <= 1:
         return n_pens - 1
     return min(n_pens - 1, seg_idx * n_pens // n_segs)
-
-
-def _echo_marks(trail, count):
-    """The last `count` fetched fixes to draw as echoes behind an aircraft,
-    oldest -> newest, as (e, n) pairs. Excludes the most recent trail entry
-    -- that one is ~where the blip is now -- so echoes always sit behind the
-    marker. Empty until the aircraft has at least two fetched fixes."""
-    return [(e, n) for (e, n, _alt) in trail[-(count + 1):-1]]
-
-
-def _echo_radius(i, n):
-    """Dot radius for echo i of n (i = 0 is the oldest). The newest echo is
-    r2, the rest r1 -- at r in {1, 2} a smooth ramp has no room to show, so
-    the shrink is a single step."""
-    return 2 if i >= n - 1 else 1
 
 
 def _trail_cap(points, limit):
@@ -225,13 +212,6 @@ class Renderer:
             display.create_pen(170, 155, 65),
             display.create_pen(215, 200, 90),
         )
-        # Echoes: past radar returns behind a non-selected aircraft (decision
-        # 5). Dimmer than the live blip so "now" still reads as brightest;
-        # ECHO_PENS[0] older, ECHO_PENS[1] newer.
-        self.ECHO_PENS = (
-            display.create_pen(0, 70, 25),
-            display.create_pen(0, 120, 40),
-        )
 
     def theme(self):
         return self.THEMES["map"] if self.backdrop.showing_raster else self.THEMES["radar"]
@@ -265,21 +245,19 @@ class Renderer:
         self.display.set_pen(pen)
         self.display.text(s, x, y_top, w, scale)
 
-    def draw_track_arrow(self, x, y, heading_deg, speed_kt, pen):
-        # heading_deg is degrees clockwise from north (the aircraft's track over
-        # the ground). Screen y grows downwards, so north maps to -y.
+    def draw_track_arrow(self, x, y, heading_deg, pen):
+        # A short fixed-length line from the blip along the aircraft's track
+        # (heading_deg is degrees clockwise from north; screen y grows down,
+        # so north maps to -y). No arrowhead barbs, and not scaled by speed:
+        # a scaled arrow was a clutter source on fast traffic (UI-TRAILS.md
+        # decision 4) and per-fetch echoes didn't read as a tail (decision 5),
+        # so this is the minimal "which way is it pointing" cue.
         d = self.display
         a = math.radians(heading_deg)
-        dx, dy = math.sin(a), -math.cos(a)
-        length = min(60, max(12, speed_kt * 0.15))  # ~knots -> pixels, clamped
-        tip_x, tip_y = int(x + dx * length), int(y + dy * length)
         d.set_pen(pen)
-        d.line(int(x), int(y), tip_x, tip_y)
-        # Arrowhead: two short barbs splayed back from the tip.
-        for barb_deg in (heading_deg + 148, heading_deg - 148):
-            b = math.radians(barb_deg)
-            d.line(tip_x, tip_y,
-                   int(tip_x + math.sin(b) * 7), int(tip_y - math.cos(b) * 7))
+        d.line(int(x), int(y),
+               int(x + math.sin(a) * _TICK_LEN),
+               int(y - math.cos(a) * _TICK_LEN))
 
     def _icon_pass(self, x, y, ca, sa, scale):
         # Fill the icon's triangles at the current pen, rotated by (ca, sa) =
@@ -444,37 +422,22 @@ class Renderer:
         return theme["icon"]
 
     def _draw_planes_radar(self, order, selected, trace_active):
-        # Scope style: blip, then either echoes (past fetched fixes trailing
-        # behind, when settings.ECHOES is on) or the synthetic track arrow
-        # (when it is off), then the callsign tag / data block. Ambient tags
-        # are culled to the nearest-centre non-overlapping set; while
-        # something is selected only that plane is tagged, and it always
-        # shows the ATC data block (stage 1 of the 2-stage radar cycle;
-        # stage 2 adds the corner card, drawn by draw_scene). The selected
-        # plane's arrow is already suppressed once its trace shows, and it
-        # gets no echoes -- it has the full trail instead.
+        # Scope style: blip, a short fixed-length direction tick, then the
+        # callsign tag / data block. Ambient tags are culled to the
+        # nearest-centre non-overlapping set; while something is selected only
+        # that plane is tagged, and it always shows the ATC data block (stage
+        # 1 of the 2-stage radar cycle; stage 2 adds the corner card, drawn
+        # by draw_scene). The selected plane's tick is suppressed once its
+        # trace shows -- the trail carries direction there.
         d = self.display
-        echoes_on = bool(self.settings.ECHOES)
         labelled = set() if selected is not None else self._ambient_label_set(order)
         for i, (x, y, p) in enumerate(order):
             pen = self.plane_pen(p)
             is_sel = p is selected
-            moving = p.heading is not None and p.gs > 20
-
-            if echoes_on and moving and not is_sel:
-                marks = _echo_marks(p.trail, 3)
-                for j, (e, n) in enumerate(marks):
-                    ex, ey = self.to_screen(e, n)
-                    if -40 <= ex <= 520 and -40 <= ey <= 520:
-                        d.set_pen(self.ECHO_PENS[1 if j >= len(marks) - 1 else 0])
-                        d.circle(ex, ey, _echo_radius(j, len(marks)))
-
             d.set_pen(pen)
             d.circle(x, y, 3)
-
-            if moving and not echoes_on and not (trace_active and is_sel):
-                self.draw_track_arrow(x, y, p.heading, p.gs, pen)
-
+            if p.heading is not None and p.gs > 20 and not (trace_active and is_sel):
+                self.draw_track_arrow(x, y, p.heading, pen)
             if is_sel:
                 self._draw_data_block(x, y, p)
             elif i in labelled:

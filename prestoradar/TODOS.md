@@ -17,7 +17,8 @@ Switch to left hand side panel (swapping if plane crosses under)
 * Add altitude colours to the selected-aircraft trail (the trail itself landed
   2026-09-08 -- see DATA_TRACE.md "Status"; drawn in one muted pen for now)
   - trail fade: undecided -- constant vs. slower fade / more segments; revisit alongside echoes
-  - echoes: landed behind settings.ECHOES (per-fetch cadence); evaluate spacing on-device
+  - echoes: tried per-fetch (195f21b) and reverted -- didn't read as a tail, hurt touch;
+    arrow kept but unscaled. See UI-TRAILS.md decision 5.
 * Resolve incorrect routes
   - Include trail - see DATA_TRACE.md_
 * Add 'speed' mode to alt/mono?
