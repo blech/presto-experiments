@@ -64,7 +64,7 @@ def _data_block(p):
     return (cs, "%s %dkt" % (lvl, round(p.gs or 0)), p.type or "?")
 
 
-_CARD_W, _CARD_H = 224, 220
+_CARD_W, _CARD_H = 232, 220
 
 
 def _card_corner(bx, by):
@@ -558,7 +558,7 @@ class Renderer:
         d.rectangle(x + _CARD_W - 1, y, 1, _CARD_H)
 
         tx = x + 8
-        vx = tx + 78
+        vx = tx + 48
         # Right inner edge of the card, less a small margin so text clears the
         # 1 px border. Passed to every _ptext below so clipping is card-
         # relative, not screen-relative (the card can start at x = 4).
