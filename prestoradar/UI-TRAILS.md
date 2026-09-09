@@ -133,6 +133,10 @@ trail shows. If echoes land for all aircraft, retire the arrow at that point
 clutter. Interim tidy: drop the arrowhead barbs, leaving a line plus one
 short tick.
 
+Landed 2026-09-08 (`adsb-radar-echoes`): the arrow is drawn only when
+`ECHOES = 0`; with echoes on it is suppressed for every aircraft. It stays
+in the code (`draw_track_arrow`) as the `ECHOES = 0` fallback.
+
 
 ## 5. Echoes -- past radar returns
 
@@ -161,6 +165,13 @@ precisely because they show real turns and acceleration.
 non-selected aircraft**, behind an `ECHOES` setting; retire the arrow in the
 same change if it reads well on-device. **No echoes in map mode** -- the icon
 already carries direction and dots over the raster read as noise.
+
+Built 2026-09-08 at the per-fetch cadence (one point per 30 s), on-device
+evaluation pending. The per-render-tick ring buffer was considered and
+deferred: three genuine 30 s-apart returns with speed-proportional spacing
+is the intended slow-sweep-radar read, not a defect to escalate. `_echo_marks`
+takes the last 3 fetched fixes minus the most recent (≈ the blip);
+`_echo_radius` steps 1 → 2 oldest → newest; `ECHO_PENS` are two dim greens.
 
 
 ## 6. Extended ATC-style label (callsign + FL + ground speed + type)
@@ -374,18 +385,20 @@ worse than a blip does -- worth doing alongside, not blocking.
 
 ## Suggested sequence
 
-1. **Trail colour fix** (3) -- `SELECT_PEN`-keyed yellow + fade. One file,
-   ships immediately.
+1. **Trail colour fix** (3) -- `SELECT_PEN`-keyed yellow + fade.
+   **Landed `b166724`.**
 2. **Ambient de-clutter** (7.1) -- greedy label cull + relevance sort + dark
-   box. Independent; ships next.
-3. **Tap cycle stages 1-2** (8, 6) -- `UI._detail_level`, callsign-only then
-   the data block, no panel changes yet. Trail visible throughout.
+   box. **Landed `7210afb`.**
+3. **Tap cycle** (8, 6) -- `UI.detail_level`, the ATC data block, the
+   mode-aware cycle length. **Landed `b2f5d20`** (revised on-device to
+   2-stage radar / 1-stage map -- see decision 8).
 4. **Compact corner card + drop the view-shift** (1, 9, 2) -- the big
-   simplification; stage 3 of the cycle.
-5. **Echoes + retire the arrow** (5, 4) -- prototype behind a setting,
-   evaluate on-device, then make it the default.
-6. **Settings**: `TRAIL_LENGTH` (0 = off), `ECHOES` toggle, folded in as
-   their features land.
+   simplification. **Landed `86bf0d3` + `8dee07f`**, tuned in `eda93a3` /
+   `ad431e3` / `006657d`.
+5. **Echoes + retire the arrow** (5, 4) -- **in progress, branch
+   `adsb-radar-echoes`.**
+6. **Settings**: `TRAIL_LENGTH` (0 = off), `ECHOES` toggle -- landing with
+   step 5.
 7. **Later, separate track:** bounded/batched route fetching, then the
    board mode or list overlay.
 

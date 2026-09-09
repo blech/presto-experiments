@@ -93,3 +93,9 @@ LEVEL_RATE_FPM = 256
 # one fix per fetch. The in-RAM live trail is always kept either way; this only
 # toggles the network seed. See DATA_TRACE.md.
 TRACE_SEED = 1
+
+# Radar-mode "echoes": the last few fetched positions of each non-selected
+# aircraft, drawn as dots trailing behind it (spacing shows speed, the way a
+# slow-sweep radar looks). When 1, these replace the synthetic track arrow;
+# when 0, the arrow is drawn as before and no echoes. Radar mode only.
+ECHOES = 1
