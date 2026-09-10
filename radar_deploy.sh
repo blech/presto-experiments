@@ -61,6 +61,11 @@ mpremote cp prestoradar/aircraft_types.py :prestoradar/aircraft_types.py
 mpremote cp prestoradar/airlines.py :prestoradar/airlines.py
 mpremote cp prestoradar/settings.py :prestoradar/settings.py
 
+# osansb.af -- PicoVector panel/card font (render.py). If it's missing on the
+# device render.py just falls back to the bitmap font, so this is not fatal,
+# but the detail card and settings panel look far better with it.
+mpremote cp prestoradar/osansb.af :prestoradar/osansb.af
+
 # Generated lookup tables (make_basemap.py / make_aircraft_types.py /
 # make_airlines.py). aircraft_types.py and airlines.py import their _data
 # sibling at boot, so a missing table is a hard ImportError on-device, not a

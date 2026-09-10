@@ -32,6 +32,35 @@ _CAT_SCALE = {"A1": 0.72, "A2": 0.88, "A3": 1.0, "A4": 1.2, "A5": 1.35}
 
 _TICK_LEN = 18   # scope-mode direction tick: fixed px, speed is on tap not here
 
+# Detail-card / settings-panel text via PicoVector + osansb.af instead of the
+# 8 px bitmap cell. Renderer self-disables (bitmap fallback) if PicoVector or
+# osansb.af is missing.
+#
+# This is FIRMWARE-DEPENDENT (see dev/FONT-FINDINGS.md):
+#   * Presto firmware v1.0.0 (MicroPython 1.26): works. osansb.af renders
+#     sharp at full res, card + settings panel go through Renderer cleanly
+#     (~92 ms with a card open, redrawn at ~2 fps), no artifacts, no wedge.
+#   * Presto firmware v2.0.0+ (MicroPython 1.29, "presto-wireless-*"): DO NOT
+#     enable. vector.text() at full res leaves a stray-pixel band at y~21..24,
+#     cold bringups sometimes tile/corrupt the whole framebuffer, and
+#     Presto(full_res=True) can no longer be soft-reset. Pimoroni's own
+#     feature/badgeware-picovector branch drops full_res entirely ("PicoVector
+#     cannot drive the panel at 480x480") -- this is a hardware resource
+#     limit, not a bug queued for a fix.
+_PANEL_VECTOR_FONT = True
+
+# Only needed on the v2.0.0-era firmware that has the y~21..24 band, and only
+# if you enable the vector font there anyway (not recommended). When True,
+# _repair_top_band() repaints the top _VEC_BAND_H px after the panels and
+# redraws the status line. Off on v1.0.0, where there is no band and the
+# repaint would just stamp a bar over the top of the scope grid.
+_VEC_REPAIR_TOP_BAND = False
+
+# Pixel size passed to the vector font; the card rows read a touch small at 16
+# with room to spare, so 18.
+_PANEL_TEXT_PX = 18
+_VEC_BAND_H = 28
+
 
 def _trace_pen_index(seg_idx, n_segs, n_pens):
     """Pen index in [0, n_pens) for trail segment seg_idx (0 = oldest) of
@@ -141,6 +170,37 @@ class Renderer:
         self.last_drawn = []    # [(x, y, plane), ...] from the last draw_planes()
         self.basemap_ms = 0
 
+        # Panel / detail-card text: PicoVector + osansb.af at full res, in
+        # place of the fixed 8 px bitmap cell the card rows had been fighting.
+        # Gated on _PANEL_VECTOR_FONT (firmware-dependent -- see the note by
+        # that constant and dev/FONT-FINDINGS.md). Guarded regardless: if
+        # PicoVector or osansb.af is missing, _vec stays None and _ptext()
+        # falls back to bitmap8 exactly as before.
+        self._vec = None
+        self._vec_used = False
+        if not _PANEL_VECTOR_FONT:
+            print("render.py: panel font = bitmap8 (_PANEL_VECTOR_FONT off)")
+        else:
+            try:
+                from picovector import PicoVector, Transform, ANTIALIAS_FAST
+                _v = PicoVector(display)
+                _v.set_transform(Transform())
+                _v.set_antialiasing(ANTIALIAS_FAST)
+                _v.set_font_word_spacing(100)     # default 200 double-spaces words
+                for _path in ("/prestoradar/osansb.af", "/osansb.af", "osansb.af"):
+                    try:
+                        if _v.set_font(_path, _PANEL_TEXT_PX):
+                            self._vec = _v
+                            break
+                    except OSError:
+                        continue
+                print("render.py: panel font =",
+                      "osansb.af (PicoVector)" if self._vec else "bitmap8 (osansb.af not found)")
+            except Exception as _e:  # noqa: BLE001 -- a panel font must never
+                # take the renderer down; anything unexpected -> bitmap8.
+                self._vec = None
+                print("render.py: PicoVector unavailable (%r); panels use bitmap8" % _e)
+
         # Pen Colors (RGB). RADAR_* / MAP_* name the same three roles for each
         # of the two backdrops this can draw over -- the dark scope grid
         # ("radar") and the raster basemap ("map", REFACTORING.md #3) -- so a
@@ -218,32 +278,59 @@ class Renderer:
 
     # --- Small drawing primitives --------------------------------------
 
-    # Panel text stays on the bitmap font. Tried on this firmware and rejected:
-    #   - PicoVector + Roboto-Medium.af (e49dede): NotImplementedError: opcode
-    #   - PicoGraphics "sans" vector font (9edd5c4): renders as a scribble of strokes
     def _ptext(self, s, x, y_top, size, pen, clip=False, avail=None):
-        # One line of panel text, top-left at (x, y_top); size is a pixel
-        # height mapped to the nearest bitmap8 integer scale.
+        # One line of panel text, top-left at (x, y_top). `size` is a pixel
+        # height: the vector path (osansb.af, when available) uses it directly
+        # +2 (the card rows read a little small at 16); the bitmap fallback
+        # maps it to the nearest bitmap8 integer scale.
         #
         # clip=True trims s with measure_text() until it fits the available
-        # width. display.text()'s width arg is a word-WRAP point, not a clip --
-        # an overrunning line (a long operator or type name) would otherwise
-        # flow onto a second line and draw over the next panel row.
+        # width. A word-WRAP width arg would instead flow an overrunning line
+        # (a long operator or type name) onto a second line, over the next row.
         #
         # `avail` is the screen x just past the last usable pixel (the caller's
-        # right edge); default None keeps the historic full-height-sidebar
-        # behaviour of clipping to the screen edge. The corner card passes a
-        # card-relative value so its rows clip inside the card border, not 250+
-        # px past it (a left-corner card starts at x = 4).
+        # right edge); default None clips to the screen edge. The corner card
+        # passes a card-relative value so its rows clip inside the card border,
+        # not 250+ px past it (a left-corner card starts at x = 4).
         s = str(s)
-        scale = max(1, size // 8)
         w = (avail if avail is not None else WIDTH - x) - 2
+        if self._vec is not None:
+            v = self._vec
+            vsize = size + 2
+            v.set_font_size(vsize)
+            if clip:
+                while s and v.measure_text(s)[2] > w:
+                    s = s[:-1]
+            self.display.set_pen(pen)
+            v.text(s, x, y_top + (vsize * 4) // 5)   # vector y is the baseline
+            self._vec_used = True
+            return
+        scale = max(1, size // 8)
         self.display.set_font("bitmap8")   # panels only; draw_scene() resets to bitmap6
         if clip:
             while s and self.display.measure_text(s, scale) > w:
                 s = s[:-1]
         self.display.set_pen(pen)
         self.display.text(s, x, y_top, w, scale)
+
+    def _repair_top_band(self, planes):
+        # On v2.0.0-era firmware, vector.text() at full res dirties a thin strip
+        # across the very top of the screen (y ~ 0..25), regardless of where the
+        # text was drawn or any clip. Called from draw_scene() only when both
+        # _VEC_REPAIR_TOP_BAND and _vec_used are set: repaint that strip and
+        # redraw the status line over it. Not wanted on v1.0.0 (no band there).
+        d = self.display
+        if self.backdrop.map_layers:
+            # overspill is on layer 1 (the panels' layer); clear it back to
+            # transparent so the raster on layer 0 shows through
+            d.set_layer(1)
+            d.set_pen(self.TRANSPARENT_PEN)
+        else:
+            d.set_pen(self.BG_COLOR)
+        d.rectangle(0, 0, WIDTH, _VEC_BAND_H)
+        d.set_font("bitmap6")
+        d.set_pen(self.theme()["text"])
+        d.text(self._status_text(planes), 5, 10, WIDTH, 2)
 
     def draw_track_arrow(self, x, y, heading_deg, pen):
         # A short fixed-length line from the blip along the aircraft's track
@@ -690,4 +777,8 @@ class Renderer:
             self.draw_settings_btn()
         if settings_open:
             self.draw_settings_panel()
+        if self._vec_used:                # panels drew vector text this frame
+            if _VEC_REPAIR_TOP_BAND:
+                self._repair_top_band(planes)
+            self._vec_used = False
         self.presto.update()
