@@ -325,6 +325,12 @@ def enqueue_many(planes):
         _work.set()
 
 
+def pending():
+    """How many callsigns are still queued (not yet handed to _fetch). A
+    batch consumer can poll this to tell when a first pass has drained."""
+    return len(_pending)
+
+
 async def run_queue(concurrency=1, min_interval=1.0):
     """Drain _pending forever: at most `concurrency` _fetch()es in flight and
     at least `min_interval` seconds between launches. Run it once as a task;

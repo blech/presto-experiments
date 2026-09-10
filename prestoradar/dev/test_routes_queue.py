@@ -83,6 +83,7 @@ def test_enqueue_eligibility_and_reseed():
     routes.enqueue_many([ok, hex_only, empty, resolved])
     _eq(set(routes._pending), {"SWA1"},
         "only the eligible, unresolved callsign is queued")
+    _eq(routes.pending(), 1, "pending() counts the queued callsigns")
 
     # Re-seed: the next batch is the new priority set. A callsign no longer
     # visible is dropped rather than fetched late (UI-TRAILS.md #3).

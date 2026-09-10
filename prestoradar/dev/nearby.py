@@ -39,6 +39,7 @@ for _p in (os.path.join(_ROOT, "lib"), _PRESTORADAR):
 
 import feed  # noqa: E402
 import geometry  # noqa: E402
+import routes  # noqa: E402
 from settings import (  # noqa: E402
     CENTER_LAT, CENTER_LON, RADIUS_KM, USER_AGENT, LEVEL_RATE_FPM,
     FETCH_INTERVAL_MS,
@@ -211,6 +212,19 @@ def _fmt_alt(alt):
     return "  grnd" if alt in (0, "ground") else "     ?"
 
 
+def _fmt_route(state, retrying=False):
+    """The route column from a routes.get() state: "SFO->JFK" once resolved,
+    "..." while a lookup is in flight or still has retries left, "?" once it
+    has given up, blank for a callsign that was never a route to ask about."""
+    if isinstance(state, tuple):
+        return "%s->%s" % state
+    if state == "" or (state is None and retrying):
+        return "..."
+    if state is None:
+        return "?"
+    return ""                                   # "absent"
+
+
 def _fmt_row(row):
     p = row.plane
     op = (p.operator or "")[:13]
@@ -218,9 +232,10 @@ def _fmt_row(row):
     gs = "%4.0f" % p.gs if p.gs else "   -"
     dst = "%5.1f" % row.dist_nm if row.dist_nm is not None else "    -"
     brg = geometry.compass(row.bearing)   # from the field, or from centre for "near"
-    return ("  %-8s %-13s %-4s %s%s %skt %snm %-2s  route -"
+    route = _fmt_route(routes.get(p.callsign), routes.retrying(p.callsign))
+    return ("  %-8s %-13s %-4s %s%s %skt %snm %-2s  %-9s"
             % (p.label[:8], op, typ, _fmt_alt(p.alt),
-               _ARROW.get(p.vstate, "?"), gs, dst, brg))
+               _ARROW.get(p.vstate, "?"), gs, dst, brg, route))
 
 
 def _print_section(title, rows):
@@ -246,7 +261,70 @@ def render(result, radius_km):
         _print_section("Departures from %s  (nm to field)" % icao, sec["departures"])
         _print_section("Landings at %s  (nm to field)" % icao, sec["landings"])
     _print_section("Near the centre point  (nm to centre)", result["near"])
-    print("%d rows across %d sections" % (total, 2 * len(result["airports"]) + 1))
+    print("%d rows across %d sections" % (total, 2 * len(result["airports"]) + 1),
+          flush=True)   # stdout is block-buffered to a pipe; show each refresh
+
+
+def _empty_result(airports):
+    return {
+        "airports": collections.OrderedDict(
+            (i, {"departures": [], "landings": []}) for i in airports),
+        "near": [],
+    }
+
+
+def _visible_planes(result):
+    """One entry per callsign across every section (a plane in several
+    sections is still one route lookup)."""
+    seen = collections.OrderedDict()
+    for sec in result["airports"].values():
+        for key in ("departures", "landings"):
+            for row in sec[key]:
+                seen[row.plane.callsign] = row.plane
+    for row in result["near"]:
+        seen[row.plane.callsign] = row.plane
+    return list(seen.values())
+
+
+async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
+               render_interval, once):
+    state = {"result": _empty_result(airports)}
+
+    async def refresh():
+        planes = await _fetch(radius_nm)
+        if planes is None:
+            print("fetch failed -- see the log lines above")
+            return
+        state["result"] = bucket(planes, airports, cfg)
+        routes.enqueue_many(_visible_planes(state["result"]))
+
+    await refresh()   # first paint has data
+
+    if once:
+        worker = asyncio.create_task(routes.run_queue())
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 25.0
+        while routes.pending() and loop.time() < deadline:
+            await asyncio.sleep(0.5)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+        render(state["result"], radius_km)
+        return
+
+    async def fetcher():
+        while True:
+            await asyncio.sleep(fetch_interval)
+            await refresh()
+
+    async def renderer():
+        while True:
+            render(state["result"], radius_km)
+            await asyncio.sleep(render_interval)
+
+    await asyncio.gather(fetcher(), renderer(), routes.run_queue())
 
 
 def main():
@@ -255,9 +333,11 @@ def main():
     ap.add_argument("--radius", type=float, default=RADIUS_KM, metavar="KM",
                     help="km from settings.CENTER_LAT/LON (default: settings.RADIUS_KM)")
     ap.add_argument("--interval", type=float, default=FETCH_INTERVAL_MS / 1000.0,
-                    metavar="S", help="seconds between refreshes (default: settings.FETCH_INTERVAL_MS)")
+                    metavar="S", help="seconds between feed fetches (default: settings.FETCH_INTERVAL_MS)")
+    ap.add_argument("--render-interval", type=float, default=5.0, metavar="S",
+                    help="seconds between board reprints while routes fill in (default: 5)")
     ap.add_argument("--once", action="store_true",
-                    help="one pass and exit (no refresh loop)")
+                    help="one fetch, drain routes briefly, print once, exit")
     ap.add_argument("--include-ground", action="store_true",
                     help="keep aircraft on the ground (default: hide them)")
     ap.add_argument("--airports-csv", metavar="PATH", default=OURAIRPORTS_CSV,
@@ -268,15 +348,8 @@ def main():
     airports = load_airports(AIRPORTS, args.airports_csv)
     cfg = default_config()._replace(include_ground=args.include_ground)
 
-    while True:
-        planes = asyncio.run(_fetch(radius_nm))
-        if planes is None:
-            print("fetch failed -- see the log lines above")
-        else:
-            render(bucket(planes, airports, cfg), args.radius)
-        if args.once:
-            break
-        time.sleep(args.interval)
+    asyncio.run(_run(radius_nm, cfg, airports, args.radius,
+                     args.interval, args.render_interval, args.once))
     return 0
 
 

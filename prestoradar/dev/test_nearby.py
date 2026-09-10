@@ -163,8 +163,23 @@ def main():
     _eq(_labels(out4["airports"]["KSFO"]["landings"]), [],
         "a descent heading away from the field is not a landing there")
 
+    _test_fmt_route()
+
     print("nearby.py: all classification assertions passed")
     return 0
+
+
+def _test_fmt_route():
+    # _fmt_route turns a routes.get() state (+ retrying flag) into the column.
+    _eq(nearby._fmt_route(("SFO", "JFK")), "SFO->JFK", "a resolved route")
+    _eq(nearby._fmt_route(("?", "LHR")), "?->LHR",
+        "an endpoint the source only half-knew")
+    _eq(nearby._fmt_route(""), "...", "pending is an ellipsis")
+    _eq(nearby._fmt_route(None, retrying=True), "...",
+        "unknown but still retrying is an ellipsis")
+    _eq(nearby._fmt_route(None, retrying=False), "?",
+        "unknown with the retries spent is a question mark")
+    _eq(nearby._fmt_route("absent"), "", "never requested is blank")
 
 
 if __name__ == "__main__":
