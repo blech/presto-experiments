@@ -55,6 +55,11 @@ OURAIRPORTS_CSV = os.path.expanduser("~/.cache/ourairports/airports.csv")
 
 _NM_PER_KM = 1.0 / 1.852
 
+# One nearby airport: its position in the (e, n) km frame and the set of
+# identifiers a resolved route's endpoint might name it by (its ICAO ident
+# and, when it has one, its IATA code).
+Airport = collections.namedtuple("Airport", "e n codes")
+
 # One board row: the aircraft plus the range and bearing the section is keyed
 # to -- from the field for an airport section, from the radar centre for
 # "near". dist_nm is what the section is sorted by; bearing is degrees.
@@ -88,11 +93,37 @@ def _angle_diff(a, b):
     return abs((a - b + 180.0) % 360.0 - 180.0)
 
 
-def bucket(planes, airports, cfg):
+def _known(code):
+    """A route endpoint the source actually resolved (not '' or '?')."""
+    return bool(code) and code != "?"
+
+
+def _route_vetoes(route, codes, arriving):
+    """Should this resolved route (origin, dest) keep the plane OUT of the
+    given field's arrivals (arriving=True) or departures (arriving=False)?
+
+    Geometry proposes; the route only ever removes. A plane belongs in a
+    field's departures only if its route starts there, and its arrivals only
+    if its route ends there -- and never in both roles for one field. An
+    unresolved endpoint ('?') says nothing and never vetoes.
+    """
+    origin, dest = route
+    here, elsewhere = (dest, origin) if arriving else (origin, dest)
+    if _known(elsewhere) and elsewhere in codes:
+        return True                        # the other end is this field -> wrong role
+    if _known(here) and here not in codes:
+        return True                        # this end is a different, known airport
+    return False
+
+
+def bucket(planes, airports, cfg, routes_by_cs=None):
     """Sort `planes` into the five sections.
 
-    `airports` is an ordered mapping ICAO -> (e_km, n_km) from the radar
-    centre (see load_airports). Returns lists of Row(plane, dist_nm, bearing):
+    `airports` is an ordered mapping ICAO -> Airport(e, n, codes) from the
+    radar centre (see load_airports). `routes_by_cs`, when given, maps a
+    callsign to its resolved (origin, dest) route codes; a route whose
+    endpoints don't fit a proposed section vetoes it (see _route_vetoes).
+    Returns lists of Row(plane, dist_nm, bearing):
 
         {
           "airports": {ICAO: {"departures": [Row, ...],
@@ -108,6 +139,7 @@ def bucket(planes, airports, cfg):
     a climbing aircraft over the centre can be both a departure and a
     "near centre" contact.
     """
+    routes_by_cs = routes_by_cs or {}
     result = {"airports": collections.OrderedDict(), "near": []}
     for icao in airports:
         result["airports"][icao] = {"departures": [], "landings": []}
@@ -130,20 +162,28 @@ def bucket(planes, airports, cfg):
         if p.heading is None or p.vstate not in ("climb", "descent"):
             continue
 
-        for icao, (ae, an) in airports.items():
-            de, dn = p.e - ae, p.n - an
+        route = routes_by_cs.get(p.callsign)
+
+        for icao, ap in airports.items():
+            de, dn = p.e - ap.e, p.n - ap.n
             dist_nm = math.hypot(de, dn) * _NM_PER_KM
             if dist_nm > cfg.terminal_nm:
                 continue
             field_to_plane = _bearing(de, dn)   # where the plane sits from the field
             if p.vstate == "climb":
                 # Departing: climbing and tracking away from the field.
-                if _angle_diff(p.heading, field_to_plane) <= cfg.heading_tol:
-                    scored[icao]["departures"].append((dist_nm, p, field_to_plane))
+                if _angle_diff(p.heading, field_to_plane) > cfg.heading_tol:
+                    continue
+                if route and _route_vetoes(route, ap.codes, arriving=False):
+                    continue
+                scored[icao]["departures"].append((dist_nm, p, field_to_plane))
             else:
                 # Landing: descending and tracking toward the field.
-                if _angle_diff(p.heading, _bearing(-de, -dn)) <= cfg.heading_tol:
-                    scored[icao]["landings"].append((dist_nm, p, field_to_plane))
+                if _angle_diff(p.heading, _bearing(-de, -dn)) > cfg.heading_tol:
+                    continue
+                if route and _route_vetoes(route, ap.codes, arriving=True):
+                    continue
+                scored[icao]["landings"].append((dist_nm, p, field_to_plane))
 
     for icao in airports:
         # Departures read furthest-first, so a fresh takeoff joins at the
@@ -156,18 +196,14 @@ def bucket(planes, airports, cfg):
 
     near.sort(key=lambda p: p.dst)
     result["near"] = [Row(p, p.dst, p.dir) for p in near]
-
-    # --- seam for real routes -------------------------------------------
-    # A later pass can call a batched, rate-limited routes.request_many() on
-    # the union of the sections above and use origin/destination codes to
-    # confirm or correct the heuristic (UI-TRAILS.md, "Data layer readiness").
     return result
 
 
 def load_airports(idents, csv_path=OURAIRPORTS_CSV):
-    """ICAO idents -> (e_km, n_km) from the radar centre, read from the
-    OurAirports airports.csv make_basemap.py caches. Preserves `idents`
-    order. Exits with a hint if the cache is missing."""
+    """ICAO idents -> Airport(e, n, codes) from the radar centre, read from
+    the OurAirports airports.csv make_basemap.py caches. `codes` is the
+    airport's ICAO ident plus its IATA code, for matching a route endpoint.
+    Preserves `idents` order. Exits with a hint if the cache is missing."""
     if not os.path.isfile(csv_path):
         sys.exit(
             "OurAirports data not found at %s\n"
@@ -176,24 +212,28 @@ def load_airports(idents, csv_path=OURAIRPORTS_CSV):
         )
 
     want = set(idents)
-    latlon = {}
+    rows = {}
     with open(csv_path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             if row.get("ident") in want:
                 try:
-                    latlon[row["ident"]] = (float(row["latitude_deg"]),
-                                            float(row["longitude_deg"]))
+                    lat = float(row["latitude_deg"])
+                    lon = float(row["longitude_deg"])
                 except (KeyError, ValueError):
-                    pass
-            if len(latlon) == len(want):
+                    continue
+                iata = (row.get("iata_code") or "").strip()
+                codes = frozenset(c for c in (row["ident"], iata) if c)
+                rows[row["ident"]] = (lat, lon, codes)
+            if len(rows) == len(want):
                 break
 
-    missing = [i for i in idents if i not in latlon]
+    missing = [i for i in idents if i not in rows]
     if missing:
         sys.exit("not found in %s: %s" % (csv_path, ", ".join(missing)))
 
     return collections.OrderedDict(
-        (i, geometry.project(*latlon[i])) for i in idents
+        (i, Airport(*geometry.project(rows[i][0], rows[i][1]), rows[i][2]))
+        for i in idents
     )
 
 
@@ -265,14 +305,6 @@ def render(result, radius_km):
           flush=True)   # stdout is block-buffered to a pipe; show each refresh
 
 
-def _empty_result(airports):
-    return {
-        "airports": collections.OrderedDict(
-            (i, {"departures": [], "landings": []}) for i in airports),
-        "near": [],
-    }
-
-
 def _visible_planes(result):
     """One entry per callsign across every section (a plane in several
     sections is still one route lookup)."""
@@ -286,17 +318,35 @@ def _visible_planes(result):
     return list(seen.values())
 
 
+def _resolved_routes(planes):
+    """{callsign: (origin, dest)} for the planes whose route has resolved --
+    the veto input to bucket()."""
+    out = {}
+    for p in planes:
+        st = routes.get(p.callsign)
+        if isinstance(st, tuple):
+            out[p.callsign] = st
+    return out
+
+
 async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
                render_interval, once):
-    state = {"result": _empty_result(airports)}
+    state = {"planes": []}
+
+    def current_result():
+        # Re-bucket on every render, not just every fetch, so a plane leaves
+        # the wrong section within a render tick of its route resolving --
+        # bucket() is pure and cheap over ~30 planes.
+        return bucket(state["planes"], airports, cfg,
+                      _resolved_routes(state["planes"]))
 
     async def refresh():
         planes = await _fetch(radius_nm)
         if planes is None:
             print("fetch failed -- see the log lines above")
             return
-        state["result"] = bucket(planes, airports, cfg)
-        routes.enqueue_many(_visible_planes(state["result"]))
+        state["planes"] = planes
+        routes.enqueue_many(_visible_planes(current_result()))
 
     await refresh()   # first paint has data
 
@@ -311,7 +361,7 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
             await worker
         except asyncio.CancelledError:
             pass
-        render(state["result"], radius_km)
+        render(current_result(), radius_km)
         return
 
     async def fetcher():
@@ -321,7 +371,7 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
 
     async def renderer():
         while True:
-            render(state["result"], radius_km)
+            render(current_result(), radius_km)
             await asyncio.sleep(render_interval)
 
     await asyncio.gather(fetcher(), renderer(), routes.run_queue())

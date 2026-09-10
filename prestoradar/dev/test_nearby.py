@@ -15,7 +15,9 @@ the board.
 """
 
 import os
+import shutil
 import sys
+import tempfile
 
 _PRESTORADAR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ROOT = os.path.dirname(_PRESTORADAR)
@@ -73,11 +75,11 @@ class _FakePlane:
 
 def main():
     airports = {
-        "KSFO": geometry.project(*_SFO),
-        "KOAK": geometry.project(*_OAK),
+        "KSFO": nearby.Airport(*geometry.project(*_SFO), frozenset(("KSFO", "SFO"))),
+        "KOAK": nearby.Airport(*geometry.project(*_OAK), frozenset(("KOAK", "OAK"))),
     }
-    se, sn = airports["KSFO"]
-    oe, on = airports["KOAK"]
+    se, sn = airports["KSFO"].e, airports["KSFO"].n
+    oe, on = airports["KOAK"].e, airports["KOAK"].n
     cfg = nearby.Config(terminal_nm=12.0, phase_ceil_ft=8000,
                         heading_tol=70.0, near_nm=5.0, include_ground=False)
 
@@ -163,10 +165,59 @@ def main():
     _eq(_labels(out4["airports"]["KSFO"]["landings"]), [],
         "a descent heading away from the field is not a landing there")
 
+    # --- route veto -----------------------------------------------------
+    # A climb in OAK's terminal area tracking away from OAK: geometry alone
+    # calls it an OAK departure (and, being inside SFO's area too, a SFO
+    # departure). Its route is SFO->YYZ -- it left SFO and is passing over
+    # OAK. A resolved route whose endpoints aren't a field removes it from
+    # that field's section; it never adds a plane geometry didn't propose.
+    poe = _FakePlane("POE672", oe + 0.4, on + 0.2, 7750, "climb", 60.0, 9.8)
+    geom_only = nearby.bucket([poe], airports, cfg)
+    _eq("POE672" in _labels(geom_only["airports"]["KOAK"]["departures"]), True,
+        "with no resolved route, geometry alone still proposes the OAK departure")
+    vetoed = nearby.bucket([poe], airports, cfg, {"POE672": ("SFO", "YYZ")})
+    _eq(_labels(vetoed["airports"]["KOAK"]["departures"]), [],
+        "a route starting and ending away from OAK vetoes the OAK departure")
+    _eq(_labels(vetoed["airports"]["KSFO"]["departures"]), ["POE672"],
+        "the same route confirms POE672 where geometry also proposed a SFO departure")
+
+    # Symmetric for landings: a descent lined up on OAK from the east, but the
+    # route is TUS->SFO -- it ends at SFO, not OAK.
+    skw = _FakePlane("SKW5583", oe - 4.0, on, 2400, "descent", 90.0, 9.1)
+    _eq(_labels(nearby.bucket([skw], airports, cfg)["airports"]["KOAK"]["landings"]),
+        ["SKW5583"], "geometry alone proposes the OAK landing")
+    v2 = nearby.bucket([skw], airports, cfg, {"SKW5583": ("TUS", "SFO")})
+    _eq(_labels(v2["airports"]["KOAK"]["landings"]), [],
+        "a route ending at SFO vetoes the OAK landing")
+
+    # A '?' endpoint (the source didn't resolve that side) must not veto.
+    q = nearby.bucket([skw], airports, cfg, {"SKW5583": ("?", "?")})
+    _eq(_labels(q["airports"]["KOAK"]["landings"]), ["SKW5583"],
+        "an unresolved ('?') route endpoint does not veto")
+
+    _test_load_airports()
     _test_fmt_route()
 
     print("nearby.py: all classification assertions passed")
     return 0
+
+
+def _test_load_airports():
+    tmp = tempfile.mkdtemp()
+    try:
+        csv_path = os.path.join(tmp, "airports.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+            fh.write("ident,type,latitude_deg,longitude_deg,iata_code\n")
+            fh.write("KSFO,large_airport,37.6189,-122.3750,SFO\n")
+            fh.write("KOAK,large_airport,37.7213,-122.2197,OAK\n")
+        aps = nearby.load_airports(("KSFO", "KOAK"), csv_path)
+        _eq(list(aps), ["KSFO", "KOAK"], "load_airports keys follow the requested order")
+        _eq(aps["KSFO"].codes >= {"KSFO", "SFO"}, True,
+            "an airport's codes hold both its ICAO ident and its IATA code")
+        ex, ny = geometry.project(37.6189, -122.3750)
+        _close(aps["KSFO"].e, ex, "load_airports projects to the (e, n) frame")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _test_fmt_route():
