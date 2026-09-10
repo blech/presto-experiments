@@ -94,9 +94,10 @@ def bucket(planes, airports, cfg):
           "near": [Plane, ...],
         }
 
-    Airport lists are nearest-first to the field; "near" is nearest-first to
-    the centre. Sections are independent -- a climbing aircraft over the
-    centre can be both a departure and a "near centre" contact.
+    Departure lists are furthest-from-the-field first (a new takeoff enters
+    at the bottom); landing lists and "near" are nearest-first. Sections are
+    independent -- a climbing aircraft over the centre can be both a
+    departure and a "near centre" contact.
     """
     result = {"airports": collections.OrderedDict(), "near": []}
     for icao in airports:
@@ -135,9 +136,13 @@ def bucket(planes, airports, cfg):
                     scored[icao]["landings"].append((dist_nm, p))
 
     for icao in airports:
-        for key in ("departures", "landings"):
-            rows = sorted(scored[icao][key], key=lambda t: t[0])
-            result["airports"][icao][key] = [p for _, p in rows]
+        # Departures read furthest-first, so a fresh takeoff joins at the
+        # bottom and climbs up the list as it leaves. Landings read
+        # nearest-the-runway first -- next to touch down at the top.
+        deps = sorted(scored[icao]["departures"], key=lambda t: t[0], reverse=True)
+        lands = sorted(scored[icao]["landings"], key=lambda t: t[0])
+        result["airports"][icao]["departures"] = [p for _, p in deps]
+        result["airports"][icao]["landings"] = [p for _, p in lands]
 
     near.sort(key=lambda p: p.dst)
     result["near"] = near

@@ -68,8 +68,10 @@ def main():
     # A climb 3 km due north of SFO, tracking north -- straight off the field
     # and pulling away from it.
     dep_sfo = _FakePlane("SWA100", se, sn + 3.0, 3500, "climb", 0.0, 8.0)
-    # A descent 5 km due west of OAK, tracking east -- lined up on the field.
+    # Two descents tracking east onto OAK, one closer to the field than the
+    # other -- listed nearest-the-runway first.
     arr_oak = _FakePlane("UAL200", oe - 5.0, on, 2500, "descent", 90.0, 9.0)
+    arr_oak_far = _FakePlane("UAL201", oe - 9.0, on, 4200, "descent", 90.0, 12.0)
     # Directly over SFO but at cruise: an overflight, not a movement here.
     overflight = _FakePlane("ACA300", se, sn, 30000, "climb", 0.0, 8.0)
     # Sitting on the SFO ramp.
@@ -82,17 +84,18 @@ def main():
     # SFO's terminal area on the right heading -- must land in both sections.
     both = _FakePlane("JBU700", 0.0, 0.0, 3000, "climb", 0.0, 0.4)
 
-    planes = [dep_sfo, arr_oak, overflight, parked, near_far, near_close, both]
+    planes = [dep_sfo, arr_oak, arr_oak_far, overflight, parked,
+              near_far, near_close, both]
     out = nearby.bucket(planes, airports, cfg)
 
-    _eq(_labels(out["airports"]["KSFO"]["departures"]), ["SWA100", "JBU700"],
-        "SFO departures: the climb off the field and the one over the centre")
+    _eq(_labels(out["airports"]["KSFO"]["departures"]), ["JBU700", "SWA100"],
+        "SFO departures are furthest-first -- a new takeoff drops in at the bottom")
     _eq(_labels(out["airports"]["KSFO"]["landings"]), [],
         "nothing is landing at SFO")
     _eq(_labels(out["airports"]["KOAK"]["departures"]), [],
         "nothing is departing OAK")
-    _eq(_labels(out["airports"]["KOAK"]["landings"]), ["UAL200"],
-        "OAK landings: the descent lined up from the west")
+    _eq(_labels(out["airports"]["KOAK"]["landings"]), ["UAL200", "UAL201"],
+        "OAK landings are nearest-the-runway first")
     _eq(_labels(out["near"]), ["JBU700", "HOP600", "HOP500"],
         "near-centre section is closest-first by dst")
 
