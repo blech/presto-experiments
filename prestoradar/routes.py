@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import json
 import math
 
@@ -25,7 +26,15 @@ NEAR_AIRPORT_KM = 30  # SFO approaches often overfly the field before a near-180
                       # _plausible() stops requiring the track to point at it.
 
 # callsign -> (origin, dest) | None (unknown) | "" (pending) | absent (never requested)
-_cache = {}
+#
+# An LRU, capped at _CACHE_MAX: one list-view cycle touches ~30 callsigns and
+# the old plain dict grew one entry per callsign ever seen (DATA_TODOS.md #3).
+# Reads count as a use (_cache_get / get), so the currently visible rows stay
+# hot; a resolved (o, d) that falls cold is dropped and re-fetched later at no
+# correctness cost. Always go through _cache_set / _cache_get, never index
+# _cache directly, or the ordering and the cap stop being maintained.
+_cache = collections.OrderedDict()
+_CACHE_MAX = 64
 
 # callsign -> lookups spent so far, while still unresolved. adsb.lol's route
 # data is routinely stale or missing for the first ~2 min of a flight and then
@@ -33,8 +42,28 @@ _cache = {}
 # re-fetch it, up to _MAX_TRIES times. The selection is re-request()ed once per
 # feed fetch (ui.on_feed_update -> set_selected), so this is ~_MAX_TRIES feed
 # cycles. Cleared once a route resolves; a plausible hit is never re-checked.
+# Pruned alongside _cache when an entry is evicted.
 _tries = {}
 _MAX_TRIES = 4
+
+
+def _cache_set(cs, value):
+    """Write cs -> value, mark it most-recently-used, and evict the oldest
+    entries (and their _tries) if the cache is over _CACHE_MAX."""
+    _cache[cs] = value
+    _cache.move_to_end(cs)
+    while len(_cache) > _CACHE_MAX:
+        old, _ = _cache.popitem(last=False)
+        _tries.pop(old, None)
+
+
+def _cache_get(cs, default=None):
+    """Read cs, counting the read as a use so a still-wanted route isn't the
+    next thing evicted. A miss doesn't touch the cache."""
+    if cs in _cache:
+        _cache.move_to_end(cs)
+        return _cache[cs]
+    return default
 
 
 def is_hex_id(cs):
@@ -204,7 +233,7 @@ async def _fetch(callsign, lat, lon, track):
     except Exception as e:  # noqa: BLE001
         log("route lookup failed:", callsign, repr(e))
         route = None
-    _cache[callsign] = route
+    _cache_set(callsign, route)
     if route is not None:
         _tries.pop(callsign, None)
     log("route", callsign, "->", route, "(try", _tries.get(callsign, 0), "of", _MAX_TRIES, ")")
@@ -224,12 +253,12 @@ def request(p):
     cs = (p.callsign or "").strip()
     if not cs or cs.lower() == (p.hex or "").lower():
         return
-    cached = _cache.get(cs, "absent")
+    cached = _cache_get(cs, "absent")
     if cached == "" or isinstance(cached, tuple):
         return                                  # in flight, or already resolved
     if cached is None and _tries.get(cs, 0) >= _MAX_TRIES:
         return                                  # looked up, unknown, gave up
-    _cache[cs] = ""                             # pending
+    _cache_set(cs, "")                          # pending
     _tries[cs] = _tries.get(cs, 0) + 1
     lat, lon = geometry.unproject(p.e, p.n)
     asyncio.create_task(_fetch(cs, lat, lon, p.heading))
@@ -237,11 +266,12 @@ def request(p):
 
 def get(callsign):
     """Current cached state for callsign: an (origin, dest) tuple, None
-    (looked up, unknown), "" (pending), or "absent" (never requested)."""
-    return _cache.get(callsign, "absent")
+    (looked up, unknown), "" (pending), or "absent" (never requested).
+    Counts as a use -- polling get() for a visible row keeps it hot."""
+    return _cache_get(callsign, "absent")
 
 
 def retrying(callsign):
     """True while a None (unknown) result still has request() re-fetches
     left -- i.e. "keep showing 'looking...', not 'unknown' yet"."""
-    return _cache.get(callsign) is None and _tries.get(callsign, 0) < _MAX_TRIES
+    return _cache_get(callsign) is None and _tries.get(callsign, 0) < _MAX_TRIES
