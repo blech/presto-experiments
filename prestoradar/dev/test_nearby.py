@@ -56,9 +56,10 @@ def _row(rows, callsign):
 
 class _FakePlane:
     """Just the fields nearby.bucket() reads -- e/n (km from centre), alt,
-    vstate, heading, dst (nm from centre), on_ground."""
+    vstate, heading, dst / dir (range and bearing from centre), on_ground."""
 
-    def __init__(self, callsign, e, n, alt, vstate, heading, dst, on_ground=False):
+    def __init__(self, callsign, e, n, alt, vstate, heading, dst,
+                 on_ground=False, direction=None):
         self.callsign = callsign
         self.e = e
         self.n = n
@@ -66,6 +67,7 @@ class _FakePlane:
         self.vstate = vstate
         self.heading = heading
         self.dst = dst
+        self.dir = direction
         self.on_ground = on_ground
 
 
@@ -92,7 +94,8 @@ def main():
     parked = _FakePlane("N400", se + 1.0, sn, "ground", "level", 0.0, 7.6,
                         on_ground=True)
     # Two contacts near the centre, given out of order to check the sort.
-    near_far = _FakePlane("HOP500", 2.0, 2.0, 4000, "level", 270.0, 2.4)
+    near_far = _FakePlane("HOP500", 2.0, 2.0, 4000, "level", 270.0, 2.4,
+                          direction=123.0)
     near_close = _FakePlane("HOP600", 0.5, -0.5, 3800, "level", 270.0, 0.6)
     # Over the centre, climbing north: close enough to the centre AND inside
     # SFO's terminal area on the right heading -- must land in both sections.
@@ -113,12 +116,19 @@ def main():
     _eq(_labels(out["near"]), ["JBU700", "HOP600", "HOP500"],
         "near-centre section is closest-first by dst")
 
-    # Airport rows carry distance to that field (SWA100 is 3 km due north of
-    # SFO); near-centre rows carry distance to the centre (the plane's own dst).
+    # Airport rows carry range and bearing to/from that field (SWA100 is 3 km
+    # due north of SFO, UAL200 is 5 km due west of OAK); near-centre rows carry
+    # the plane's own dst / dir from the centre.
     _close(_row(out["airports"]["KSFO"]["departures"], "SWA100").dist_nm,
            3.0 / 1.852, "SFO departure row distance is to the field, not the centre")
+    _close(_row(out["airports"]["KSFO"]["departures"], "SWA100").bearing, 0.0,
+           "SFO departure row bearing is from the field (plane due N of SFO)")
+    _close(_row(out["airports"]["KOAK"]["landings"], "UAL200").bearing, 270.0,
+           "OAK landing row bearing is from the field (plane due W of OAK)")
     _close(_row(out["near"], "HOP500").dist_nm, 2.4,
            "near-centre row distance is the plane's dst from the centre")
+    _close(_row(out["near"], "HOP500").bearing, 123.0,
+           "near-centre row bearing is the plane's dir from the centre")
 
     # Independence: the over-the-centre climb is in two sections at once.
     _eq("JBU700" in _labels(out["airports"]["KSFO"]["departures"])

@@ -54,9 +54,10 @@ OURAIRPORTS_CSV = os.path.expanduser("~/.cache/ourairports/airports.csv")
 
 _NM_PER_KM = 1.0 / 1.852
 
-# One board row: the aircraft and the distance the section is ordered by --
-# nm to the field for an airport section, nm to the radar centre for "near".
-Row = collections.namedtuple("Row", "plane dist_nm")
+# One board row: the aircraft plus the range and bearing the section is keyed
+# to -- from the field for an airport section, from the radar centre for
+# "near". dist_nm is what the section is sorted by; bearing is degrees.
+Row = collections.namedtuple("Row", "plane dist_nm bearing")
 
 # Heuristic thresholds. Deliberately loose for a first cut -- a go-around or a
 # vectored downwind leg will still be misfiled.
@@ -90,7 +91,7 @@ def bucket(planes, airports, cfg):
     """Sort `planes` into the five sections.
 
     `airports` is an ordered mapping ICAO -> (e_km, n_km) from the radar
-    centre (see load_airports). Returns lists of Row(plane, dist_nm):
+    centre (see load_airports). Returns lists of Row(plane, dist_nm, bearing):
 
         {
           "airports": {ICAO: {"departures": [Row, ...],
@@ -98,8 +99,9 @@ def bucket(planes, airports, cfg):
           "near": [Row, ...],
         }
 
-    In an airport section dist_nm is the distance to that field; in "near"
-    it is the distance to the radar centre. Departure lists are
+    In an airport section dist_nm / bearing are the plane's range and
+    bearing from that field; in "near" they are its range and bearing from
+    the radar centre (the feed's own dst / dir). Departure lists are
     furthest-from-the-field first (a new takeoff enters at the bottom);
     landing lists and "near" are nearest-first. Sections are independent --
     a climbing aircraft over the centre can be both a departure and a
@@ -132,14 +134,15 @@ def bucket(planes, airports, cfg):
             dist_nm = math.hypot(de, dn) * _NM_PER_KM
             if dist_nm > cfg.terminal_nm:
                 continue
+            field_to_plane = _bearing(de, dn)   # where the plane sits from the field
             if p.vstate == "climb":
                 # Departing: climbing and tracking away from the field.
-                if _angle_diff(p.heading, _bearing(de, dn)) <= cfg.heading_tol:
-                    scored[icao]["departures"].append((dist_nm, p))
+                if _angle_diff(p.heading, field_to_plane) <= cfg.heading_tol:
+                    scored[icao]["departures"].append((dist_nm, p, field_to_plane))
             else:
                 # Landing: descending and tracking toward the field.
                 if _angle_diff(p.heading, _bearing(-de, -dn)) <= cfg.heading_tol:
-                    scored[icao]["landings"].append((dist_nm, p))
+                    scored[icao]["landings"].append((dist_nm, p, field_to_plane))
 
     for icao in airports:
         # Departures read furthest-first, so a fresh takeoff joins at the
@@ -147,11 +150,11 @@ def bucket(planes, airports, cfg):
         # nearest-the-runway first -- next to touch down at the top.
         deps = sorted(scored[icao]["departures"], key=lambda t: t[0], reverse=True)
         lands = sorted(scored[icao]["landings"], key=lambda t: t[0])
-        result["airports"][icao]["departures"] = [Row(p, d) for d, p in deps]
-        result["airports"][icao]["landings"] = [Row(p, d) for d, p in lands]
+        result["airports"][icao]["departures"] = [Row(p, d, b) for d, p, b in deps]
+        result["airports"][icao]["landings"] = [Row(p, d, b) for d, p, b in lands]
 
     near.sort(key=lambda p: p.dst)
-    result["near"] = [Row(p, p.dst) for p in near]
+    result["near"] = [Row(p, p.dst, p.dir) for p in near]
 
     # --- seam for real routes -------------------------------------------
     # A later pass can call a batched, rate-limited routes.request_many() on
@@ -214,7 +217,7 @@ def _fmt_row(row):
     typ = (p.type or "")[:4]
     gs = "%4.0f" % p.gs if p.gs else "   -"
     dst = "%5.1f" % row.dist_nm if row.dist_nm is not None else "    -"
-    brg = geometry.compass(p.dir)   # bearing from the radar centre, all sections
+    brg = geometry.compass(row.bearing)   # from the field, or from centre for "near"
     return ("  %-8s %-13s %-4s %s%s %skt %snm %-2s  route -"
             % (p.label[:8], op, typ, _fmt_alt(p.alt),
                _ARROW.get(p.vstate, "?"), gs, dst, brg))
