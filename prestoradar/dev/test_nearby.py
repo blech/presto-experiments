@@ -2,12 +2,14 @@
 """
 Desktop (CPython) test for nearby.py's classification core -- no WiFi, no device.
 
-`nearby.bucket()` sorts a live plane list into five independent sections:
-departures and landings for each nearby airport, plus everything close to the
-radar centre. The heuristic (terminal-area radius + altitude ceiling + vertical
-state + heading toward/away from the field) is the part worth pinning down;
-this exercises it against hand-placed aircraft so a drift in the thresholds or
-the bearing maths fails here rather than on a glance at the board.
+`nearby.bucket()` sorts a live plane list into five independent sections of
+`Row(plane, dist_nm)` -- departures and landings for each nearby airport
+(dist_nm is to that field), plus everything close to the radar centre
+(dist_nm is to the centre). The heuristic (terminal-area radius + altitude
+ceiling + vertical state + heading toward/away from the field) is the part
+worth pinning down; this exercises it against hand-placed aircraft so a drift
+in the thresholds or the bearing maths fails here rather than on a glance at
+the board.
 
     python3 prestoradar/dev/test_nearby.py
 """
@@ -36,8 +38,20 @@ def _eq(got, want, what):
         raise AssertionError("%s: got %r, want %r" % (what, got, want))
 
 
-def _labels(planes):
-    return [p.callsign for p in planes]
+def _close(got, want, what, tol=1e-3):
+    if abs(got - want) > tol:
+        raise AssertionError("%s: got %r, want %r (tol %g)" % (what, got, want, tol))
+
+
+def _labels(rows):
+    return [row.plane.callsign for row in rows]
+
+
+def _row(rows, callsign):
+    for row in rows:
+        if row.plane.callsign == callsign:
+            return row
+    raise AssertionError("%s not in section" % callsign)
 
 
 class _FakePlane:
@@ -98,6 +112,13 @@ def main():
         "OAK landings are nearest-the-runway first")
     _eq(_labels(out["near"]), ["JBU700", "HOP600", "HOP500"],
         "near-centre section is closest-first by dst")
+
+    # Airport rows carry distance to that field (SWA100 is 3 km due north of
+    # SFO); near-centre rows carry distance to the centre (the plane's own dst).
+    _close(_row(out["airports"]["KSFO"]["departures"], "SWA100").dist_nm,
+           3.0 / 1.852, "SFO departure row distance is to the field, not the centre")
+    _close(_row(out["near"], "HOP500").dist_nm, 2.4,
+           "near-centre row distance is the plane's dst from the centre")
 
     # Independence: the over-the-centre climb is in two sections at once.
     _eq("JBU700" in _labels(out["airports"]["KSFO"]["departures"])

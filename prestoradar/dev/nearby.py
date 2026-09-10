@@ -54,6 +54,10 @@ OURAIRPORTS_CSV = os.path.expanduser("~/.cache/ourairports/airports.csv")
 
 _NM_PER_KM = 1.0 / 1.852
 
+# One board row: the aircraft and the distance the section is ordered by --
+# nm to the field for an airport section, nm to the radar centre for "near".
+Row = collections.namedtuple("Row", "plane dist_nm")
+
 # Heuristic thresholds. Deliberately loose for a first cut -- a go-around or a
 # vectored downwind leg will still be misfiled.
 Config = collections.namedtuple(
@@ -86,18 +90,20 @@ def bucket(planes, airports, cfg):
     """Sort `planes` into the five sections.
 
     `airports` is an ordered mapping ICAO -> (e_km, n_km) from the radar
-    centre (see load_airports). Returns:
+    centre (see load_airports). Returns lists of Row(plane, dist_nm):
 
         {
-          "airports": {ICAO: {"departures": [Plane, ...],
-                              "landings":   [Plane, ...]}, ...},
-          "near": [Plane, ...],
+          "airports": {ICAO: {"departures": [Row, ...],
+                              "landings":   [Row, ...]}, ...},
+          "near": [Row, ...],
         }
 
-    Departure lists are furthest-from-the-field first (a new takeoff enters
-    at the bottom); landing lists and "near" are nearest-first. Sections are
-    independent -- a climbing aircraft over the centre can be both a
-    departure and a "near centre" contact.
+    In an airport section dist_nm is the distance to that field; in "near"
+    it is the distance to the radar centre. Departure lists are
+    furthest-from-the-field first (a new takeoff enters at the bottom);
+    landing lists and "near" are nearest-first. Sections are independent --
+    a climbing aircraft over the centre can be both a departure and a
+    "near centre" contact.
     """
     result = {"airports": collections.OrderedDict(), "near": []}
     for icao in airports:
@@ -141,11 +147,11 @@ def bucket(planes, airports, cfg):
         # nearest-the-runway first -- next to touch down at the top.
         deps = sorted(scored[icao]["departures"], key=lambda t: t[0], reverse=True)
         lands = sorted(scored[icao]["landings"], key=lambda t: t[0])
-        result["airports"][icao]["departures"] = [p for _, p in deps]
-        result["airports"][icao]["landings"] = [p for _, p in lands]
+        result["airports"][icao]["departures"] = [Row(p, d) for d, p in deps]
+        result["airports"][icao]["landings"] = [Row(p, d) for d, p in lands]
 
     near.sort(key=lambda p: p.dst)
-    result["near"] = near
+    result["near"] = [Row(p, p.dst) for p in near]
 
     # --- seam for real routes -------------------------------------------
     # A later pass can call a batched, rate-limited routes.request_many() on
@@ -202,24 +208,25 @@ def _fmt_alt(alt):
     return "  grnd" if alt in (0, "ground") else "     ?"
 
 
-def _fmt_row(p):
+def _fmt_row(row):
+    p = row.plane
     op = (p.operator or "")[:13]
     typ = (p.type or "")[:4]
     gs = "%4.0f" % p.gs if p.gs else "   -"
-    dst = "%5.1f" % p.dst if p.dst is not None else "    -"
-    brg = geometry.compass(p.dir)
+    dst = "%5.1f" % row.dist_nm if row.dist_nm is not None else "    -"
+    brg = geometry.compass(p.dir)   # bearing from the radar centre, all sections
     return ("  %-8s %-13s %-4s %s%s %skt %snm %-2s  route -"
             % (p.label[:8], op, typ, _fmt_alt(p.alt),
                _ARROW.get(p.vstate, "?"), gs, dst, brg))
 
 
-def _print_section(title, planes):
+def _print_section(title, rows):
     print(title)
-    if not planes:
+    if not rows:
         print("  (none)")
     else:
-        for p in planes:
-            print(_fmt_row(p))
+        for row in rows:
+            print(_fmt_row(row))
     print()
 
 
@@ -233,9 +240,9 @@ def render(result, radius_km):
     print("=" * 72)
     print()
     for icao, sec in result["airports"].items():
-        _print_section("Departures from %s" % icao, sec["departures"])
-        _print_section("Landings at %s" % icao, sec["landings"])
-    _print_section("Near the centre point", result["near"])
+        _print_section("Departures from %s  (nm to field)" % icao, sec["departures"])
+        _print_section("Landings at %s  (nm to field)" % icao, sec["landings"])
+    _print_section("Near the centre point  (nm to centre)", result["near"])
     print("%d rows across %d sections" % (total, 2 * len(result["airports"]) + 1))
 
 
