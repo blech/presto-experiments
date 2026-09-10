@@ -239,29 +239,129 @@ async def _fetch(callsign, lat, lon, track):
     log("route", callsign, "->", route, "(try", _tries.get(callsign, 0), "of", _MAX_TRIES, ")")
 
 
-def request(p):
-    """Kick off a route lookup for plane.Plane p if one isn't already resolved
-    or in flight. A no-op when the plane isn't broadcasting a callsign --
-    feed.py falls back to the ICAO hex id in that case, so p.callsign ==
-    p.hex, and that's never a route to look up -- or when it's an empty
-    string. (Can't just test is_hex_id(cs): a real callsign like ACA568 is
-    six characters that all happen to be hex digits.) Callers can pass a
-    plane straight through even before its callsign is known to be real.
-
-    Re-callable: a still-unresolved route (cached None) is re-fetched, with
-    p's current position/heading, until it resolves or _MAX_TRIES is hit."""
+def _route_callsign(p):
+    """p's callsign if it's a real one to look up, else None -- feed.py falls
+    back to the ICAO hex id when a plane isn't broadcasting a callsign, so
+    p.callsign == p.hex is never a route. (Can't just test is_hex_id(cs): a
+    real callsign like ACA568 is six characters that all happen to be hex
+    digits.)"""
     cs = (p.callsign or "").strip()
     if not cs or cs.lower() == (p.hex or "").lower():
-        return
+        return None
+    return cs
+
+
+def _eligible(cs):
+    """True if cs is worth a (re)fetch: not already resolved, not currently
+    in flight, and not a None result that's used up its _MAX_TRIES."""
     cached = _cache_get(cs, "absent")
     if cached == "" or isinstance(cached, tuple):
-        return                                  # in flight, or already resolved
+        return False
     if cached is None and _tries.get(cs, 0) >= _MAX_TRIES:
-        return                                  # looked up, unknown, gave up
-    _cache_set(cs, "")                          # pending
+        return False
+    return True
+
+
+def _mark_launching(cs):
+    """Move cs to the pending state and count the try. Paired with an
+    immediate _fetch() launch by both request() and the batch queue."""
+    _cache_set(cs, "")
     _tries[cs] = _tries.get(cs, 0) + 1
+
+
+def request(p):
+    """Kick off a route lookup for plane.Plane p if one isn't already resolved
+    or in flight. A no-op when the plane isn't broadcasting a real callsign.
+    Callers can pass a plane straight through even before its callsign is
+    known to be real.
+
+    Re-callable: a still-unresolved route (cached None) is re-fetched, with
+    p's current position/heading, until it resolves or _MAX_TRIES is hit.
+    Fires immediately and unthrottled -- it's the single-aircraft tap path.
+    Batch callers wanting routes for a whole screen use enqueue_many()."""
+    cs = _route_callsign(p)
+    if cs is None or not _eligible(cs):
+        return
+    _mark_launching(cs)
     lat, lon = geometry.unproject(p.e, p.n)
     asyncio.create_task(_fetch(cs, lat, lon, p.heading))
+
+
+# --- throttled batch queue --------------------------------------------
+#
+# A list view wants routes for every visible aircraft (~30) at once, but
+# adsb.lol's public endpoints ask for ~1 request/second and each Presto TLS
+# buffer is real RAM. enqueue_many() takes the visible planes; run_queue(),
+# run once by the consumer alongside its own loop, drains them at
+# min_interval spacing with at most `concurrency` fetches in flight, so the
+# route column fills in progressively over a cycle instead of stampeding.
+# UI-TRAILS.md, "Data layer readiness for a list app".
+
+_pending = collections.OrderedDict()   # cs -> (cs, lat, lon, track); FIFO, re-seedable
+_work = None                           # asyncio.Event, created by run_queue()
+_last_fetch_started = 0.0              # event-loop time of the last _fetch launch
+
+
+def enqueue_many(planes):
+    """Queue a route lookup for each eligible plane. Non-blocking. The batch
+    is also the new priority set: any callsign still queued from a previous
+    call that isn't in this batch is dropped rather than fetched late (the
+    aircraft has left the view). Safe to call every feed cycle."""
+    batch = {}
+    for p in planes:
+        cs = _route_callsign(p)
+        if cs is None or cs in batch or not _eligible(cs):
+            continue
+        lat, lon = geometry.unproject(p.e, p.n)
+        batch[cs] = (cs, lat, lon, p.heading)
+
+    for cs in list(_pending):
+        if cs not in batch:
+            del _pending[cs]
+    for cs, job in batch.items():
+        _pending[cs] = job                 # refresh position/heading if requeued
+
+    if _pending and _work is not None:
+        _work.set()
+
+
+async def run_queue(concurrency=1, min_interval=1.0):
+    """Drain _pending forever: at most `concurrency` _fetch()es in flight and
+    at least `min_interval` seconds between launches. Run it once as a task;
+    it idles cheaply on an empty queue. Never returns."""
+    global _work, _last_fetch_started
+    _work = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(concurrency)
+    inflight = set()
+
+    async def _one(cs, lat, lon, track):
+        try:
+            await _fetch(cs, lat, lon, track)
+        finally:
+            sem.release()
+
+    while True:
+        if not _pending:
+            _work.clear()
+            await _work.wait()
+            continue
+
+        cs, job = next(iter(_pending.items()))   # job is (cs, lat, lon, track)
+        del _pending[cs]
+        if not _eligible(cs):
+            continue
+
+        wait = _last_fetch_started + min_interval - loop.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        await sem.acquire()
+        _mark_launching(cs)
+        _last_fetch_started = loop.time()
+        task = asyncio.create_task(_one(*job))
+        inflight.add(task)
+        task.add_done_callback(inflight.discard)
 
 
 def get(callsign):

@@ -13,6 +13,7 @@ hitting the network -- routes._fetch is monkeypatched.
     python3 prestoradar/dev/test_routes_queue.py
 """
 
+import asyncio
 import os
 import sys
 
@@ -33,6 +34,18 @@ def _eq(got, want, what):
 def _reset():
     routes._cache.clear()
     routes._tries.clear()
+    routes._pending.clear()
+
+
+class _P:
+    """The plane fields routes.enqueue_many() reads."""
+
+    def __init__(self, callsign, hexid, e=0.0, n=0.0, heading=90.0):
+        self.callsign = callsign
+        self.hex = hexid
+        self.e = e
+        self.n = n
+        self.heading = heading
 
 
 def test_lru_bound():
@@ -58,10 +71,72 @@ def test_lru_bound():
     _eq(routes.get("never-seen"), "absent", "an unknown callsign still reads absent")
 
 
+def test_enqueue_eligibility_and_reseed():
+    _reset()
+
+    ok = _P("SWA1", "a1b2c3")
+    hex_only = _P("a1b2c4", "a1b2c4")          # callsign == hex -> not a route
+    empty = _P("", "a1b2c5")
+    resolved = _P("UAL2", "b0b0b0")
+    routes._cache_set("UAL2", ("SFO", "JFK"))  # already known -> don't re-queue
+
+    routes.enqueue_many([ok, hex_only, empty, resolved])
+    _eq(set(routes._pending), {"SWA1"},
+        "only the eligible, unresolved callsign is queued")
+
+    # Re-seed: the next batch is the new priority set. A callsign no longer
+    # visible is dropped rather than fetched late (UI-TRAILS.md #3).
+    other = _P("DAL3", "c0c0c0")
+    routes.enqueue_many([other, resolved])
+    _eq(set(routes._pending), {"DAL3"},
+        "a callsign absent from the next batch is dropped, a new one is added")
+
+
+def test_run_queue_spaces_and_drains():
+    _reset()
+    calls = []
+    orig_fetch = routes._fetch
+
+    async def fake_fetch(cs, lat, lon, track):
+        calls.append((cs, asyncio.get_event_loop().time()))
+        routes._cache_set(cs, ("ORG", "DST"))
+        routes._tries.pop(cs, None)
+
+    async def drive():
+        worker = asyncio.create_task(
+            routes.run_queue(concurrency=1, min_interval=0.05))
+        routes.enqueue_many([_P("AAA", "h1"), _P("BBB", "h2"), _P("CCC", "h3")])
+        for _ in range(400):
+            if all(isinstance(routes.get(c), tuple) for c in ("AAA", "BBB", "CCC")):
+                break
+            await asyncio.sleep(0.01)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+    routes._fetch = fake_fetch
+    try:
+        asyncio.run(drive())
+    finally:
+        routes._fetch = orig_fetch
+        _reset()
+
+    _eq([c[0] for c in calls], ["AAA", "BBB", "CCC"],
+        "every queued callsign is fetched, in queue order")
+    gaps = [calls[i + 1][1] - calls[i][1] for i in range(len(calls) - 1)]
+    for g in gaps:
+        if g < 0.045:
+            raise AssertionError("requests not spaced by min_interval: gap %.3fs" % g)
+
+
 def main():
     saved_max = routes._CACHE_MAX
     try:
         test_lru_bound()
+        test_enqueue_eligibility_and_reseed()
+        test_run_queue_spaces_and_drains()
     finally:
         routes._CACHE_MAX = saved_max
         _reset()
