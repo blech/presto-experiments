@@ -145,25 +145,59 @@ glyphs are corrupt instead. The firmware image also carries the string
 *"Presto: full_res is not supported by the PicoVector rasteriser."* (does not
 print in this repro).
 
-## render.py integration — attempted, parked behind a flag
+## render.py integration — landed, firmware-gated
 
-`render.py` now has a full PicoVector path for `_ptext()` (the detail card and
-settings panel), plus `_repair_top_band()` for the top-edge artifact and
-`osansb.af` added to the repo + `radar_deploy.sh`. It is gated on
-`_PANEL_VECTOR_FONT` (top of `render.py`), **default `False`**.
+`render.py` has a full PicoVector path for `_ptext()` (the detail card and
+settings panel), `osansb.af` added to the repo + `radar_deploy.sh`, and
+`_repair_top_band()` for the v2.0.0 top-edge artifact. Two constants at the
+top of `render.py` gate it:
 
-Why it's off: exercising it the way the radar actually does — PicoVector
-brought up inside `Renderer.__init__`, i.e. inside imported module code after
-`render.py` and the big data modules are loaded — wedged or corrupted the
-display on every attempt (a small standalone script never did). Part of that
-is the pre-existing `Presto(full_res=True)` flakiness — in one run
-`Presto(full_res=True)` hung *before* PicoVector was even touched — but it
-couldn't be cleared for this path. The isolated `diag_*` runs stayed clean, so
-the font itself is fine; the integration is the unknown.
+- `_PANEL_VECTOR_FONT` — **`True`**. Confirmed end-to-end on v1.0.0 through
+  `Renderer.__init__` (the way the radar actually brings PicoVector up, not
+  just an isolated script): panel font loads, `draw_card` + `draw_settings_panel`
+  render clean, ~93 ms with a card open. Set `False` to force bitmap8 (also
+  the automatic fallback if PicoVector or `osansb.af` is missing).
+- `_VEC_REPAIR_TOP_BAND` — **`False`**. Only relevant on v2.0.0-era firmware,
+  which this repo doesn't target -- there is no band on v1.0.0, and repainting
+  the strip would just stamp a bar over the top of the scope grid for nothing.
 
-To try it: set `_PANEL_VECTOR_FONT = True`, deploy, and cold-boot the radar a
-few times. Leave it on only if the panels render and the display is stable
-across boots. `dev/test_card_corner.py` still passes with the flag either way.
+## A related-but-distinct PicoVector limit: 16 primitives per shape
+
+Pimoroni forum thread, ["PicoVector primitives limit 16"](https://forums.pimoroni.com/t/picovector-primitives-limit-16/29086):
+a 24-bar chart (`Polygon.rectangle()` called 24 times on one `Polygon`, one
+`vector.draw()`) only renders its last 16 bars; earlier ones come out as thin
+AA fragments instead of solid fills, no exception. Traced to a hardcoded
+constant in the exact `pico_vector.hpp` this repo has checked out under
+`pimoroni-pico/` (same library on v1.0.0, v2.0.0, and badgeware firmware):
+
+```cpp
+// pico_vector.hpp, PicoVector::PicoVector()
+// TODO: Make these configurable?
+// Tile buffer size, Max nodes per scanline
+pp_init(16);
+```
+
+```c
+// pretty-poly.h, right above pp_nodes/pp_node_counts
+// polygon node buffer handles at most 16 line intersections per scanline
+// is this enough for cjk/emoji? (requires a 2kB buffer)
+```
+
+`pp_init(16)` allocates a small fixed SRAM buffer, once, sized for at most 16
+edge-crossings per supersampled scanline across a shape's paths; exceeding
+that on any one scanline silently drops/corrupts rather than raising.
+Workaround (from the thread): split a many-segment shape across multiple
+`Polygon`s, ≤16 primitives each.
+
+**Not the explanation for the y~21..24 full-res band above** -- that showed
+up from a couple of short text lines, and `af_render_glyph()` renders one
+glyph per `pp_render()` call (1-4 paths, nowhere near 16); the same
+`pp_init(16)` code is what v1.0.0 runs too, and v1.0.0 was clean, so the
+16-primitive ceiling isn't what flipped between versions. But it's the same
+class of bug -- a small hardcoded buffer that overflows silently -- and it
+*is* a real, independent limit worth knowing before this repo ever draws a
+many-segment shape (e.g. the coastline) as one PicoVector `Polygon`: split it
+into ≤16-primitive chunks, the same way the thread's bar chart had to.
 
 ## Files
 
