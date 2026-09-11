@@ -57,10 +57,11 @@ class Backdrop:
     count allows it) a pre-rendered raster decoded onto PicoGraphics layer 0.
 
     Two things this deliberately does NOT own, both injected instead:
-    - `view_cx`, the current horizontal registration (shifted while the
-      detail panel is open), stays UI-owned state in radar.py until ui.py
-      exists (REFACTORING.md #1/#2) -- every method that needs it takes it
-      as an argument rather than storing it.
+    - `view_cx`, the horizontal registration, is UI-owned state (ui.py). It
+      is now always WIDTH // 2 -- the detail-panel view shift was removed
+      (UI-TRAILS.md decisions 1/9) -- but methods still take it as an
+      argument rather than assuming the centre, so a shift could be
+      reintroduced without rethreading it.
     - `draw_grid` (draw the scope rings/crosshairs) is a rendering concern,
       not basemap data, so it's a callback radar.py supplies rather than
       something this class draws itself -- it stays in radar.py until
@@ -92,16 +93,13 @@ class Backdrop:
         #                              actually behind them.
         self.segs = None    # [(x0, y0, x1, y1), ...] ints, clipped to the viewport
         self.marks = ()     # [(x, y, name), ...] airports inside the viewport
-        # The view_cx everything currently on screen actually agrees on --
-        # not necessarily UI.view_cx (the *target*, updated the instant a tap
-        # decides on a shift), since a shift's redraw/rebuild is backgrounded
-        # (ui.py's UI._rebuild_backdrop, REFACTORING.md #4). radar.py's
-        # to_screen() reads this for aircraft/ring positions, and
-        # draw_scene()'s single-layer path reads it for the grid, so a shift
-        # only becomes visible -- everywhere at once -- when
-        # UI._rebuild_backdrop() advances this to match the target, rather
-        # than the aircraft/ring jumping ahead of a backdrop that hasn't
-        # caught up yet.
+        # The view_cx the vector cache (segs/marks) was last projected at.
+        # radar.py's to_screen() reads it for aircraft/ring positions and
+        # draw_scene()'s single-layer path reads it for the grid, so all three
+        # stay in step. With the detail-panel view shift gone (UI-TRAILS.md
+        # decisions 1/9) this is always WIDTH // 2; it survives only so a
+        # DISPLAY_MODE toggle's backgrounded rebuild (ui.py's
+        # UI._rebuild_backdrop) still has a single value to reassert.
         self.display_view_cx = WIDTH // 2
 
     # --- Vector basemap (coastline/airports cache) --------------------------
@@ -150,6 +148,7 @@ class Backdrop:
             self.display.line(s[0], s[1], s[2], s[3])
         if self.marks:
             self.display.set_pen(self.airport_pen)
+            self.display.set_font("bitmap6")   # rebuilds can run mid-frame, after a bitmap8 panel draw
             for x, y, name in self.marks:
                 self.display.circle(x, y, 3)
                 self.display.text(name, x + 5, y - 4, WIDTH, 1)
@@ -164,27 +163,25 @@ class Backdrop:
     # vector grid is drawn on layer 0 as the fallback.
 
     def redraw(self, view_cx, selected):
-        """(Re)draw layer 0 to match DISPLAY_MODE at the current view shift:
-        the raster if "map" (falling back to the vector grid + coastline if
-        basemap.jpg is missing or fails to decode), the vector grid +
-        coastline if "radar" -- the same two components draw_scene()'s
-        non-2-layer path draws every frame, so toggling between modes
-        restores the *whole* look, not just the grid. Called once at boot
-        (via load()), again from radar.py's _set_selected() whenever
-        view_cx changes (the detail panel opening/closing, or the shift
-        adjusting to keep the selected plane clear of it), and again from
-        _toggle_setting() when DISPLAY_MODE itself changes, so the backdrop
-        actually follows the on-device toggle instead of only the aircraft
-        icons and pens. Only meaningful once the boot layer count is 2
-        (map_layers) -- that's fixed by DISPLAY_MODE *at boot*, so toggling
-        into "map" from a "radar" boot still can't get the raster (no layer
-        0 to draw it onto); toggling between them after a "map" boot works
-        both ways, using this same layer-0 redraw either direction. The
-        raster path costs one ~380 ms jpegdec decode -- same as the
-        panel-shift redraw, only on a mode/selection change, not per frame.
-        `selected` is only needed by the vector-grid fallback/branch below
-        (it's Renderer.draw_radar_grid's own crosshair-clearance argument,
-        passed straight through) -- the raster path itself doesn't use it.
+        """(Re)draw layer 0 to match DISPLAY_MODE: the raster if "map"
+        (falling back to the vector grid + coastline if basemap.jpg is
+        missing or fails to decode), the vector grid + coastline if "radar"
+        -- the same two components draw_scene()'s non-2-layer path draws
+        every frame, so toggling between modes restores the *whole* look,
+        not just the grid. Called once at boot (via load()) and again from
+        ui.py's UI._rebuild_backdrop() when the settings overlay toggles
+        DISPLAY_MODE, so the backdrop follows the on-device toggle instead
+        of only the aircraft icons and pens. Only meaningful once the boot
+        layer count is 2 (map_layers) -- that's fixed by DISPLAY_MODE *at
+        boot*, so toggling into "map" from a "radar" boot still can't get
+        the raster (no layer 0 to draw it onto); toggling between them after
+        a "map" boot works both ways, using this same layer-0 redraw either
+        direction. The raster path costs one ~380 ms jpegdec decode, on a
+        mode change only, not per frame. `view_cx` is now always WIDTH // 2
+        (the view shift is gone, UI-TRAILS.md decisions 1/9) and `selected`
+        is vestigial -- it threads through to Renderer.draw_radar_grid,
+        which ignores it too; both are kept only because three call sites
+        still pass them.
         """
         if not self.map_layers:
             self.showing_raster = False

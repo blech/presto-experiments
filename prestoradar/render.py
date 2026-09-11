@@ -3,9 +3,14 @@ import time
 
 import geometry
 import routes
+import traces
+from backdrop import _clip_segment   # Cohen-Sutherland viewport clip, shared with the
+#                                      coastline draw -- a fast aircraft's ~5 min trace
+#                                      runs well off a 30 km scope and the graphics lib
+#                                      mustn't get coordinates hundreds of px out (see
+#                                      backdrop.py's note on the same hazard)
 
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
-_VAL_DX = 96   # panel value column: px from the label's x, clears the widest label
 
 # Top-down airliner for "map" mode. Local coords: +x = right wing, +y = nose;
 # ~14 px nose-to-tail. Every wing/tailplane root overlaps the fuselage quad, so
@@ -24,6 +29,95 @@ _ICON_TRIS = (
 # Emitter-category (ADS-B "category") -> fixed-wing icon scale. A1 light .. A5
 # heavy; anything not listed (incl. not broadcast) draws at 1.0.
 _CAT_SCALE = {"A1": 0.72, "A2": 0.88, "A3": 1.0, "A4": 1.2, "A5": 1.35}
+
+_TICK_LEN = 18   # scope-mode direction tick: fixed px, speed is on tap not here
+
+# Detail-card / settings-panel text via PicoVector + osansb.af instead of the
+# 8 px bitmap cell. Renderer self-disables (bitmap fallback) if PicoVector or
+# osansb.af is missing.
+#
+# This is FIRMWARE-DEPENDENT (see dev/FONT-FINDINGS.md):
+#   * Presto firmware v1.0.0 (MicroPython 1.26): works. osansb.af renders
+#     sharp at full res, card + settings panel go through Renderer cleanly
+#     (~92 ms with a card open, redrawn at ~2 fps), no artifacts, no wedge.
+#   * Presto firmware v2.0.0+ (MicroPython 1.29, "presto-wireless-*"): DO NOT
+#     enable. vector.text() at full res leaves a stray-pixel band at y~21..24,
+#     cold bringups sometimes tile/corrupt the whole framebuffer, and
+#     Presto(full_res=True) can no longer be soft-reset. Pimoroni's own
+#     feature/badgeware-picovector branch drops full_res entirely ("PicoVector
+#     cannot drive the panel at 480x480") -- this is a hardware resource
+#     limit, not a bug queued for a fix.
+_PANEL_VECTOR_FONT = True
+
+# Only needed on the v2.0.0-era firmware that has the y~21..24 band, and only
+# if you enable the vector font there anyway (not recommended). When True,
+# _repair_top_band() repaints the top _VEC_BAND_H px after the panels and
+# redraws the status line. Off on v1.0.0, where there is no band and the
+# repaint would just stamp a bar over the top of the scope grid.
+_VEC_REPAIR_TOP_BAND = False
+
+# Pixel size passed to the vector font; the card rows read a touch small at 16
+# with room to spare, so 18.
+_PANEL_TEXT_PX = 18
+_VEC_BAND_H = 28
+
+
+def _trace_pen_index(seg_idx, n_segs, n_pens):
+    """Pen index in [0, n_pens) for trail segment seg_idx (0 = oldest) of
+    n_segs. Oldest segment -> 0 (dimmest), newest -> n_pens - 1, so the line
+    fades in from where the aircraft has been to where it is now."""
+    if n_segs <= 1:
+        return n_pens - 1
+    return min(n_pens - 1, seg_idx * n_pens // n_segs)
+
+
+def _trail_cap(points, limit):
+    """Draw-time cap on the selected-aircraft trail: the last `limit` points,
+    or all of them when `limit` is None or already covers them, or none when
+    `limit` is 0 or less. Storage ceilings (traces._KEEP, plane._TRAIL_MAX)
+    are separate and larger."""
+    if limit is None:
+        return points
+    if limit <= 0:
+        return []
+    return points[-limit:]
+
+
+_TAG_SCALE = 2      # bitmap6 scale for callsign tags on the scope
+_TAG_CH_W = 8       # eyeballed per-character advance for bitmap6 at _TAG_SCALE (2);
+#                     used by BOTH _label_box (the ambient cull) and _tag (the
+#                     backing box), so a wrong value under-culls and under-covers
+#                     together -- keep the two in sync via this one constant.
+_TAG_H = 16         # ~px tall
+
+
+def _data_block(p):
+    """Three short lines for the stage-2 on-scope ATC tag: callsign, then
+    flight level + ground speed, then ICAO type. Altitude / 100 for FL
+    ("GND" on the ground, "---" if unknown); speed to the nearest knot; "?"
+    for an unknown type."""
+    cs = p.callsign or p.hex or "?"
+    a = p.alt
+    if a in (0, "ground"):
+        lvl = "GND"
+    elif isinstance(a, (int, float)):
+        lvl = "FL%03d" % (int(a) // 100)
+    else:
+        lvl = "---"
+    return (cs, "%s %dkt" % (lvl, round(p.gs or 0)), p.type or "?")
+
+
+_CARD_W, _CARD_H = 232, 220
+
+
+def _card_corner(bx, by):
+    """Top-left (x, y) of the detail card: the corner diagonally opposite
+    the selected blip (bx, by), inset 4 px, so the card covers neither the
+    blip nor (usually) its trail. Ties (blip on a mid-line) fall to the
+    right / bottom."""
+    x = 4 if bx > 240 else WIDTH - _CARD_W - 4
+    y = 4 if by > 240 else HEIGHT - _CARD_H - 4
+    return x, y
 
 
 class Renderer:
@@ -51,9 +145,14 @@ class Renderer:
     """
 
     def __init__(self, display, presto, settings, feed, to_screen, hidden,
-                 radius_km, px_per_km, panel_x, settings_btn, spanel,
+                 radius_km, px_per_km, settings_btn, spanel,
                  sp_row0, sp_rowh, sp_valdx):
         self.display = display
+        # bitmap6 (PicoGraphics' default, made explicit) everywhere on the
+        # scope -- status line, alt legend, map callsign tags, airport labels.
+        # draw_scene() reasserts it each frame; _ptext() switches to the
+        # chunkier bitmap8 just for the inspect / settings panels.
+        display.set_font("bitmap6")
         self.presto = presto
         self.settings = settings
         self.feed = feed
@@ -61,7 +160,6 @@ class Renderer:
         self.hidden = hidden
         self.radius_km = radius_km
         self.px_per_km = px_per_km
-        self.panel_x = panel_x
         self.settings_btn = settings_btn
         self.spanel = spanel
         self.sp_row0 = sp_row0
@@ -71,6 +169,37 @@ class Renderer:
         self.backdrop = None    # set by radar.py once Backdrop is constructed
         self.last_drawn = []    # [(x, y, plane), ...] from the last draw_planes()
         self.basemap_ms = 0
+
+        # Panel / detail-card text: PicoVector + osansb.af at full res, in
+        # place of the fixed 8 px bitmap cell the card rows had been fighting.
+        # Gated on _PANEL_VECTOR_FONT (firmware-dependent -- see the note by
+        # that constant and dev/FONT-FINDINGS.md). Guarded regardless: if
+        # PicoVector or osansb.af is missing, _vec stays None and _ptext()
+        # falls back to bitmap8 exactly as before.
+        self._vec = None
+        self._vec_used = False
+        if not _PANEL_VECTOR_FONT:
+            print("render.py: panel font = bitmap8 (_PANEL_VECTOR_FONT off)")
+        else:
+            try:
+                from picovector import PicoVector, Transform, ANTIALIAS_FAST
+                _v = PicoVector(display)
+                _v.set_transform(Transform())
+                _v.set_antialiasing(ANTIALIAS_FAST)
+                _v.set_font_word_spacing(100)     # default 200 double-spaces words
+                for _path in ("/prestoradar/osansb.af", "/osansb.af", "osansb.af"):
+                    try:
+                        if _v.set_font(_path, _PANEL_TEXT_PX):
+                            self._vec = _v
+                            break
+                    except OSError:
+                        continue
+                print("render.py: panel font =",
+                      "osansb.af (PicoVector)" if self._vec else "bitmap8 (osansb.af not found)")
+            except Exception as _e:  # noqa: BLE001 -- a panel font must never
+                # take the renderer down; anything unexpected -> bitmap8.
+                self._vec = None
+                print("render.py: PicoVector unavailable (%r); panels use bitmap8" % _e)
 
         # Pen Colors (RGB). RADAR_* / MAP_* name the same three roles for each
         # of the two backdrops this can draw over -- the dark scope grid
@@ -134,47 +263,88 @@ class Renderer:
         self.PANEL_LABEL = display.create_pen(192, 192, 192)  # row labels, dimmer than values
         self.SELECT_PEN = display.create_pen(255, 235, 90)    # ring: distinct from vstate pens
         self.EMERG_PEN = display.create_pen(255, 70, 70)
+        # Trail ramp: dim -> bright, oldest -> newest, so the line reads
+        # directionally. Keyed to SELECT_PEN's yellow (the ring around the
+        # same target) -- clear of COAST_PEN's blue-grey and the vstate pens.
+        self.TRACE_PENS = (
+            display.create_pen(70, 65, 25),
+            display.create_pen(120, 110, 45),
+            display.create_pen(170, 155, 65),
+            display.create_pen(215, 200, 90),
+        )
 
     def theme(self):
         return self.THEMES["map"] if self.backdrop.showing_raster else self.THEMES["radar"]
 
     # --- Small drawing primitives --------------------------------------
 
-    # Panel text stays on the bitmap font. Tried on this firmware and rejected:
-    #   - PicoVector + Roboto-Medium.af (e49dede): NotImplementedError: opcode
-    #   - PicoGraphics "sans" vector font (9edd5c4): renders as a scribble of strokes
-    def _ptext(self, s, x, y_top, size, pen, clip=False):
-        # One line of panel text, top-left at (x, y_top); size is a pixel
-        # height mapped to the nearest bitmap8 integer scale.
+    def _ptext(self, s, x, y_top, size, pen, clip=False, avail=None):
+        # One line of panel text, top-left at (x, y_top). `size` is a pixel
+        # height: the vector path (osansb.af, when available) uses it directly
+        # +2 (the card rows read a little small at 16); the bitmap fallback
+        # maps it to the nearest bitmap8 integer scale.
         #
-        # clip=True trims s with measure_text() until it fits the panel width.
-        # display.text()'s width arg is a word-WRAP point, not a clip -- an
-        # overrunning line (a long operator or type name) would otherwise flow
-        # onto a second line and draw over the next panel row.
+        # clip=True trims s with measure_text() until it fits the available
+        # width. A word-WRAP width arg would instead flow an overrunning line
+        # (a long operator or type name) onto a second line, over the next row.
+        #
+        # `avail` is the screen x just past the last usable pixel (the caller's
+        # right edge); default None clips to the screen edge. The corner card
+        # passes a card-relative value so its rows clip inside the card border,
+        # not 250+ px past it (a left-corner card starts at x = 4).
         s = str(s)
+        w = (avail if avail is not None else WIDTH - x) - 2
+        if self._vec is not None:
+            v = self._vec
+            vsize = size + 2
+            v.set_font_size(vsize)
+            if clip:
+                while s and v.measure_text(s)[2] > w:
+                    s = s[:-1]
+            self.display.set_pen(pen)
+            v.text(s, x, y_top + (vsize * 4) // 5)   # vector y is the baseline
+            self._vec_used = True
+            return
         scale = max(1, size // 8)
-        avail = WIDTH - x - 2
+        self.display.set_font("bitmap8")   # panels only; draw_scene() resets to bitmap6
         if clip:
-            while s and self.display.measure_text(s, scale) > avail:
+            while s and self.display.measure_text(s, scale) > w:
                 s = s[:-1]
         self.display.set_pen(pen)
-        self.display.text(s, x, y_top, avail, scale)
+        self.display.text(s, x, y_top, w, scale)
 
-    def draw_track_arrow(self, x, y, heading_deg, speed_kt, pen):
-        # heading_deg is degrees clockwise from north (the aircraft's track over
-        # the ground). Screen y grows downwards, so north maps to -y.
+    def _repair_top_band(self, planes):
+        # On v2.0.0-era firmware, vector.text() at full res dirties a thin strip
+        # across the very top of the screen (y ~ 0..25), regardless of where the
+        # text was drawn or any clip. Called from draw_scene() only when both
+        # _VEC_REPAIR_TOP_BAND and _vec_used are set: repaint that strip and
+        # redraw the status line over it. Not wanted on v1.0.0 (no band there).
+        d = self.display
+        if self.backdrop.map_layers:
+            # overspill is on layer 1 (the panels' layer); clear it back to
+            # transparent so the raster on layer 0 shows through
+            d.set_layer(1)
+            d.set_pen(self.TRANSPARENT_PEN)
+        else:
+            d.set_pen(self.BG_COLOR)
+        d.rectangle(0, 0, WIDTH, _VEC_BAND_H)
+        d.set_font("bitmap6")
+        d.set_pen(self.theme()["text"])
+        d.text(self._status_text(planes), 5, 10, WIDTH, 2)
+
+    def draw_track_arrow(self, x, y, heading_deg, pen):
+        # A short fixed-length line from the blip along the aircraft's track
+        # (heading_deg is degrees clockwise from north; screen y grows down,
+        # so north maps to -y). No arrowhead barbs, and not scaled by speed:
+        # a scaled arrow was a clutter source on fast traffic (UI-TRAILS.md
+        # decision 4) and per-fetch echoes didn't read as a tail (decision 5),
+        # so this is the minimal "which way is it pointing" cue.
         d = self.display
         a = math.radians(heading_deg)
-        dx, dy = math.sin(a), -math.cos(a)
-        length = min(60, max(12, speed_kt * 0.15))  # ~knots -> pixels, clamped
-        tip_x, tip_y = int(x + dx * length), int(y + dy * length)
         d.set_pen(pen)
-        d.line(int(x), int(y), tip_x, tip_y)
-        # Arrowhead: two short barbs splayed back from the tip.
-        for barb_deg in (heading_deg + 148, heading_deg - 148):
-            b = math.radians(barb_deg)
-            d.line(tip_x, tip_y,
-                   int(tip_x + math.sin(b) * 7), int(tip_y - math.cos(b) * 7))
+        d.line(int(x), int(y),
+               int(x + math.sin(a) * _TICK_LEN),
+               int(y - math.cos(a) * _TICK_LEN))
 
     def _icon_pass(self, x, y, ca, sa, scale):
         # Fill the icon's triangles at the current pen, rotated by (ca, sa) =
@@ -213,15 +383,73 @@ class Renderer:
         d.set_pen(self.BG_COLOR)
         d.circle(cx, cy, r - thickness)
 
+    def _label_box(self, x, y, text):
+        # The rect a callsign tag for `text` occupies, anchored at the blip
+        # the way _tag() draws it: top-left at (x + 8, y - 8).
+        return (x + 8, y - 8, len(text) * _TAG_CH_W, _TAG_H)
+
+    def _ambient_label_set(self, order):
+        # Indices into `order` ([(x, y, plane), ...]) whose callsign tag
+        # should be drawn: greedily placed nearest-the-centre first, skipping
+        # any whose box overlaps one already placed, and skipping blanks.
+        # O(n^2) over ~30 aircraft. Nearest-first is a stable relevance order
+        # (the crosshair centre is what the display is "about"); flip the key
+        # to q.alt_sort_key for lowest-altitude-first instead.
+        ranked = sorted(
+            range(len(order)),
+            key=lambda i: (order[i][0] - 240) ** 2 + (order[i][1] - 240) ** 2)
+        placed = []
+        keep = set()
+        for i in ranked:
+            x, y, p = order[i]
+            if not p.callsign:
+                continue
+            bx, by, bw, bh = self._label_box(x, y, p.callsign)
+            if any(bx < ox + ow and ox < bx + bw and by < oy + oh and oy < by + bh
+                   for (ox, oy, ow, oh) in placed):
+                continue
+            placed.append((bx, by, bw, bh))
+            keep.add(i)
+        return keep
+
+    def _tag(self, x, y, text):
+        # One callsign tag: a 1 px dark box (so it reads over the coastline)
+        # then the text, at the standard (x + 8, y - 8) anchor.
+        if not text:
+            return
+        d = self.display
+        tx, ty = x + 8, y - 8
+        w = len(text) * _TAG_CH_W
+        d.set_pen(self.BG_COLOR)
+        d.rectangle(tx - 1, ty - 1, w + 2, _TAG_H)
+        d.set_pen(self.RADAR_TEXT_PEN)
+        d.text(text, tx, ty, WIDTH, _TAG_SCALE)
+
+    def _draw_data_block(self, x, y, p):
+        # Stage-2 ATC tag: three lines stacked upward from the blip, each on
+        # its own dark backing box. Anchored to the right of the blip like a
+        # plain tag.
+        d = self.display
+        lines = _data_block(p)
+        tx = x + 8
+        for j, line in enumerate(lines):
+            ty = y - 8 - (len(lines) - 1 - j) * _TAG_H
+            w = len(line) * _TAG_CH_W
+            d.set_pen(self.BG_COLOR)
+            d.rectangle(tx - 1, ty - 1, w + 2, _TAG_H)
+            d.set_pen(self.RADAR_TEXT_PEN)
+            d.text(line, tx, ty, WIDTH, _TAG_SCALE)
+
     def draw_radar_grid(self, view_cx, selected):
+        # selected: unused since the sidebar was removed; kept for backdrop.py's call
         d = self.display
         d.set_pen(self.BG_COLOR)
         d.clear()
         # Concentric rings at RADIUS_KM and half that
         self._ring(view_cx, 240, int(self.radius_km * self.px_per_km))
         self._ring(view_cx, 240, int(self.radius_km * 0.5 * self.px_per_km))
-        # Crosshairs -- stop the horizontal one at the sidebar when it's open
-        x_right = self.panel_x - 4 if selected is not None else WIDTH - 10
+        # Full-width crosshair -- no sidebar to clear any more
+        x_right = WIDTH - 10
         d.set_pen(self.RADAR_ICON_COLOR)
         d.line(view_cx, 10, view_cx, 470)
         d.line(10, 240, x_right, 240)
@@ -280,39 +508,83 @@ class Renderer:
             return theme["vstate"].get(p.vstate, theme["icon"])
         return theme["icon"]
 
-    def _draw_planes_radar(self, order):
-        # Scope style: blip, track arrow, callsign tag.
+    def _draw_planes_radar(self, order, selected, trace_active):
+        # Scope style: blip, a short fixed-length direction tick, then the
+        # callsign tag / data block. Ambient tags are culled to the
+        # nearest-centre non-overlapping set; while something is selected only
+        # that plane is tagged, and it always shows the ATC data block (stage
+        # 1 of the 2-stage radar cycle; stage 2 adds the corner card, drawn
+        # by draw_scene). The selected plane's tick is suppressed once its
+        # trace shows -- the trail carries direction there.
         d = self.display
-        for x, y, p in order:
+        labelled = set() if selected is not None else self._ambient_label_set(order)
+        for i, (x, y, p) in enumerate(order):
             pen = self.plane_pen(p)
+            is_sel = p is selected
             d.set_pen(pen)
             d.circle(x, y, 3)
-            if p.heading is not None and p.gs > 20:
-                self.draw_track_arrow(x, y, p.heading, p.gs, pen)
-            d.set_pen(self.RADAR_TEXT_PEN)
-            d.text(p.callsign, x + 8, y - 8, WIDTH, 2)
+            if p.heading is not None and p.gs > 20 and not (trace_active and is_sel):
+                self.draw_track_arrow(x, y, p.heading, pen)
+            if is_sel:
+                self._draw_data_block(x, y, p)
+            elif i in labelled:
+                self._tag(x, y, p.callsign)
 
-    def _draw_planes_map(self, order):
+    def _draw_trace(self, trace, selected):
+        # Polyline through the selected aircraft's recent fixes, oldest ->
+        # newest, then on to its current dead-reckoned position so the line
+        # meets the marker. `trace` is traces.points_for()'s pick: the network
+        # trace_recent seed when it resolved, else the in-RAM trail feed.py
+        # accumulates. Drawn before the markers so a marker sits on top; every
+        # segment is viewport-clipped (a jet's 5 min trace reaches well past a
+        # 30 km scope) and pen-ramped by age.
+        d = self.display
+        pts = [self.to_screen(e, n) for (e, n, _alt) in trace]
+        if selected is not None:
+            pts.append(self.to_screen(selected.e, selected.n))
+        n_segs = len(pts) - 1
+        if n_segs < 1:
+            return
+        pens = self.TRACE_PENS
+        px, py = pts[0]
+        for i in range(1, len(pts)):
+            cx, cy = pts[i]
+            seg = _clip_segment(px, py, cx, cy)
+            if seg is not None:
+                d.set_pen(pens[_trace_pen_index(i - 1, n_segs, len(pens))])
+                d.line(int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3]))
+            px, py = cx, cy
+
+    def _draw_planes_map(self, order, selected):
         # Map style: an icon along the track, no label; a plain blip when there's
         # no usable heading. Shape/size come from the ADS-B emitter category --
         # A7 is a helicopter, A1..A5 scale the fixed-wing icon light..heavy.
         # Nearest is drawn last (order is pre-sorted) so a dense in-trail stream
         # reads as an overlapping line rather than a pile of text.
+        #
+        # The map-mode tap cycle is a single stage (UI-TRAILS.md "Map mode
+        # notes"): selecting a plane goes straight to the corner card (drawn
+        # by draw_scene). While it's selected its icon also carries a plain
+        # callsign tag, just as an identifier for the ringed one. No ATC data
+        # block in map mode.
         d = self.display
         for x, y, p in order:
             d.set_pen(self.plane_pen(p))
             heading = p.heading
             if heading is None or p.gs <= 20:
                 d.circle(x, y, 3)
-                continue
-            cat = p.cat
-            if cat == "A7":
-                self._draw_rotor(x, y, heading, 1.0)
             else:
-                a = math.radians(heading)
-                self._icon_pass(x, y, math.cos(a), math.sin(a), _CAT_SCALE.get(cat, 1.0))
+                cat = p.cat
+                if cat == "A7":
+                    self._draw_rotor(x, y, heading, 1.0)
+                else:
+                    a = math.radians(heading)
+                    self._icon_pass(x, y, math.cos(a), math.sin(a),
+                                    _CAT_SCALE.get(cat, 1.0))
+            if p is selected:
+                self._tag(x, y, p.callsign)
 
-    def draw_planes(self, planes, selected):
+    def draw_planes(self, planes, selected, trace=None):
         # Lowest altitude first, so where two overlap the higher aircraft is
         # drawn on top -- it's the one nearer the viewer looking down.
         order = []
@@ -322,8 +594,13 @@ class Renderer:
             x, y = self.to_screen(p.e, p.n)
             if -40 <= x <= 520 and -40 <= y <= 520:
                 order.append((x, y, p))
-        (self._draw_planes_map if self.settings.DISPLAY_MODE == "map"
-         else self._draw_planes_radar)(order)
+        trace_active = trace is not None and len(trace) >= 2
+        if trace_active:
+            self._draw_trace(trace, selected)      # under the markers
+        if self.settings.DISPLAY_MODE == "map":
+            self._draw_planes_map(order, selected)
+        else:
+            self._draw_planes_radar(order, selected, trace_active)
         self.last_drawn = order
 
         # Ring the selected aircraft, on top of everything. Outer/inner discs
@@ -357,54 +634,63 @@ class Renderer:
             return "unknown"
         return "-"
 
-    def draw_panel(self, p):
+    def _blip_xy(self, p):
+        # Where p's marker was drawn this frame (last_drawn is set by
+        # draw_planes, which runs before the card). Falls back to centre.
+        for x, y, q in self.last_drawn:
+            if q is p:
+                return x, y
+        return 240, 240
+
+    def draw_card(self, p, corner_xy):
+        # Compact detail card (decision 1): opaque, bordered, in a screen
+        # corner rather than a full-height sidebar. Fields trimmed to what's
+        # glanceable (decision 2): no SQWK / ICAO / TRACK.
         d = self.display
+        x, y = corner_xy
         d.set_pen(self.PANEL_BG)
-        d.rectangle(self.panel_x, 0, WIDTH - self.panel_x, HEIGHT)
+        d.rectangle(x, y, _CARD_W, _CARD_H)
         d.set_pen(self.PANEL_BORDER)
-        d.line(self.panel_x, 0, self.panel_x, HEIGHT)
+        d.rectangle(x, y, _CARD_W, 1)
+        d.rectangle(x, y + _CARD_H - 1, _CARD_W, 1)
+        d.rectangle(x, y, 1, _CARD_H)
+        d.rectangle(x + _CARD_W - 1, y, 1, _CARD_H)
 
-        tx = self.panel_x + 8
-        vx = tx + _VAL_DX
-        rh = 22
-        y = 8
-
-        self._ptext(p.label, tx, y, 16, self.RADAR_TEXT_PEN)
-        y += 22
+        tx = x + 8
+        vx = tx + 48
+        # Right inner edge of the card, less a small margin so text clears the
+        # 1 px border. Passed to every _ptext below so clipping is card-
+        # relative, not screen-relative (the card can start at x = 4).
+        avail_tx = x + _CARD_W - tx - 6
+        avail_vx = x + _CARD_W - vx - 6
+        row = y + 8
+        self._ptext(p.label, tx, row, 16, self.RADAR_TEXT_PEN, avail=avail_tx)
+        row += 22
         op = p.operator
         if op:
-            self._ptext(op, tx, y, 16, self.PANEL_LABEL, clip=True)
-            y += 22
-        y += 6
-
+            self._ptext(op, tx, row, 16, self.PANEL_LABEL, clip=True, avail=avail_tx)
+            row += 19
         em = p.emergency
         if em and em != "none":
-            self._ptext("! " + str(em).upper(), tx, y, 16, self.EMERG_PEN)
-            y += rh
-
-        hdg = p.heading
-        vr = p.vrate
+            self._ptext("! " + str(em).upper(), tx, row, 16, self.EMERG_PEN,
+                        avail=avail_tx)
+            row += 19
         td = p.type_description
+        vr = p.vrate
         rows = (
             ("REG", p.reg or "-"),
-            ("TYPE", p.type or "-", td if td and td != p.type else None),
+            ("TYPE", (td or p.type or "-")),
             ("RTE", self._fmt_route((p.callsign or "").strip())),
             ("ALT", self._fmt_alt(p.alt)),
             ("VS", ("%+d" % vr) if vr else "level"),
-            ("SPEED", "%d kt" % (p.gs or 0)),
-            ("TRACK", ("%d" % round(hdg)) if hdg is not None else "-"),
+            ("SPD", "%d kt" % (p.gs or 0)),
             ("DIST", ("%dnm %s" % (round(p.dst), geometry.compass(p.dir)))
                      if p.dst is not None else "-"),
-            ("SQWK", p.squawk or "-"),
-            ("ICAO", (p.hex or "-").upper()),
         )
-        for row in rows:
-            self._ptext(row[0], tx, y, 16, self.PANEL_LABEL)
-            self._ptext(row[1], vx, y, 16, self.RADAR_TEXT_PEN)
-            y += rh
-            if len(row) > 2 and row[2]:
-                self._ptext(row[2], tx, y, 16, self.PANEL_LABEL, clip=True)
-                y += rh
+        for label, val in rows:
+            self._ptext(label, tx, row, 16, self.PANEL_LABEL, avail=avail_tx)
+            self._ptext(val, vx, row, 16, self.RADAR_TEXT_PEN, clip=True, avail=avail_vx)
+            row += 19
 
     def _status_text(self, planes):
         if self.feed.fetch_count == 0:
@@ -452,8 +738,9 @@ class Renderer:
             y += self.sp_rowh
         self._ptext("tap away to close", px + 10, y + 6, 8, self.PANEL_LABEL)
 
-    def draw_scene(self, planes, selected, settings_open):
+    def draw_scene(self, planes, selected, settings_open, detail_level):
         d = self.display
+        d.set_font("bitmap6")             # _ptext() flips to bitmap8 for the panels
         t = time.ticks_ms()
         if self.backdrop.map_layers:
             d.set_layer(1)             # aircraft layer; layer 0 holds the backdrop
@@ -473,11 +760,25 @@ class Renderer:
         d.text(self._status_text(planes), 5, 10, WIDTH, 2)
         if self.settings.COLOUR_MODE == "alt" and selected is None:
             self.draw_legend_alt()
-        self.draw_planes(planes, selected)
-        if selected is not None:
-            self.draw_panel(selected)
-        elif not settings_open:
+        # Trace behind the selected aircraft: radar mode only (the user's
+        # scope), and only when traces.points_for() has something -- the
+        # network trace_recent seed or the in-RAM live trail. Reaching into
+        # traces here mirrors how _fmt_route() already reaches into routes.
+        trace = None
+        if (selected is not None and self.settings.DISPLAY_MODE == "radar"
+                and self.settings.TRAIL_LENGTH != 0):
+            pts = traces.points_for(selected)
+            trace = _trail_cap(pts, self.settings.TRAIL_LENGTH) if pts else None
+        self.draw_planes(planes, selected, trace)
+        card_stage = 1 if self.settings.DISPLAY_MODE == "map" else 2
+        if selected is not None and detail_level >= card_stage:
+            self.draw_card(selected, _card_corner(*self._blip_xy(selected)))
+        elif selected is None and not settings_open:
             self.draw_settings_btn()
         if settings_open:
             self.draw_settings_panel()
+        if self._vec_used:                # panels drew vector text this frame
+            if _VEC_REPAIR_TOP_BAND:
+                self._repair_top_band(planes)
+            self._vec_used = False
         self.presto.update()

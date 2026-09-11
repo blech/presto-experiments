@@ -122,6 +122,33 @@ def main():
     else:
         raise AssertionError("__slots__ should reject an unknown attribute")
 
+    # --- object reuse + trail (feed.py's hex -> Plane registry, DATA_TRACE.md) ---
+    # feed.py passes last fetch's Plane back as `into=` so the object -- and its
+    # `trail` of past fixes -- persists across fetches instead of being rebuilt.
+    from plane import _TRAIL_MAX
+
+    ac0 = {"hex": "abc123", "flight": "TEST1", "lat": 52.0, "lon": -0.2,
+           "alt_baro": 10000, "gs": 300.0, "track": 90.0, "baro_rate": 0}
+    r = Plane.from_feed(ac0, _LEVEL_RATE_FPM)
+    _eq(len(r.trail), 1, "a new Plane's trail is seeded with its first fix")
+    _eq(r.trail[0], (r.e, r.n, r.alt), "a trail fix is (e, n, alt)")
+
+    ac1 = dict(ac0, lat=52.1, lon=-0.1, alt_baro=11000)
+    r2 = Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)
+    _eq(r2 is r, True, "from_feed(into=p) updates and returns the same object")
+    _eq(r.alt, 11000, "the reused object's fields are updated in place")
+    _eq(len(r.trail), 2, "each fetch appends one trail fix")
+    ex1, ny1 = geometry.project(52.1, -0.1)
+    _close(r.trail[-1][0], ex1, "the newest trail fix is the new projected position")
+
+    skipped = Plane.from_feed({"hex": "abc123"}, _LEVEL_RATE_FPM, into=r)
+    _eq(skipped, None, "a no-position entry returns None even with into= set")
+    _eq(len(r.trail), 2, "a skipped entry leaves the trail alone")
+
+    for _ in range(_TRAIL_MAX + 5):
+        Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)
+    _eq(len(r.trail), _TRAIL_MAX, "the trail is capped at _TRAIL_MAX")
+
     print("plane.py: all parse assertions passed (%d aircraft)" % len(planes))
     return 0
 

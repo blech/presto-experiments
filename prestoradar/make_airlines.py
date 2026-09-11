@@ -16,7 +16,7 @@ Typical use:
     python3 prestoradar/make_airlines.py --source path/to/airlines.dat
 
 By default only rows OpenFlights marks active are kept, to stay small enough
-for the Presto bundle (DATA-TODOS.md #2: "keep the first cut tiny"). That flag
+for the Presto bundle (DATA_TODOS.md #2: "keep the first cut tiny"). That flag
 is unreliable, so _OVERRIDES and an optional --keep list (one ICAO code per
 line, e.g. harvested with dev/list_aircraft.py) are always included on top.
 --all emits the full table for the desktop / Tidbyt lookup service, where size

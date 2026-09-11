@@ -46,12 +46,13 @@ mpremote cp lib/screenshot.py :lib/screenshot.py
 # Older deploys put screenshot.py in :prestoradar/, which would shadow :lib/.
 mpremote rm :prestoradar/screenshot.py 2>/dev/null || true
 
-echo "Copying prestoradar/radar.py + net.py + geometry.py + plane.py + routes.py + feed.py + backdrop.py + render.py + ui.py + aircraft_types.py + airlines.py + settings.py ..."
+echo "Copying prestoradar/radar.py + net.py + geometry.py + plane.py + routes.py + traces.py + feed.py + backdrop.py + render.py + ui.py + aircraft_types.py + airlines.py + settings.py ..."
 mpremote cp prestoradar/radar.py :prestoradar/radar.py
 mpremote cp prestoradar/net.py :prestoradar/net.py
 mpremote cp prestoradar/geometry.py :prestoradar/geometry.py
 mpremote cp prestoradar/plane.py :prestoradar/plane.py
 mpremote cp prestoradar/routes.py :prestoradar/routes.py
+mpremote cp prestoradar/traces.py :prestoradar/traces.py
 mpremote cp prestoradar/feed.py :prestoradar/feed.py
 mpremote cp prestoradar/backdrop.py :prestoradar/backdrop.py
 mpremote cp prestoradar/render.py :prestoradar/render.py
@@ -59,6 +60,11 @@ mpremote cp prestoradar/ui.py :prestoradar/ui.py
 mpremote cp prestoradar/aircraft_types.py :prestoradar/aircraft_types.py
 mpremote cp prestoradar/airlines.py :prestoradar/airlines.py
 mpremote cp prestoradar/settings.py :prestoradar/settings.py
+
+# osansb.af -- PicoVector panel/card font (render.py). If it's missing on the
+# device render.py just falls back to the bitmap font, so this is not fatal,
+# but the detail card and settings panel look far better with it.
+mpremote cp prestoradar/osansb.af :prestoradar/osansb.af
 
 # Generated lookup tables (make_basemap.py / make_aircraft_types.py /
 # make_airlines.py). aircraft_types.py and airlines.py import their _data

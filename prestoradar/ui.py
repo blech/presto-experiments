@@ -1,14 +1,33 @@
 import asyncio
 
 import routes
+import traces
 from netlog import log
 
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
 
 
+def _advance_selection(selected, level, tapped, cycle_len=3):
+    """Tap-cycle state machine. `tapped` is the plane under the tap, or None
+    for empty space. `cycle_len` is how many stages the cycle has -- 2 in
+    radar mode (data block -> + corner card), 1 in map mode (select ->
+    corner card; UI-TRAILS.md "Map mode notes"). Returns (new_selected,
+    new_level):
+
+      - empty space        -> (None, 1)                 dismiss
+      - a different plane   -> (tapped, 1)              select fresh at stage 1
+      - the same plane      -> (selected, level % cycle_len + 1) cycle 1..N -> 1
+    """
+    if tapped is None:
+        return None, 1
+    if tapped is not selected:
+        return tapped, 1
+    return selected, level % cycle_len + 1
+
+
 class UI:
-    """Owns touch handling, the selected-aircraft state, the view shift that
-    follows it, and the settings overlay -- the last piece of
+    """Owns touch handling, the selected-aircraft state, and the settings
+    overlay -- the last piece of
     REFACTORING.md #1's file split, and the first module state like
     `selected`/`view_cx`/`settings_open` gets an actual home in rather than
     being passed around as an argument: `Backdrop` and `Renderer` both took
@@ -26,125 +45,65 @@ class UI:
     """
 
     def __init__(self, settings, backdrop, renderer, hidden, request_redraw,
-                 px_per_km, panel_x, hit_radius, panel_margin, max_shift, min_view_cx,
+                 hit_radius,
                  settings_btn, spanel, sp_row0, sp_rowh):
         self.settings = settings
         self.backdrop = backdrop
         self.renderer = renderer
         self.hidden = hidden
         self.request_redraw = request_redraw
-        self.px_per_km = px_per_km
-        self.panel_x = panel_x
         self.hit_radius = hit_radius
-        self.panel_margin = panel_margin
-        self.max_shift = max_shift
-        self.min_view_cx = min_view_cx
         self.settings_btn = settings_btn
         self.spanel = spanel
         self.sp_row0 = sp_row0
         self.sp_rowh = sp_rowh
 
         self.selected = None      # the selected plane.Plane, or None
+        self.detail_level = 1     # tap-cycle stage (radar 1..2, map 1), while selected
         self.view_cx = WIDTH // 2  # x-pixel that km-east 0 maps to (see radar.py's to_screen)
         self.settings_open = False
-        self._backdrop_dirty = False  # set by set_selected() (view_cx changed) or
-                                       # toggle_setting() (DISPLAY_MODE changed); see
-                                       # maybe_rebuild_backdrop()
+        self._backdrop_dirty = False  # set by toggle_setting() when DISPLAY_MODE
+                                       # changes; see maybe_rebuild_backdrop()
 
     # --- Tap to inspect (item 2a) -------------------------------------
 
-    def _target_view_cx(self, p):
-        """Where view_cx should sit for the current selection p (or None).
-        Shifts left only as far as needed to bring p to panel_margin clear
-        of panel_x -- zero shift if it's already clear, so a plane that
-        didn't need moving is never pushed off the left edge by an unneeded
-        shift -- then clamps to min_view_cx so an extreme-edge plane can't
-        ask jpegdec for more shift than is known to work (see max_shift's
-        definition in radar.py). Always returns an int: view_cx feeds
-        jpegdec.decode()'s offset_x (and, via the vector-grid fallback,
-        display.circle()/line()) uncast, and p.e * px_per_km is a float.
-        """
-        if p is None:
-            return WIDTH // 2
-        x0 = WIDTH // 2 + p.e * self.px_per_km    # p's unshifted screen x
-        wanted = WIDTH // 2 - max(0, x0 - (self.panel_x - self.panel_margin))
-        return int(max(wanted, self.min_view_cx))
-
     def set_selected(self, p):
-        # Select p (or None to dismiss), shift the view just enough to keep
-        # p clear of the panel, and kick a route lookup.
-        #
-        # self.view_cx is the *target*, updated immediately below when it
-        # needs to change; the panel (fixed layout, doesn't care about
-        # view_cx) and `selected` itself still take effect on the very next
-        # frame, so a tap's response is still instant where it can be. But
-        # radar.py's to_screen() -- and, in single-layer mode, the grid --
-        # read backdrop.display_view_cx, not this, for actual pixel
-        # positions: aircraft/ring/backdrop only move once
-        # _rebuild_backdrop() advances display_view_cx to match, all
-        # together in the same frame, rather than the aircraft jumping to
-        # the new position while the backdrop (raster ~380ms decode, or the
-        # vector cache rebuild) is still catching up. Flagged dirty here,
-        # not kicked off directly -- see maybe_rebuild_backdrop()'s
-        # docstring for why that ordering has to go through _render_loop
-        # rather than being started right here (REFACTORING.md #4).
-        had_selection = self.selected is not None
+        # Select p, or None to dismiss. No view shift any more -- the detail
+        # card sits in a corner (UI-TRAILS.md decision 9), so the scene stays
+        # centred. Kicks the route and trace lookups, same as before.
+        if p is None:
+            self.detail_level = 1
         self.selected = p
-        cx = self._target_view_cx(p)
-        if cx != self.view_cx:
-            mode = self.settings.DISPLAY_MODE
-            direction = "left" if cx < self.view_cx else "right"
-            log("ui: shifting", mode, "by", abs(cx - self.view_cx), "pixels", direction,
-                "(view_cx", self.view_cx, "->", cx, ")")
-            self.view_cx = cx
-            self._backdrop_dirty = True
-        elif (p is not None) != had_selection:
-            # view_cx isn't changing, but a redraw is still needed: on a
-            # map-capable boot, the grid is only redrawn (Backdrop.redraw(),
-            # via _rebuild_backdrop()) when _backdrop_dirty fires, and
-            # draw_radar_grid()'s crosshair length depends on `selected is
-            # not None` on its own, independent of view_cx -- e.g. dismissing
-            # a plane that needed no shift in the first place (already clear
-            # of the panel) leaves view_cx unchanged, so without this branch
-            # the crosshair would stay frozen at its shortened, panel-open
-            # length forever after, even once nothing's selected (confirmed
-            # on-device: a screenshot with the legend and aircraft count both
-            # showing -- nothing selected -- but the crosshair still cut
-            # short at the old panel edge).
-            log("ui: refreshing", self.settings.DISPLAY_MODE,
-                "backdrop for selection change (view_cx unchanged at", cx, ")")
-            self._backdrop_dirty = True
         if p is not None:
             routes.request(p)
+            traces.request(p)
 
     def maybe_rebuild_backdrop(self):
         """Called once per frame by radar.py's _render_loop, right after
-        draw_scene() -- i.e. only after the current frame has already been
-        drawn at the current view_cx. Backgrounding the rebuild as a task
-        from here, rather than from set_selected() itself, is what
-        guarantees that ordering: this call is sequenced after draw_scene()
-        in the same uninterrupted turn, so the task's body can't possibly
-        run before this frame's draw does."""
+        draw_scene(). The only thing that sets _backdrop_dirty now is the
+        DISPLAY_MODE toggle in the settings overlay (toggle_setting): the
+        backdrop is a static layer-0 / vector-cache draw, so a mode change
+        needs it rebuilt explicitly (the aircraft icons already follow
+        DISPLAY_MODE every frame). The view-shift-on-select machinery that
+        used to drive this path is gone (UI-TRAILS.md decisions 1/9).
+        Backgrounding the rebuild as a task from here, rather than inline in
+        toggle_setting(), keeps the ~380 ms raster decode off the touch
+        handler and sidesteps the hang the old inline build_vector_cache()
+        call hit on-device."""
         if self._backdrop_dirty:
             self._backdrop_dirty = False
             asyncio.create_task(self._rebuild_backdrop())
 
     async def _rebuild_backdrop(self):
-        # Has to advance BEFORE either branch below runs, not after: both
-        # Backdrop.redraw()'s vector-fallback branches and the direct
-        # build_vector_cache() call here project through to_screen(), which
-        # reads this value. Setting it afterward (the bug this replaced) left
-        # the coastline cache always one shift stale -- built for whatever
-        # display_view_cx was *before* this rebuild, one tap behind the
-        # aircraft/grid, which already move to the new position via the same
-        # to_screen(). On-device this looked exactly backwards: the coastline
-        # sat at its normal, centred position while a plane was selected
-        # (rebuilt for the *previous*, centred view before the shift), and
-        # shifted left once dismissed (rebuilt for the *previous*, shifted
-        # view before returning to centre). No async gap between this
-        # assignment and the rebuild using it -- _rebuild_backdrop() has no
-        # awaits before request_redraw(), so nothing else can run and observe
-        # the two out of step.
+        # Runs only after a DISPLAY_MODE toggle (see maybe_rebuild_backdrop).
+        # view_cx no longer moves -- the detail-panel view shift was removed
+        # (UI-TRAILS.md decisions 1/9) -- so self.view_cx is always
+        # WIDTH // 2 and the display_view_cx assignment below is effectively a
+        # no-op, kept only so the two stay coupled if a shift is ever
+        # reintroduced. The real work is rebuilding the backdrop for the new
+        # mode: Backdrop.redraw() swaps layer 0 between the raster and the
+        # vector grid on a map-capable boot; build_vector_cache() re-projects
+        # the coastline on a radar boot.
         log("ui: updating reticle")
         self.backdrop.display_view_cx = self.view_cx
         log("ui: reticle updated")
@@ -171,7 +130,7 @@ class UI:
     def on_feed_update(self, fresh):
         # feed.Feed.on_update: called with the fresh list after every
         # successful fetch. Re-point the selection at the same aircraft in
-        # it, or clear it (and un-shift the view) if that aircraft has
+        # it, or clear it if that aircraft has
         # dropped off -- or is now hidden by HIDE_ON_GROUND (dismiss_if_hidden()
         # would clear it on the next redraw anyway; doing it here skips that
         # one extra tick of a stale selection).
@@ -258,18 +217,44 @@ class UI:
             self.settings_open = True
             self.set_selected(None)      # settings and the detail panel are exclusive
             return
-        # A tap inside the open sidebar is for the panel, not a dismiss.
-        if self.selected is not None and tx >= self.panel_x:
-            return
+        # Map mode's tap cycle is a single stage (select -> card), radar's is
+        # 2 (data block -> + card) (UI-TRAILS.md "Map mode notes").
+        cycle_len = 1 if self.settings.DISPLAY_MODE == "map" else 2
+
+        # Normal nearest-hit search FIRST, so a tap that's clearly on another
+        # aircraft selects it even while something else is selected.
         best, best_d = None, self.hit_radius * self.hit_radius
         for x, y, p in self.renderer.last_drawn:
             d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
             if d < best_d:
                 best, best_d = p, d
+
+        # Widened target is only a FALLBACK: no normal hit landed, but the tap
+        # is within ~1.6x the hit radius of the current selection -- treat it
+        # as a slightly-off re-tap that advances the cycle rather than a
+        # background tap that dismisses. (It no longer runs ahead of the
+        # nearest-hit search, so it can't swallow a nearer neighbour.)
+        if best is None and self.selected is not None:
+            for x, y, p in self.renderer.last_drawn:
+                if p is self.selected:
+                    r = self.hit_radius * 1.6
+                    if (x - tx) ** 2 + (y - ty) ** 2 <= r * r:
+                        _, self.detail_level = _advance_selection(
+                            self.selected, self.detail_level, self.selected,
+                            cycle_len=cycle_len)
+                        self.set_selected(self.selected)  # keep route/trace warm
+                        return
+                    break
+
         if best is not None:
             log("ui: plane tapped", best.label)
         elif self.selected is not None:
             log("ui: panel dismissed (background tap)")
         else:
             log("ui: background tapped, nothing selected")
-        self.set_selected(best)      # None => tapped empty space => dismiss
+        # Tap-cycle: a second tap on the already-selected plane advances the
+        # detail level; a tap elsewhere selects or dismisses (level resets to
+        # 1 via set_selected / _advance_selection).
+        sel, self.detail_level = _advance_selection(self.selected, self.detail_level,
+                                                    best, cycle_len=cycle_len)
+        self.set_selected(sel)

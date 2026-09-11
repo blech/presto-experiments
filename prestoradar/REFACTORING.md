@@ -768,7 +768,7 @@ per-aircraft identity later; not proposed as its own step here.
 per-aircraft dict) *is* now proposed on its own, in §10 below -- motivated
 by off-device-testable parsing and self-documenting fields, not by
 identity. The `Feed`-wide `hex -> Plane` registry and the carry-forward
-merge it would enable (DATA-TODOS.md #4) stay unscheduled; §10 keeps
+merge it would enable (DATA_TODOS.md #4) stay unscheduled; §10 keeps
 `Feed.planes` a plain list, just of objects instead of dicts.
 
 Open items to settle while implementing (not before):
