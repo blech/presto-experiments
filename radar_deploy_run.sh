@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Deploy the flight radar to a Presto over USB using mpremote.
+# Deploy the flight radar to a Presto over USB using mpremote, then run it
 #
 #   * application modules go into /prestoradar/ so the stock launcher ignores
 #     them (it only lists .py files at the root)
 #   * shared modules (netlog, screenshot) go into /lib/, which MicroPython puts
 #     on sys.path automatically -- imported by bare name
-#   * the entry shim presto_radar.py is left at the root so the radar can be
-#     started with `mpremote run presto_radar.py` or from the launcher
+#   * the entry shim presto_radar.py is at the root so the radar can be started
+#     from the launcher, but it's also run instantly for debugging
 #   * no main.py is deployed -- the stock Pimoroni launcher is left untouched
 #
 # Desktop-only files (radar_debug.py, make_basemap.py, radar_listen.py,
@@ -46,7 +46,7 @@ mpremote cp lib/screenshot.py :lib/screenshot.py
 # Older deploys put screenshot.py in :prestoradar/, which would shadow :lib/.
 mpremote rm :prestoradar/screenshot.py 2>/dev/null || true
 
-echo "Copying prestoradar/radar.py + net.py + geometry.py + plane.py + routes.py + traces.py + feed.py + backdrop.py + fetchqueue.py + render.py + ui.py + aircraft_types.py + airlines.py + settings.py ..."
+echo "Copying prestoradar/radar.py + net.py + geometry.py + plane.py + routes.py + traces.py + feed.py + backdrop.py + render.py + ui.py + aircraft_types.py + airlines.py + settings.py ..."
 mpremote cp prestoradar/radar.py :prestoradar/radar.py
 mpremote cp prestoradar/net.py :prestoradar/net.py
 mpremote cp prestoradar/geometry.py :prestoradar/geometry.py
@@ -91,7 +91,5 @@ fi
 echo "Copying presto_radar.py (root entry shim) ..."
 mpremote cp presto_radar.py :presto_radar.py
 
-echo
-echo "Done. Start it with:"
-echo "    mpremote run presto_radar.py"
-echo "or reset the Presto and choose presto_radar.py in the launcher."
+echo "Running presto_radar.py, backgrounding; done"
+mpremote run --no-follow presto_radar.py &
