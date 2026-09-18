@@ -32,6 +32,23 @@ class Feed:
         self.fetch_count = 0     # completed fetch attempts, any outcome (0 == still loading)
         self.fetch_ok = False    # did the most recent attempt succeed?
         self.on_update = None
+        # hex -> Plane from the previous fetch. Rebuilt every fetch to hold
+        # only the aircraft that fetch actually returned, so it stays bounded
+        # (no accumulation of long-gone contacts). Its point is object
+        # identity: an aircraft still in range keeps the same Plane instance
+        # across fetches, so its `trail` of past fixes survives (DATA_TRACE.md
+        # item 6). An aircraft that drops out loses its object and its trail;
+        # carry-forward for a one-fetch gap (DATA_TODOS.md #4) is separate and
+        # not done here.
+        self._by_hex = {}
+
+    def resolve(self, hex_id):
+        """The current Plane for hex_id, or None if it isn't (or is no
+        longer) in the live feed. Used by radar.py's trace-backfill queue
+        to look up a queued aircraft only once its turn to fetch actually
+        comes up, rather than holding a direct Plane reference that could
+        outlive the aircraft's time on screen."""
+        return self._by_hex.get(hex_id)
 
     async def _fetch(self):
         """Pull the current aircraft list from adsb.lol.
@@ -68,10 +85,19 @@ class Feed:
         # filter in radar.py's _hidden() (REFACTORING.md #5), not applied
         # here: every aircraft the feed returns is real data.
         planes = []
+        by_hex = {}
         for aircraft in data.get("ac", []) or []:
-            p = Plane.from_feed(aircraft, self.level_rate_fpm)
+            h = aircraft.get("hex") or ""
+            # Reuse last fetch's Plane for this hex so its trail carries over
+            # (Plane.from_feed updates it in place); a first sighting gets a
+            # fresh object with an empty trail.
+            p = Plane.from_feed(aircraft, self.level_rate_fpm,
+                                into=self._by_hex.get(h) if h else None)
             if p is not None:
                 planes.append(p)
+                if h:
+                    by_hex[h] = p
+        self._by_hex = by_hex
         return planes
 
     async def run(self):
