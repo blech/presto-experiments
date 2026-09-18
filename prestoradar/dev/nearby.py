@@ -13,12 +13,14 @@ sections:
 
 An aircraft can appear in more than one section. Airport association starts
 as a geometric heuristic (terminal-area radius + altitude ceiling + vertical
-state + heading toward/away from the field) that a resolved route then
-vetoes when it disagrees (bucket()'s routes_by_cs). Routes for every visible
-aircraft are fetched through a fetchqueue.Queue -- the same generic, paced
-queue traces.py's backfill uses on-device -- so one flaky/slow lookup can't
-stall the board; routes.request(), the immediate single-tap path radar.py
-uses, is untouched.
+state + heading toward/away from the field) that a ground sighting, a
+resolved route, or a trail can then veto or confirm, strongest first -- see
+board.py, the classification model this file is a thin wrapper around
+(board.bucket()'s docstring has the full precedence chain). Routes and
+traces are fetched through a fetchqueue.Queue each -- the same generic,
+paced queue traces.py's on-device backfill uses -- so one flaky/slow lookup
+can't stall the board; routes.request(), radar.py's immediate single-tap
+path, is untouched.
 
     python3 prestoradar/dev/nearby.py
     python3 prestoradar/dev/nearby.py --once
@@ -27,9 +29,6 @@ uses, is untouched.
 
 import argparse
 import asyncio
-import collections
-import csv
-import math
 import os
 import sys
 import time
@@ -40,6 +39,7 @@ for _p in (os.path.join(_ROOT, "lib"), _PRESTORADAR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import board  # noqa: E402
 import feed  # noqa: E402
 import fetchqueue  # noqa: E402
 import geometry  # noqa: E402
@@ -57,222 +57,6 @@ RADAR_HOST = "api.adsb.lol"
 # is hand-entered.
 AIRPORTS = ("KSFO", "KOAK")
 OURAIRPORTS_CSV = os.path.expanduser("~/.cache/ourairports/airports.csv")
-
-_NM_PER_KM = 1.0 / 1.852
-
-# One nearby airport: its position in the (e, n) km frame and the set of
-# identifiers a resolved route's endpoint might name it by (its ICAO ident
-# and, when it has one, its IATA code).
-Airport = collections.namedtuple("Airport", "e n codes")
-
-# One board row: the aircraft plus the range and bearing the section is keyed
-# to -- from the field for an airport section, from the radar centre for
-# "near". dist_nm is what the section is sorted by; bearing is degrees.
-Row = collections.namedtuple("Row", "plane dist_nm bearing")
-
-# Heuristic thresholds. Deliberately loose for a first cut -- a go-around or a
-# vectored downwind leg will still be misfiled.
-Config = collections.namedtuple(
-    "Config",
-    "terminal_nm phase_ceil_ft heading_tol near_nm include_ground "
-    "trail_min_points trail_endpoint_nm",
-)
-
-
-def default_config():
-    return Config(
-        terminal_nm=12.0,     # how far out an arrival/departure still "belongs" to a field
-        phase_ceil_ft=8000,   # above this it is an overflight, not a movement here
-        heading_tol=70.0,     # track vs. bearing to/from the field, degrees
-        near_nm=5.0,          # "near the centre point" radius
-        include_ground=False,
-        trail_min_points=3,   # below this the trail says nothing; geometry alone stands
-        trail_endpoint_nm=5.0,  # how close a departure's oldest fix must be to the field
-    )
-
-
-def _bearing(de, dn):
-    """Compass bearing (deg) of the offset (de east, dn north) km."""
-    return math.degrees(math.atan2(de, dn)) % 360.0
-
-
-def _angle_diff(a, b):
-    """Smallest absolute difference between two bearings, 0..180."""
-    return abs((a - b + 180.0) % 360.0 - 180.0)
-
-
-def _known(code):
-    """A route endpoint the source actually resolved (not '' or '?')."""
-    return bool(code) and code != "?"
-
-
-def _route_vetoes(route, codes, arriving):
-    """Should this resolved route (origin, dest) keep the plane OUT of the
-    given field's arrivals (arriving=True) or departures (arriving=False)?
-
-    Geometry proposes; the route only ever removes. A plane belongs in a
-    field's departures only if its route starts there, and its arrivals only
-    if its route ends there -- and never in both roles for one field. An
-    unresolved endpoint ('?') says nothing and never vetoes.
-    """
-    origin, dest = route
-    here, elsewhere = (dest, origin) if arriving else (origin, dest)
-    if _known(elsewhere) and elsewhere in codes:
-        return True                        # the other end is this field -> wrong role
-    if _known(here) and here not in codes:
-        return True                        # this end is a different, known airport
-    return False
-
-
-def _trail_vetoes(trail, ap, cfg, arriving):
-    """Should this plane's trail (oldest->newest (e, n, alt) fixes -- see
-    traces.points_for()) keep it OUT of the given field's arrivals
-    (arriving=True) or departures? Only consulted when no resolved route
-    settled the question (see bucket()); a real flight history is still
-    better evidence than geometry alone (DATA_TRACE.md's altitude-trend /
-    monotonic-progress signals, simplified to endpoint distance).
-
-    A genuine departure starts at the field (its oldest fix within
-    trail_endpoint_nm) and moves away from it; a genuine arrival moves
-    toward it. d_old/d_new are the distance (nm) from the field to the
-    trail's oldest and newest fix.
-    """
-    (old_e, old_n, _), (new_e, new_n, _) = trail[0], trail[-1]
-    d_old = math.hypot(old_e - ap.e, old_n - ap.n) * _NM_PER_KM
-    d_new = math.hypot(new_e - ap.e, new_n - ap.n) * _NM_PER_KM
-    if arriving:
-        return d_new >= d_old              # not getting closer -> not arriving here
-    return d_old > cfg.trail_endpoint_nm or d_new <= d_old
-
-
-def bucket(planes, airports, cfg, routes_by_cs=None):
-    """Sort `planes` into the five sections.
-
-    `airports` is an ordered mapping ICAO -> Airport(e, n, codes) from the
-    radar centre (see load_airports). `routes_by_cs`, when given, maps a
-    callsign to its resolved (origin, dest) route codes; a route whose
-    endpoints don't fit a proposed section vetoes it (see _route_vetoes).
-    Returns lists of Row(plane, dist_nm, bearing):
-
-        {
-          "airports": {ICAO: {"departures": [Row, ...],
-                              "landings":   [Row, ...]}, ...},
-          "near": [Row, ...],
-        }
-
-    In an airport section dist_nm / bearing are the plane's range and
-    bearing from that field; in "near" they are its range and bearing from
-    the radar centre (the feed's own dst / dir). Departure lists are
-    furthest-from-the-field first (a new takeoff enters at the bottom);
-    landing lists and "near" are nearest-first. Sections are independent --
-    a climbing aircraft over the centre can be both a departure and a
-    "near centre" contact.
-    """
-    routes_by_cs = routes_by_cs or {}
-    result = {"airports": collections.OrderedDict(), "near": []}
-    for icao in airports:
-        result["airports"][icao] = {"departures": [], "landings": []}
-
-    scored = {icao: {"departures": [], "landings": []} for icao in airports}
-    near = []
-
-    for p in planes:
-        if getattr(p, "on_ground", False) and not cfg.include_ground:
-            continue
-
-        if p.dst is not None and p.dst <= cfg.near_nm:
-            near.append(p)
-
-        # Only aircraft low enough to be arriving or departing are candidates
-        # for an airport section; a cruise-altitude contact over the field is
-        # an overflight.
-        if not isinstance(p.alt, (int, float)) or p.alt > cfg.phase_ceil_ft:
-            continue
-        if p.heading is None or p.vstate not in ("climb", "descent"):
-            continue
-
-        route = routes_by_cs.get(p.callsign)
-        trail = p.trail if len(p.trail) >= cfg.trail_min_points else None
-
-        for icao, ap in airports.items():
-            de, dn = p.e - ap.e, p.n - ap.n
-            dist_nm = math.hypot(de, dn) * _NM_PER_KM
-            if dist_nm > cfg.terminal_nm:
-                continue
-            field_to_plane = _bearing(de, dn)   # where the plane sits from the field
-            if p.vstate == "climb":
-                # Departing: climbing and tracking away from the field.
-                if _angle_diff(p.heading, field_to_plane) > cfg.heading_tol:
-                    continue
-                # route > trail > geometry: a resolved route is trusted
-                # outright; only lacking one does the trail get a say.
-                if route:
-                    if _route_vetoes(route, ap.codes, arriving=False):
-                        continue
-                elif trail and _trail_vetoes(trail, ap, cfg, arriving=False):
-                    continue
-                scored[icao]["departures"].append((dist_nm, p, field_to_plane))
-            else:
-                # Landing: descending and tracking toward the field.
-                if _angle_diff(p.heading, _bearing(-de, -dn)) > cfg.heading_tol:
-                    continue
-                if route:
-                    if _route_vetoes(route, ap.codes, arriving=True):
-                        continue
-                elif trail and _trail_vetoes(trail, ap, cfg, arriving=True):
-                    continue
-                scored[icao]["landings"].append((dist_nm, p, field_to_plane))
-
-    for icao in airports:
-        # Departures read furthest-first, so a fresh takeoff joins at the
-        # bottom and climbs up the list as it leaves. Landings read
-        # nearest-the-runway first -- next to touch down at the top.
-        deps = sorted(scored[icao]["departures"], key=lambda t: t[0], reverse=True)
-        lands = sorted(scored[icao]["landings"], key=lambda t: t[0])
-        result["airports"][icao]["departures"] = [Row(p, d, b) for d, p, b in deps]
-        result["airports"][icao]["landings"] = [Row(p, d, b) for d, p, b in lands]
-
-    near.sort(key=lambda p: p.dst)
-    result["near"] = [Row(p, p.dst, p.dir) for p in near]
-    return result
-
-
-def load_airports(idents, csv_path=OURAIRPORTS_CSV):
-    """ICAO idents -> Airport(e, n, codes) from the radar centre, read from
-    the OurAirports airports.csv make_basemap.py caches. `codes` is the
-    airport's ICAO ident plus its IATA code, for matching a route endpoint.
-    Preserves `idents` order. Exits with a hint if the cache is missing."""
-    if not os.path.isfile(csv_path):
-        sys.exit(
-            "OurAirports data not found at %s\n"
-            "Fetch it once with:  python3 prestoradar/make_basemap.py --download\n"
-            "or pass --airports-csv PATH." % csv_path
-        )
-
-    want = set(idents)
-    rows = {}
-    with open(csv_path, newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            if row.get("ident") in want:
-                try:
-                    lat = float(row["latitude_deg"])
-                    lon = float(row["longitude_deg"])
-                except (KeyError, ValueError):
-                    continue
-                iata = (row.get("iata_code") or "").strip()
-                codes = frozenset(c for c in (row["ident"], iata) if c)
-                rows[row["ident"]] = (lat, lon, codes)
-            if len(rows) == len(want):
-                break
-
-    missing = [i for i in idents if i not in rows]
-    if missing:
-        sys.exit("not found in %s: %s" % (csv_path, ", ".join(missing)))
-
-    return collections.OrderedDict(
-        (i, Airport(*geometry.project(rows[i][0], rows[i][1]), rows[i][2]))
-        for i in idents
-    )
 
 
 def _make_feed(radius_nm):
@@ -352,19 +136,6 @@ def render(result, radius_km):
           flush=True)   # stdout is block-buffered to a pipe; show each refresh
 
 
-def _visible_planes(result):
-    """One entry per callsign across every section (a plane in several
-    sections is still one route lookup)."""
-    seen = collections.OrderedDict()
-    for sec in result["airports"].values():
-        for key in ("departures", "landings"):
-            for row in sec[key]:
-                seen[row.plane.callsign] = row.plane
-    for row in result["near"]:
-        seen[row.plane.callsign] = row.plane
-    return list(seen.values())
-
-
 def _resolved_routes(planes):
     """{callsign: (origin, dest)} for the planes whose route has resolved --
     the veto input to bucket()."""
@@ -413,8 +184,8 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
         # Re-bucket on every render, not just every fetch, so a plane leaves
         # the wrong section within a render tick of its route resolving --
         # bucket() is pure and cheap over ~30 planes.
-        return bucket(state["planes"], airports, cfg,
-                      _resolved_routes(state["planes"]))
+        return board.bucket(state["planes"], airports, cfg,
+                            _resolved_routes(state["planes"]))
 
     async def refresh():
         planes = await feed_obj._fetch()
@@ -423,6 +194,10 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
             return
         state["planes"] = planes
         state["by_cs"] = {p.callsign: p for p in planes}
+
+        # Ground-sighted departures: over the raw feed, since a grounded
+        # aircraft never reaches a board section (see board.py).
+        board.note_ground_sightings(planes, airports, cfg)
 
         # Trace backfill: every new, airborne aircraft (not just the ones
         # currently in a board section -- matches ui.py's own policy, and a
@@ -436,7 +211,7 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
 
         # Route lookups stay scoped to what's actually on the board.
         # Priority = distance from centre, nearest first.
-        for p in _visible_planes(current_result()):
+        for p in board.visible_planes(current_result()):
             if routes.eligible(p):
                 route_queue.enqueue(p.callsign, p.dst)
                 state["route_pending"] += 1
@@ -492,8 +267,8 @@ def main():
     args = ap.parse_args()
 
     radius_nm = round(args.radius / 1.852)
-    airports = load_airports(AIRPORTS, args.airports_csv)
-    cfg = default_config()._replace(include_ground=args.include_ground)
+    airports = board.load_airports(AIRPORTS, args.airports_csv)
+    cfg = board.default_config()._replace(include_ground=args.include_ground)
 
     asyncio.run(_run(radius_nm, cfg, airports, args.radius,
                      args.interval, args.render_interval, args.once))
