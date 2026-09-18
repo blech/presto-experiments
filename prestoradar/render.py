@@ -533,9 +533,10 @@ class Renderer:
     def _draw_trace(self, trace, selected):
         # Polyline through the selected aircraft's recent fixes, oldest ->
         # newest, then on to its current dead-reckoned position so the line
-        # meets the marker. `trace` is traces.points_for()'s pick: the network
-        # trace_recent seed when it resolved, else the in-RAM trail feed.py
-        # accumulates. Drawn before the markers so a marker sits on top; every
+        # meets the marker. `trace` is traces.points_for()'s pick: it just
+        # reads plane.trail directly now -- backfilled once by
+        # traces.backfill() and grown for free every poll cycle after that.
+        # Drawn before the markers so a marker sits on top; every
         # segment is viewport-clipped (a jet's 5 min trace reaches well past a
         # 30 km scope) and pen-ramped by age.
         d = self.display
@@ -761,9 +762,10 @@ class Renderer:
         if self.settings.COLOUR_MODE == "alt" and selected is None:
             self.draw_legend_alt()
         # Trace behind the selected aircraft: radar mode only (the user's
-        # scope), and only when traces.points_for() has something -- the
-        # network trace_recent seed or the in-RAM live trail. Reaching into
-        # traces here mirrors how _fmt_route() already reaches into routes.
+        # scope), and only when traces.points_for() has something -- it just
+        # reads plane.trail directly now (backfilled once, then grown for
+        # free by the poll loop). Reaching into traces here mirrors how
+        # _fmt_route() already reaches into routes.
         trace = None
         if (selected is not None and self.settings.DISPLAY_MODE == "radar"
                 and self.settings.TRAIL_LENGTH != 0):

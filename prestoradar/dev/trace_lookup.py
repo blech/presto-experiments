@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Desktop (CPython) smoke test for traces.py -- seeds an aircraft's position
-history the same way radar.py's tap-to-inspect will.
+history the same way radar.py's fetch queue does on-device.
 
 Like dev/route_lookup.py, this resolves --hex or --callsign against the live
 feed first (settings.py's centre/radius), then hands the resulting Plane to
-traces.request() exactly as ui.py does on a tap. traces.py inflates the gzip
-body with zlib here (the device uses the firmware's `deflate` module) so the
-fetch/parse/project pipeline can be checked without a deploy.
+traces.backfill() exactly as radar.py's fetch queue does once per sighting.
+traces.py inflates the gzip body with zlib here (the device uses the
+firmware's `deflate` module) so the fetch/parse/project pipeline can be
+checked without a deploy.
 
     python3 prestoradar/dev/trace_lookup.py --callsign UAL599
     python3 prestoradar/dev/trace_lookup.py --hex aa79a6

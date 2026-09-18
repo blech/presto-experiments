@@ -28,9 +28,12 @@ class _Stub:
 class _P:
     def __init__(self):
         # callsign == hex makes routes.request() early-return (no route to
-        # look up for a hex id); with settings.TRACE_SEED = 0 below,
-        # traces.request() is a no-op too, so set_selected() never touches
-        # the network or the event loop -- this stays a pure unit test.
+        # look up for a hex id). set_selected() itself never touches traces
+        # at all any more -- every aircraft is enqueued for backfill in
+        # on_feed_update() the moment it's first seen, not on selection --
+        # but settings.TRACE_SEED = 0 below still matters: it makes
+        # traces.backfill() a no-op once the queue eventually processes this
+        # aircraft's enqueued hex, so this stays a pure unit test either way.
         self.hex = "abc123"
         self.callsign = "abc123"
         self.e = 12.0
@@ -40,7 +43,7 @@ class _P:
 
 def main():
     import settings
-    settings.TRACE_SEED = 0        # make traces.request() a no-op (no running loop)
+    settings.TRACE_SEED = 0        # make traces.backfill() a no-op (no running loop)
 
     import ui
 

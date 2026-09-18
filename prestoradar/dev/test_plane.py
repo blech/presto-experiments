@@ -147,6 +147,8 @@ def main():
 
     skipped = Plane.from_feed({"hex": "abc123"}, _LEVEL_RATE_FPM, into=r)
     _eq(skipped, None, "a no-position entry returns None even with into= set")
+    # 3, not 2: the traced-preservation from_feed() call two lines above also
+    # appended a fix, so this only checks that *this* call added nothing.
     _eq(len(r.trail), 3, "a skipped entry leaves the trail alone")
 
     for _ in range(_TRAIL_MAX + 5):

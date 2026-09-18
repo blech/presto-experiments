@@ -8,23 +8,43 @@ This document is the result of comparing three candidate trace sources and
 running a live check against the chosen one on 2026-09-08. A separate agent
 should be able to implement from here without re-doing the evaluation.
 
-## Status -- landed 2026-09-08
+## Status -- landed 2026-09-08, reworked 2026-09-18
 
-Implemented as described below.
+Originally implemented as a per-tap, TTL-cached fetch (`traces.request(p)` /
+`get(hex)`, a 4-entry cache with a 90 s TTL). That was replaced by the
+trace-fetch-queue design: a shared `fetchqueue.Queue` (`fetchqueue.py`) is
+enqueued with every newly-tracked, airborne aircraft exactly once, the moment
+it's first seen (`ui.py`'s `on_feed_update`), with priority = distance from
+centre (`plane.dst`, nm) so the nearest aircraft backfill first. The queue
+drains slowly (`TRACE_QUEUE_INTERVAL_MS`) to stay under adsb.lol's shared
+courtesy budget. `traces.backfill(plane)` -- called once per aircraft by the
+queue's drain loop, never by a tap or the poll loop directly -- fetches,
+gunzips, parses and downsamples `trace_recent` and splices the result into
+`plane.trail` wholesale via `_apply()`; a fetch/parse failure of any kind just
+leaves the aircraft's already-accumulating live trail alone. `points_for(plane)`
+is now a simple read of `plane.trail` -- there's no more seed-vs-RAM-trail
+choice, since backfill() already merged the better data into the same
+structure `Plane._record_fix()` keeps growing every poll cycle afterwards.
+There's no TTL and no periodic re-fetch: each aircraft is backfilled once,
+then the trail just keeps growing for free from the position poll. See
+`docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md` for the full
+design rationale (including the eviction/lifecycle correctness and the skip
+heuristic for grounded aircraft).
 
 - `dev/trace_gzip_test.py` -- on-device probe. Ran on Presto firmware: `import
   deflate` PASS; bare `adsb.lol` returns 200 (no 302); body is gzip even with
   no `Accept-Encoding`; `deflate.DeflateIO(..., GZIP)` inflates a 3.6 KB body
   to 16 KB in 28 ms, `json.loads` 58 ms, ~16 KB transient against ~8 MB free.
-- `traces.py` -- `request(p)` / `get(hex)` / `points_for(plane)`, mirroring
-  `routes.py`. Direct host, gzip inflate (firmware `deflate`, `zlib` wbits=31
-  on the CPython harness), project + downsample to ~45 points, 4-entry cache
-  with a 90 s TTL and the size guards. `settings.TRACE_SEED` (default 1)
-  toggles the network seed independently of the RAM trail.
+- `traces.py` -- `backfill(plane)` / `points_for(plane)`, as described above.
+  Direct host, gzip inflate (firmware `deflate`, `zlib` wbits=31 on the
+  CPython harness), project + downsample to ~45 points, and the size guards.
+  `settings.TRACE_SEED` (default 1) toggles the backfill fetch independently
+  of the RAM trail.
 - `feed.py` -- keeps a `hex -> Plane` registry and passes last fetch's Plane
   back to `Plane.from_feed(..., into=)` so an aircraft's object (and its
   `trail` of past `(e, n, alt)` fixes, one per fetch, capped at
-  `plane._TRAIL_MAX`) survives across fetches. This is item 6's RAM fallback.
+  `plane._TRAIL_MAX`) survives across fetches. This is what `_record_fix()`
+  keeps growing after a backfill lands.
 - `render.py` -- `_draw_trace()` draws the polyline (viewport-clipped) under
   the markers in `TRACE_PEN`; radar mode only. While a trace shows, the
   selected aircraft's track arrow and every other aircraft's callsign tag are
