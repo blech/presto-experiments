@@ -28,7 +28,16 @@ Switch to left hand side panel (swapping if plane crosses under)
 * Retire `-raster` in favour of `-raster-fetch` (which can be renamed)
 * List of flights instead of map?
 
+### 2026-09-19
+
+* "on ground" incorrectly catches helicopter at FL0 _not_ at airport. Filter by location, too?
+* swap mode to show panel on tap??
+* label on right overlaps direction indicator - add to label layout algorithm swapping side?
+* refactor direct http fetch on Presto to requests-like signature for better code sharing between CPython and MicroPython
+
 ## UI questions
+
+(Tackled 2026-09-10ish, mostly fixed)
 
 I'd like to think through the UI more generally. There are a few things scattered through the TODO, PLAN, REFACTORING, and other Markdown files, and they're colliding with the trails. So:
 
