@@ -11,11 +11,14 @@ sections:
     * landings at each nearby airport
     * everything close to the radar centre
 
-An aircraft can appear in more than one section. Airport association is a
-pure heuristic for now (terminal-area radius + altitude ceiling + vertical
-state + heading toward/away from the field); there are no route lookups.
-routes.py's origin/destination codes are the obvious next signal -- see the
-seam in bucket() and UI-TRAILS.md's note on batched, bounded route fetching.
+An aircraft can appear in more than one section. Airport association starts
+as a geometric heuristic (terminal-area radius + altitude ceiling + vertical
+state + heading toward/away from the field) that a resolved route then
+vetoes when it disagrees (bucket()'s routes_by_cs). Routes for every visible
+aircraft are fetched through a fetchqueue.Queue -- the same generic, paced
+queue traces.py's backfill uses on-device -- so one flaky/slow lookup can't
+stall the board; routes.request(), the immediate single-tap path radar.py
+uses, is untouched.
 
     python3 prestoradar/dev/nearby.py
     python3 prestoradar/dev/nearby.py --once
@@ -38,11 +41,12 @@ for _p in (os.path.join(_ROOT, "lib"), _PRESTORADAR):
         sys.path.insert(0, _p)
 
 import feed  # noqa: E402
+import fetchqueue  # noqa: E402
 import geometry  # noqa: E402
 import routes  # noqa: E402
 from settings import (  # noqa: E402
     CENTER_LAT, CENTER_LON, RADIUS_KM, USER_AGENT, LEVEL_RATE_FPM,
-    FETCH_INTERVAL_MS,
+    FETCH_INTERVAL_MS, ROUTE_QUEUE_INTERVAL_MS,
 )
 
 RADAR_HOST = "api.adsb.lol"
@@ -331,7 +335,22 @@ def _resolved_routes(planes):
 
 async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
                render_interval, once):
-    state = {"planes": []}
+    state = {"planes": [], "by_cs": {}, "route_pending": 0}
+    route_queue = fetchqueue.Queue(ROUTE_QUEUE_INTERVAL_MS)
+
+    async def process_route(cs):
+        # Resolve against *this* cycle's live planes, not whichever one was
+        # visible when cs was enqueued -- an aircraft that's left the board
+        # by the time its turn comes up is simply not found here, and no
+        # fetch happens (same pattern as radar.py's Feed.resolve() for trace
+        # backfill). state["route_pending"] only ever reflects queue depth,
+        # not fetches-in-flight, so it's decremented either way.
+        try:
+            plane = state["by_cs"].get(cs)
+            if plane is not None:
+                await routes.fetch_for(plane)
+        finally:
+            state["route_pending"] -= 1
 
     def current_result():
         # Re-bucket on every render, not just every fetch, so a plane leaves
@@ -346,15 +365,21 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
             print("fetch failed -- see the log lines above")
             return
         state["planes"] = planes
-        routes.enqueue_many(_visible_planes(current_result()))
+        state["by_cs"] = {p.callsign: p for p in planes}
+        # Priority = distance from centre, nearest first -- the same "most
+        # likely to matter soon" signal the trace-backfill queue uses.
+        for p in _visible_planes(current_result()):
+            if routes.eligible(p):
+                route_queue.enqueue(p.callsign, p.dst)
+                state["route_pending"] += 1
 
     await refresh()   # first paint has data
 
     if once:
-        worker = asyncio.create_task(routes.run_queue())
+        worker = asyncio.create_task(route_queue.run(process_route))
         loop = asyncio.get_event_loop()
         deadline = loop.time() + 25.0
-        while routes.pending() and loop.time() < deadline:
+        while state["route_pending"] > 0 and loop.time() < deadline:
             await asyncio.sleep(0.5)
         worker.cancel()
         try:
@@ -374,7 +399,7 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
             render(current_result(), radius_km)
             await asyncio.sleep(render_interval)
 
-    await asyncio.gather(fetcher(), renderer(), routes.run_queue())
+    await asyncio.gather(fetcher(), renderer(), route_queue.run(process_route))
 
 
 def main():

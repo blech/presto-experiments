@@ -42,6 +42,11 @@ ANIM_INTERVAL = 0.5          # seconds between dead-reckoning redraws (~2 fps)
 # See docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md.
 TRACE_QUEUE_INTERVAL_MS = 1500
 
+# Pace of dev/nearby.py's batch route-lookup queue (also fetchqueue.py): one
+# request every this many ms. Only the desktop list-view tool uses this --
+# radar.py's own tap-driven routes.request() is unthrottled by design.
+ROUTE_QUEUE_INTERVAL_MS = 1000
+
 DRAW_BASEMAP = 1             # 0 to skip the coastline layer entirely
 SKIP_NETWORK = 0             # 1 = don't connect or fetch, just draw grid + basemap
 

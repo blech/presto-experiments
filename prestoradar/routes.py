@@ -287,87 +287,34 @@ def request(p):
     asyncio.create_task(_fetch(cs, lat, lon, p.heading))
 
 
-# --- throttled batch queue --------------------------------------------
+# --- batch use (nearby.py) --------------------------------------------
 #
 # A list view wants routes for every visible aircraft (~30) at once, but
-# adsb.lol's public endpoints ask for ~1 request/second and each Presto TLS
-# buffer is real RAM. enqueue_many() takes the visible planes; run_queue(),
-# run once by the consumer alongside its own loop, drains them at
-# min_interval spacing with at most `concurrency` fetches in flight, so the
-# route column fills in progressively over a cycle instead of stampeding.
-# UI-TRAILS.md, "Data layer readiness for a list app".
+# adsb.lol's public endpoints ask for ~1 request/second. Pacing that is the
+# caller's job, not this module's: nearby.py runs a fetchqueue.Queue (the
+# same generic, paced queue traces.py's backfill uses) and calls the two
+# building blocks below from its enqueue and process_one. request() above
+# stays the immediate, unthrottled single-tap path -- unrelated to this.
 
-_pending = collections.OrderedDict()   # cs -> (cs, lat, lon, track); FIFO, re-seedable
-_work = None                           # asyncio.Event, created by run_queue()
-_last_fetch_started = 0.0              # event-loop time of the last _fetch launch
-
-
-def enqueue_many(planes):
-    """Queue a route lookup for each eligible plane. Non-blocking. The batch
-    is also the new priority set: any callsign still queued from a previous
-    call that isn't in this batch is dropped rather than fetched late (the
-    aircraft has left the view). Safe to call every feed cycle."""
-    batch = {}
-    for p in planes:
-        cs = _route_callsign(p)
-        if cs is None or cs in batch or not _eligible(cs):
-            continue
-        lat, lon = geometry.unproject(p.e, p.n)
-        batch[cs] = (cs, lat, lon, p.heading)
-
-    for cs in list(_pending):
-        if cs not in batch:
-            del _pending[cs]
-    for cs, job in batch.items():
-        _pending[cs] = job                 # refresh position/heading if requeued
-
-    if _pending and _work is not None:
-        _work.set()
+def eligible(p):
+    """True if p has a real callsign that's worth a route (re)fetch right
+    now -- not already resolved, not currently in flight, and not out of
+    retries. What a batch caller checks before enqueueing."""
+    cs = _route_callsign(p)
+    return cs is not None and _eligible(cs)
 
 
-def pending():
-    """How many callsigns are still queued (not yet handed to _fetch). A
-    batch consumer can poll this to tell when a first pass has drained."""
-    return len(_pending)
-
-
-async def run_queue(concurrency=1, min_interval=1.0):
-    """Drain _pending forever: at most `concurrency` _fetch()es in flight and
-    at least `min_interval` seconds between launches. Run it once as a task;
-    it idles cheaply on an empty queue. Never returns."""
-    global _work, _last_fetch_started
-    _work = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    sem = asyncio.Semaphore(concurrency)
-    inflight = set()
-
-    async def _one(cs, lat, lon, track):
-        try:
-            await _fetch(cs, lat, lon, track)
-        finally:
-            sem.release()
-
-    while True:
-        if not _pending:
-            _work.clear()
-            await _work.wait()
-            continue
-
-        cs, job = next(iter(_pending.items()))   # job is (cs, lat, lon, track)
-        del _pending[cs]
-        if not _eligible(cs):
-            continue
-
-        wait = _last_fetch_started + min_interval - loop.time()
-        if wait > 0:
-            await asyncio.sleep(wait)
-
-        await sem.acquire()
-        _mark_launching(cs)
-        _last_fetch_started = loop.time()
-        task = asyncio.create_task(_one(*job))
-        inflight.add(task)
-        task.add_done_callback(inflight.discard)
+async def fetch_for(p):
+    """Fetch p's route now, awaited -- unlike request(), which fires an
+    unthrottled background task. A caller pacing its own queue awaits this
+    once per drained entry. No-op if p is no longer eligible (resolved by
+    another path since it was enqueued, or never had a real callsign)."""
+    if not eligible(p):
+        return
+    cs = _route_callsign(p)
+    _mark_launching(cs)
+    lat, lon = geometry.unproject(p.e, p.n)
+    await _fetch(cs, lat, lon, p.heading)
 
 
 def get(callsign):
