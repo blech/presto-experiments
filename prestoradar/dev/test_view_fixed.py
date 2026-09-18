@@ -50,7 +50,7 @@ def main():
     # panel_margin / max_shift / min_view_cx, and no px_per_km (dead state
     # the deleted view shift used -- the final-review cleanup dropped it).
     u = ui.UI(_Stub(), _Stub(), _Stub(), lambda p: False, lambda: None,
-              26, _Stub(), _Stub(), 0, 0)
+              26, _Stub(), _Stub(), _Stub(), 0, 0)
 
     _eq(u.view_cx, 240, "view_cx starts centred")
     u.set_selected(_P())

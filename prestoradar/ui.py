@@ -1,7 +1,6 @@
 import asyncio
 
 import routes
-import traces
 from netlog import log
 
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
@@ -11,9 +10,8 @@ def hit_test(last_drawn, tx, ty, hit_radius):
     """Nearest entry in `last_drawn` ([(x, y, plane), ...], as stashed by
     Renderer.draw_planes()) within `hit_radius` px of (tx, ty), or None if
     nothing is close enough. Pulled out of handle_tap's own nearest-hit
-    search so radar.py's touch-down prefetch can reuse the exact same test
-    the eventual tap will use, rather than a second, possibly-diverging
-    copy."""
+    search so it's exercised directly by dev/test_prefetch.py rather than
+    only through a full UI instance."""
     best, best_d = None, hit_radius * hit_radius
     for x, y, p in last_drawn:
         d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
@@ -22,18 +20,14 @@ def hit_test(last_drawn, tx, ty, hit_radius):
     return best
 
 
-def _nearest_visible(planes, hidden):
-    """The plane with the smallest `dst` (nm from centre, from the feed)
-    among `planes` not excluded by `hidden(p)`, or None if there isn't one.
-    Used to pick an idle-cycle trace-prefetch candidate -- the aircraft a
-    user's eye (and thumb) is most likely to land on next."""
-    best, best_dst = None, None
-    for p in planes:
-        if hidden(p) or p.dst is None:
-            continue
-        if best_dst is None or p.dst < best_dst:
-            best, best_dst = p, p.dst
-    return best
+def _enqueue_eligible(p):
+    """True if p should be enqueued for a trace backfill: never attempted
+    yet, and airborne. A grounded aircraft has little or no history for
+    trace_recent to backfill (it likely just took off), so it's left
+    un-enqueued and simply re-checked next cycle -- see
+    docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md's "Skip
+    heuristic"."""
+    return p.traced is False and not p.on_ground
 
 
 def _advance_selection(selected, level, tapped, cycle_len=3):
@@ -74,7 +68,7 @@ class UI:
     """
 
     def __init__(self, settings, backdrop, renderer, hidden, request_redraw,
-                 hit_radius,
+                 hit_radius, trace_queue,
                  settings_btn, spanel, sp_row0, sp_rowh):
         self.settings = settings
         self.backdrop = backdrop
@@ -82,6 +76,7 @@ class UI:
         self.hidden = hidden
         self.request_redraw = request_redraw
         self.hit_radius = hit_radius
+        self.trace_queue = trace_queue
         self.settings_btn = settings_btn
         self.spanel = spanel
         self.sp_row0 = sp_row0
@@ -99,13 +94,17 @@ class UI:
     def set_selected(self, p):
         # Select p, or None to dismiss. No view shift any more -- the detail
         # card sits in a corner (UI-TRAILS.md decision 9), so the scene stays
-        # centred. Kicks the route and trace lookups, same as before.
+        # centred. Still kicks the route lookup -- but not a trace fetch:
+        # every aircraft is already enqueued for backfill in on_feed_update()
+        # below the moment it's first seen, so by the time it's selectable
+        # here it's already pending, done, or (if grounded) correctly not
+        # yet eligible. See
+        # docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md.
         if p is None:
             self.detail_level = 1
         self.selected = p
         if p is not None:
             routes.request(p)
-            traces.request(p)
 
     def maybe_rebuild_backdrop(self):
         """Called once per frame by radar.py's _render_loop, right after
@@ -167,16 +166,17 @@ class UI:
             h = self.selected.hex
             self.set_selected(next((q for q in fresh
                                      if q.hex == h and not self.hidden(q)), None))
-        # Trace prefetch (bounded design, adsb-radar-echoes): warm the trace
-        # cache for whichever aircraft is nearest the centre, once per feed
-        # cycle -- the aircraft a user's eye/thumb is statistically most
-        # likely to land on next. traces.request() already no-ops on a
-        # pending or TTL-fresh entry, so calling it here regardless of
-        # today's selection is cheap and never duplicates a fetch.
-        nearest = _nearest_visible(fresh, self.hidden)
-        if nearest is not None:
-            log("prefetch: nearest-to-centre", nearest.label, "dst", nearest.dst, "nm")
-            traces.request(nearest)
+        # Trace prefetch (docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md):
+        # enqueue every aircraft that's new (traced is False) and airborne --
+        # not just one candidate. A grounded aircraft is left un-enqueued and
+        # simply re-checked next cycle. Priority is dst (nm from centre)
+        # ascending, so the queue drains nearest-to-centre first -- the same
+        # signal the earlier single-candidate prefetch used.
+        for p in fresh:
+            if _enqueue_eligible(p):
+                p.traced = "pending"
+                log("prefetch: enqueued", p.label, "dst", p.dst, "nm")
+                self.trace_queue.enqueue(p.hex, p.dst)
 
     # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) --
 

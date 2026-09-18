@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Desktop test for ui.hit_test and ui._nearest_visible -- the two pure
-helpers behind trace prefetch (touch-down + nearest-to-centre). No device."""
+"""Desktop test for ui.hit_test (used by handle_tap) and
+ui._enqueue_eligible (the trace-backfill enqueue decision). No device."""
 
 import os
 import sys
@@ -18,9 +18,9 @@ def _eq(got, want, what):
 
 
 class _P:
-    def __init__(self, name="", dst=None, on_ground=False):
+    def __init__(self, name="", traced=False, on_ground=False):
         self.name = name
-        self.dst = dst
+        self.traced = traced
         self.on_ground = on_ground
 
     def __repr__(self):
@@ -36,37 +36,24 @@ def test_hit_test():
     _eq(hit_test(last_drawn, 205, 198, hit_radius=26), b, "hits the other plane")
     _eq(hit_test(last_drawn, 400, 400, hit_radius=26), None, "nothing within radius")
     _eq(hit_test([], 100, 100, hit_radius=26), None, "empty last_drawn -> None")
-    # Exactly two candidates equidistant from the tap: first-seen wins (strict
-    # '<' comparison), matching the pre-extraction loop's behaviour.
     tie_a, tie_b = _P("TIE_A"), _P("TIE_B")
     _eq(hit_test([(100, 100, tie_a), (100, 100, tie_b)], 100, 100, hit_radius=26),
         tie_a, "tie keeps the first candidate")
 
 
-def test_nearest_visible():
-    from ui import _nearest_visible
-    hidden = lambda p: p.on_ground  # noqa: E731
+def test_enqueue_eligible():
+    from ui import _enqueue_eligible
 
-    far, near = _P("FAR", dst=40), _P("NEAR", dst=5)
-    _eq(_nearest_visible([far, near], hidden), near, "picks the smallest dst")
-    _eq(_nearest_visible([], hidden), None, "no planes -> None")
-
-    grounded_near = _P("GROUNDED", dst=1, on_ground=True)
-    _eq(_nearest_visible([far, grounded_near], hidden), far,
-        "a closer but hidden plane is skipped")
-
-    no_dst = _P("NODST", dst=None)
-    _eq(_nearest_visible([no_dst, far], hidden), far,
-        "a plane with dst=None is skipped, not treated as nearest")
-
-    _eq(_nearest_visible([no_dst], hidden), None,
-        "every candidate lacking dst -> None")
+    _eq(_enqueue_eligible(_P()), True, "never-attempted + airborne -> eligible")
+    _eq(_enqueue_eligible(_P(on_ground=True)), False, "grounded -> not eligible")
+    _eq(_enqueue_eligible(_P(traced="pending")), False, "already pending -> not eligible")
+    _eq(_enqueue_eligible(_P(traced=True)), False, "already done -> not eligible")
 
 
 def main():
     test_hit_test()
-    test_nearest_visible()
-    print("ui.hit_test + ui._nearest_visible: all assertions passed")
+    test_enqueue_eligible()
+    print("ui.hit_test + ui._enqueue_eligible: all assertions passed")
     return 0
 
 
