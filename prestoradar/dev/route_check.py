@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
-Desktop (CPython) tool that cross-checks an aircraft's route across three
-free sources, instead of trusting whichever one answers first.
+Desktop (CPython) harness for routes.py's plausibility check -- fetches route
+candidates from three free sources and scores each with routes._leg_fit() /
+routes._leg_ok(), the exact functions the Presto itself uses, rather than a
+parallel copy of that algorithm. (It used to keep its own copy, prototyped
+here and then "ported down" to routes.py; that let a fix land in one and not
+the other -- see routes.py's near_airport heading bypass, missed here first
+until an SFO approach flagged it. Calling into routes.py directly closes
+that gap for good.)
 
-route_lookup.py -- the simple version, matching what routes.py does on the
-Presto -- only queries adsbdb. That's fine for the tap-to-inspect panel, but
-adsbdb (and hexdb.io) just return whatever route happens to be on file for a
-callsign, and that can be stale or wrong for a multi-leg rotation. Case in
-point, callsign UAL2274 climbing out of SFO on 2026-09-05:
+route_lookup.py -- the simple version, matching what routes.py's normal
+_fetch() path does on the Presto -- only queries adsbdb. That's fine for the
+tap-to-inspect panel, but adsbdb (and hexdb.io) just return whatever route
+happens to be on file for a callsign, and that can be stale or wrong for a
+multi-leg rotation. Case in point, callsign UAL2274 climbing out of SFO on
+2026-09-05:
 
     adsbdb        -> KEWR -> KRSW   (2100 nm off to one side, wrong)
     hexdb.io      -> KIAD -> KSFO   (a 2019 arrival leg, also wrong)
@@ -22,7 +29,8 @@ returns a 2-tuple -- truthy in Python no matter what's inside -- so the
 field is always True once a route has 2+ known airports (confirmed live:
 https://api.adsb.lol/api/0/route/UAL2274/-33.87/151.21, Sydney, still comes
 back "plausible": true for the SFO rotation). This script fetches each
-source's raw airport coordinates and scores every candidate leg itself:
+source's raw airport coordinates and scores every candidate leg itself, via
+routes.py:
 
   - cross-track distance from the aircraft's position to the leg's
     great-circle line must be within 50 nm or 20% of the leg's length,
@@ -56,7 +64,6 @@ import asyncio
 import json
 import os
 import sys
-from math import acos, asin, atan2, cos, degrees, radians, sin, sqrt
 
 _PRESTORADAR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ROOT = os.path.dirname(_PRESTORADAR)
@@ -64,89 +71,13 @@ for _p in (os.path.join(_ROOT, "lib"), _PRESTORADAR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import basemap_data  # noqa: E402 -- AIRPORTS: the airports this radar displays
-import geometry  # noqa: E402 -- same projected km frame as basemap_data.AIRPORTS
 import net  # noqa: E402
-import routes  # noqa: E402 -- just for is_hex_id()
+import routes  # noqa: E402 -- is_hex_id(), and the real plausibility check
 from settings import CENTER_LAT, CENTER_LON, RADIUS_KM, USER_AGENT  # noqa: E402
 
 ADSBLOL_HOST = "api.adsb.lol"
 ADSBDB_HOST = "api.adsbdb.com"
 HEXDB_HOST = "hexdb.io"
-
-EARTH_RADIUS_KM = 6371.0
-NEAR_AIRPORT_KM = 30  # SFO approaches often overfly the field before a near-180°
-                      # turn to land; within this range of a displayed airport,
-                      # score_leg() stops requiring the track to point at it.
-
-
-# --- great-circle geometry -------------------------------------------------
-
-def _gc_distance_km(lat1, lon1, lat2, lon2):
-    lat1, lon1, lat2, lon2 = (radians(x) for x in (lat1, lon1, lat2, lon2))
-    a = sin((lat2 - lat1) / 2) ** 2 + cos(lat1) * cos(lat2) * sin((lon2 - lon1) / 2) ** 2
-    return 2 * EARTH_RADIUS_KM * asin(sqrt(a))
-
-
-def _bearing_deg(lat1, lon1, lat2, lon2):
-    lat1, lon1, lat2, lon2 = (radians(x) for x in (lat1, lon1, lat2, lon2))
-    y = sin(lon2 - lon1) * cos(lat2)
-    x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(lon2 - lon1)
-    return degrees(atan2(y, x)) % 360
-
-
-def _angle_diff(a, b):
-    d = abs(a - b) % 360
-    return d if d <= 180 else 360 - d
-
-
-def near_displayed_airport(lat, lon):
-    """True if (lat, lon) is within NEAR_AIRPORT_KM of one of the airports
-    this radar actually displays (basemap_data.AIRPORTS -- projected east/north
-    km from the centre, same frame as geometry.project()). Used to bypass
-    score_leg()'s heading check: an aircraft can be legitimately right on top
-    of its destination while pointed the wrong way, mid-turn."""
-    e, n = geometry.project(lat, lon)
-    return any(sqrt((e - ax) ** 2 + (n - ay) ** 2) <= NEAR_AIRPORT_KM
-               for _code, ax, ay in basemap_data.AIRPORTS)
-
-
-def score_leg(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon, near_airport=False):
-    """How well does (pos_lat, pos_lon), heading `track` (degrees, or None),
-    fit as being somewhere on the great-circle leg from A to B? Standard
-    cross-track/along-track formulae (movable-type.co.uk/scripts/latlong),
-    plus a track check A-B distance alone can't do -- see module docstring.
-    `near_airport` (see near_displayed_airport()) waives that track check --
-    it's only meaningful far from either endpoint, and would otherwise fail
-    a plane overflying its destination before turning to land.
-    Returns a dict of the raw numbers plus `ok`.
-    """
-    dist_ab = _gc_distance_km(a_lat, a_lon, b_lat, b_lon)
-    threshold = max(50 * 1.852, 0.20 * dist_ab)  # 50 nm, or 20% of the leg
-
-    d13 = _gc_distance_km(a_lat, a_lon, pos_lat, pos_lon) / EARTH_RADIUS_KM
-    theta13 = radians(_bearing_deg(a_lat, a_lon, pos_lat, pos_lon))
-    theta12 = radians(_bearing_deg(a_lat, a_lon, b_lat, b_lon))
-    xt = max(-1.0, min(1.0, sin(d13) * sin(theta13 - theta12)))
-    cross_track = asin(xt) * EARTH_RADIUS_KM
-    c = max(-1.0, min(1.0, cos(d13) / cos(cross_track / EARTH_RADIUS_KM)))
-    along_track = acos(c) * EARTH_RADIUS_KM
-    if _angle_diff(degrees(theta13), degrees(theta12)) > 90:
-        along_track = -along_track
-
-    on_the_line = (abs(cross_track) <= threshold
-                   and -threshold <= along_track <= dist_ab + threshold)
-
-    track_diff = None
-    if track is not None:
-        track_diff = _angle_diff(track, _bearing_deg(pos_lat, pos_lon, b_lat, b_lon))
-
-    track_ok = track_diff is None or track_diff <= 90
-    bypassed = near_airport and not track_ok
-    ok = on_the_line and (track_ok or near_airport)
-    return {"dist_ab_km": dist_ab, "cross_track_km": cross_track,
-            "along_track_km": along_track, "track_diff_deg": track_diff,
-            "near_bypass": bypassed and on_the_line, "ok": ok}
 
 
 # --- position lookup: adsb.lol's network-wide index first (works anywhere,
@@ -303,7 +234,7 @@ async def run(args):
         return 1
 
     track_str = f"{plane['track']:.0f}°" if plane["track"] is not None else "unknown"
-    near_airport = near_displayed_airport(plane["lat"], plane["lon"])
+    near_airport = routes._near_displayed_airport(plane["lat"], plane["lon"])
     print(f"{callsign} (hex {plane['hex']}) at {plane['lat']:.4f}, {plane['lon']:.4f}, "
           f"track {track_str}, alt {plane['alt']}"
           f"{'  (near a displayed airport)' if near_airport else ''}\n")
@@ -316,34 +247,36 @@ async def run(args):
         return_exceptions=True)
     names = ("adsbdb", "hexdb.io", "adsb.lol")
 
-    rows = []  # (source, a_code, b_code, score, leg_label)
+    rows = []  # (source, a_code, b_code, fit, ok, leg_label)
     for name, legs in zip(names, sources):
         if isinstance(legs, Exception):
-            rows.append((name, f"(lookup errored: {legs!r})", None, None, None))
+            rows.append((name, f"(lookup errored: {legs!r})", None, None, None, None))
             continue
         if not legs:
-            rows.append((name, None, None, None, None))
+            rows.append((name, None, None, None, None, None))
             continue
         for i, (a_code, a_lat, a_lon, b_code, b_lat, b_lon) in enumerate(legs):
-            score = score_leg(plane["lat"], plane["lon"], plane["track"],
-                               a_lat, a_lon, b_lat, b_lon, near_airport=near_airport)
+            fit = routes._leg_fit(plane["lat"], plane["lon"], plane["track"],
+                                   a_lat, a_lon, b_lat, b_lon)
+            ok = routes._leg_ok(fit, near_airport)
             label = f"leg {i + 1}/{len(legs)}" if len(legs) > 1 else ""
-            rows.append((name, a_code, b_code, score, label))
+            rows.append((name, a_code, b_code, fit, ok, label))
 
     print(f"{'source':9} {'route':17} {'plausible':9} {'cross-track':>11} "
           f"{'track diff':>10}  leg")
-    for name, a_code, b_code, score, label in rows:
-        if score is None:
+    for name, a_code, b_code, fit, ok, label in rows:
+        if fit is None:
             print(f"{name:9} {a_code or '(no route on file)':17}")
             continue
         route_str = f"{a_code} -> {b_code}"
-        td = f"{score['track_diff_deg']:.0f}°" if score["track_diff_deg"] is not None else "--"
-        note = "  (near airport, track check waived)" if score["near_bypass"] else ""
-        print(f"{name:9} {route_str:17} {'yes' if score['ok'] else 'no':9} "
-              f"{score['cross_track_km']:9.0f}km {td:>10}  {label}{note}")
+        td = f"{fit['track_diff_deg']:.0f}°" if fit["track_diff_deg"] is not None else "--"
+        near_bypass = near_airport and fit["on_the_line"] and not fit["track_ok"]
+        note = "  (near airport, track check waived)" if near_bypass else ""
+        print(f"{name:9} {route_str:17} {'yes' if ok else 'no':9} "
+              f"{fit['cross_track_km']:9.0f}km {td:>10}  {label}{note}")
 
-    plausible = [(name, a_code, b_code) for name, a_code, b_code, score, _ in rows
-                 if score is not None and score["ok"]]
+    plausible = [(name, a_code, b_code) for name, a_code, b_code, fit, ok, _ in rows
+                 if fit is not None and ok]
     print()
     if plausible:
         for name, a_code, b_code in plausible:
@@ -356,7 +289,7 @@ async def run(args):
     # coordinate-less legs) also carries `iata` and `name`, so there's no
     # separate converter to maintain.
     icao_codes = []
-    for _, a_code, b_code, _, _ in rows:
+    for _, a_code, b_code, _, _, _ in rows:
         for code in (a_code, b_code):
             if code and len(code) == 4 and code.isalpha() and code.upper() not in icao_codes:
                 icao_codes.append(code.upper())

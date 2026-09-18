@@ -48,10 +48,13 @@ def is_hex_id(cs):
 # distance from the great-circle line (movable-type.co.uk/scripts/latlong),
 # plus a track check position alone can't do: "just departed A" and
 # "arriving at A" put the plane in the same place, only its heading tells
-# them apart. Ported down from prestoradar/dev/route_check.py, the desktop
-# tool this was prototyped in -- see that file's docstring for how this was
-# arrived at, including a bug found in adsb.lol's own "plausible" flag
-# (always true) that ruled out just trusting it as-is.
+# them apart. This is the one and only copy of that algorithm: prototyped in
+# prestoradar/dev/route_check.py (see that file's docstring for how it was
+# arrived at, including a bug found in adsb.lol's own "plausible" flag --
+# always true -- that ruled out just trusting it as-is), but route_check.py
+# now calls _leg_fit()/_leg_ok() here rather than keeping its own copy, so a
+# fix made for one caller (e.g. the near-airport heading bypass below) can't
+# quietly go missing from the other.
 
 def _gc_distance_km(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = (math.radians(x) for x in (lat1, lon1, lat2, lon2))
@@ -86,7 +89,12 @@ def _near_displayed_airport(lat, lon):
                for _code, ax, ay in basemap_data.AIRPORTS)
 
 
-def _plausible(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon, near_airport=False):
+def _leg_fit(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon):
+    """Raw geometry: how well does (pos_lat, pos_lon), heading `track`
+    (degrees, or None), fit as being somewhere on the great-circle leg from
+    A to B? No opinion on near_airport -- see _leg_ok(), which turns this
+    into a plausibility verdict, and route_check.py, the desktop harness
+    that reports these numbers for legs it rejects too."""
     dist_ab = _gc_distance_km(a_lat, a_lon, b_lat, b_lon)
     threshold = max(50 * 1.852, 0.20 * dist_ab)  # 50 nm, or 20% of the leg
 
@@ -101,11 +109,26 @@ def _plausible(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon, near_airport
         along_track = -along_track
 
     on_the_line = abs(cross_track) <= threshold and -threshold <= along_track <= dist_ab + threshold
-    if not on_the_line:
-        return False
-    if track is None or near_airport:
-        return True
-    return _angle_diff(track, _bearing_deg(pos_lat, pos_lon, b_lat, b_lon)) <= 90
+    track_diff = None
+    if track is not None:
+        track_diff = _angle_diff(track, _bearing_deg(pos_lat, pos_lon, b_lat, b_lon))
+    return {"dist_ab_km": dist_ab, "cross_track_km": cross_track,
+            "along_track_km": along_track, "on_the_line": on_the_line,
+            "track_ok": track_diff is None or track_diff <= 90,
+            "track_diff_deg": track_diff}
+
+
+def _leg_ok(fit, near_airport=False):
+    """Does a _leg_fit() result count as plausible? `near_airport` (see
+    _near_displayed_airport()) waives the heading check -- an aircraft can be
+    legitimately right on top of its destination while pointed the wrong
+    way, mid-turn."""
+    return fit["on_the_line"] and (fit["track_ok"] or near_airport)
+
+
+def _plausible(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon, near_airport=False):
+    fit = _leg_fit(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon)
+    return _leg_ok(fit, near_airport)
 
 
 # --- route sources -------------------------------------------------------
