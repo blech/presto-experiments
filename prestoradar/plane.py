@@ -33,7 +33,8 @@ class Plane:
 
     __slots__ = ("callsign", "e", "n", "ve", "vn", "heading", "gs",
                  "vstate", "cat", "hex", "reg", "type", "desc", "alt",
-                 "vrate", "squawk", "emergency", "dst", "dir", "trail")
+                 "vrate", "squawk", "emergency", "dst", "dir", "trail",
+                 "traced")
 
     @classmethod
     def from_feed(cls, ac, level_rate_fpm, into=None):
@@ -59,6 +60,7 @@ class Plane:
         p = into if into is not None else cls()
         if into is None:
             p.trail = []
+            p.traced = False   # not yet attempted -- see fetchqueue.py / traces.backfill()
         p.alt = ac.get("alt_baro")           # feet, or the string "ground"
         p.gs = ac.get("gs") or 0.0           # ground speed, knots
         p.callsign = (ac.get("flight") or ac.get("hex", "")).strip()

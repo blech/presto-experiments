@@ -132,18 +132,22 @@ def main():
     r = Plane.from_feed(ac0, _LEVEL_RATE_FPM)
     _eq(len(r.trail), 1, "a new Plane's trail is seeded with its first fix")
     _eq(r.trail[0], (r.e, r.n, r.alt), "a trail fix is (e, n, alt)")
+    _eq(r.traced, False, "a new Plane starts un-traced")
 
     ac1 = dict(ac0, lat=52.1, lon=-0.1, alt_baro=11000)
     r2 = Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)
     _eq(r2 is r, True, "from_feed(into=p) updates and returns the same object")
     _eq(r.alt, 11000, "the reused object's fields are updated in place")
     _eq(len(r.trail), 2, "each fetch appends one trail fix")
+    r.traced = True   # simulate a completed backfill
+    Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)
+    _eq(r.traced, True, "a repeat sighting (into=) never resets traced")
     ex1, ny1 = geometry.project(52.1, -0.1)
     _close(r.trail[-1][0], ex1, "the newest trail fix is the new projected position")
 
     skipped = Plane.from_feed({"hex": "abc123"}, _LEVEL_RATE_FPM, into=r)
     _eq(skipped, None, "a no-position entry returns None even with into= set")
-    _eq(len(r.trail), 2, "a skipped entry leaves the trail alone")
+    _eq(len(r.trail), 3, "a skipped entry leaves the trail alone")
 
     for _ in range(_TRAIL_MAX + 5):
         Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)
