@@ -33,7 +33,10 @@ source's raw airport coordinates and scores every candidate leg itself:
     at the candidate destination -- this is what actually separates "just
     left SFO for DEN" from "arriving at SFO from IAD": both put the plane
     near SFO, but only one has it heading away from SFO in the right
-    direction.
+    direction. Waived within 30 km of a displayed airport (basemap_data.py's
+    AIRPORTS), since SFO approaches often overfly the field before a near-180
+    degree turn to land, which would otherwise fail this check right where
+    it matters least.
 
 Same CLI as route_lookup.py:
 
@@ -61,6 +64,8 @@ for _p in (os.path.join(_ROOT, "lib"), _PRESTORADAR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import basemap_data  # noqa: E402 -- AIRPORTS: the airports this radar displays
+import geometry  # noqa: E402 -- same projected km frame as basemap_data.AIRPORTS
 import net  # noqa: E402
 import routes  # noqa: E402 -- just for is_hex_id()
 from settings import CENTER_LAT, CENTER_LON, RADIUS_KM, USER_AGENT  # noqa: E402
@@ -70,6 +75,9 @@ ADSBDB_HOST = "api.adsbdb.com"
 HEXDB_HOST = "hexdb.io"
 
 EARTH_RADIUS_KM = 6371.0
+NEAR_AIRPORT_KM = 30  # SFO approaches often overfly the field before a near-180°
+                      # turn to land; within this range of a displayed airport,
+                      # score_leg() stops requiring the track to point at it.
 
 
 # --- great-circle geometry -------------------------------------------------
@@ -92,11 +100,25 @@ def _angle_diff(a, b):
     return d if d <= 180 else 360 - d
 
 
-def score_leg(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon):
+def near_displayed_airport(lat, lon):
+    """True if (lat, lon) is within NEAR_AIRPORT_KM of one of the airports
+    this radar actually displays (basemap_data.AIRPORTS -- projected east/north
+    km from the centre, same frame as geometry.project()). Used to bypass
+    score_leg()'s heading check: an aircraft can be legitimately right on top
+    of its destination while pointed the wrong way, mid-turn."""
+    e, n = geometry.project(lat, lon)
+    return any(sqrt((e - ax) ** 2 + (n - ay) ** 2) <= NEAR_AIRPORT_KM
+               for _code, ax, ay in basemap_data.AIRPORTS)
+
+
+def score_leg(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon, near_airport=False):
     """How well does (pos_lat, pos_lon), heading `track` (degrees, or None),
     fit as being somewhere on the great-circle leg from A to B? Standard
     cross-track/along-track formulae (movable-type.co.uk/scripts/latlong),
     plus a track check A-B distance alone can't do -- see module docstring.
+    `near_airport` (see near_displayed_airport()) waives that track check --
+    it's only meaningful far from either endpoint, and would otherwise fail
+    a plane overflying its destination before turning to land.
     Returns a dict of the raw numbers plus `ok`.
     """
     dist_ab = _gc_distance_km(a_lat, a_lon, b_lat, b_lon)
@@ -119,9 +141,12 @@ def score_leg(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon):
     if track is not None:
         track_diff = _angle_diff(track, _bearing_deg(pos_lat, pos_lon, b_lat, b_lon))
 
-    ok = on_the_line and (track_diff is None or track_diff <= 90)
+    track_ok = track_diff is None or track_diff <= 90
+    bypassed = near_airport and not track_ok
+    ok = on_the_line and (track_ok or near_airport)
     return {"dist_ab_km": dist_ab, "cross_track_km": cross_track,
-            "along_track_km": along_track, "track_diff_deg": track_diff, "ok": ok}
+            "along_track_km": along_track, "track_diff_deg": track_diff,
+            "near_bypass": bypassed and on_the_line, "ok": ok}
 
 
 # --- position lookup: adsb.lol's network-wide index first (works anywhere,
@@ -278,8 +303,10 @@ async def run(args):
         return 1
 
     track_str = f"{plane['track']:.0f}°" if plane["track"] is not None else "unknown"
+    near_airport = near_displayed_airport(plane["lat"], plane["lon"])
     print(f"{callsign} (hex {plane['hex']}) at {plane['lat']:.4f}, {plane['lon']:.4f}, "
-          f"track {track_str}, alt {plane['alt']}\n")
+          f"track {track_str}, alt {plane['alt']}"
+          f"{'  (near a displayed airport)' if near_airport else ''}\n")
 
     # return_exceptions=True: the fetchers above are hardened not to raise,
     # but a surprise in one source still shouldn't sink the other two.
@@ -299,7 +326,7 @@ async def run(args):
             continue
         for i, (a_code, a_lat, a_lon, b_code, b_lat, b_lon) in enumerate(legs):
             score = score_leg(plane["lat"], plane["lon"], plane["track"],
-                               a_lat, a_lon, b_lat, b_lon)
+                               a_lat, a_lon, b_lat, b_lon, near_airport=near_airport)
             label = f"leg {i + 1}/{len(legs)}" if len(legs) > 1 else ""
             rows.append((name, a_code, b_code, score, label))
 
@@ -311,8 +338,9 @@ async def run(args):
             continue
         route_str = f"{a_code} -> {b_code}"
         td = f"{score['track_diff_deg']:.0f}°" if score["track_diff_deg"] is not None else "--"
+        note = "  (near airport, track check waived)" if score["near_bypass"] else ""
         print(f"{name:9} {route_str:17} {'yes' if score['ok'] else 'no':9} "
-              f"{score['cross_track_km']:9.0f}km {td:>10}  {label}")
+              f"{score['cross_track_km']:9.0f}km {td:>10}  {label}{note}")
 
     plausible = [(name, a_code, b_code) for name, a_code, b_code, score, _ in rows
                  if score is not None and score["ok"]]
@@ -322,6 +350,28 @@ async def run(args):
             print(f"plausible: {a_code} -> {b_code}  ({name})")
     else:
         print("no candidate passed the plausibility check -- treat all of the above as unconfirmed")
+
+    # ICAO -> IATA + name, for every ICAO-style code seen above. adsb.lol's
+    # airport endpoint (already used by _airport_latlon() for hexdb.io's
+    # coordinate-less legs) also carries `iata` and `name`, so there's no
+    # separate converter to maintain.
+    icao_codes = []
+    for _, a_code, b_code, _, _ in rows:
+        for code in (a_code, b_code):
+            if code and len(code) == 4 and code.isalpha() and code.upper() not in icao_codes:
+                icao_codes.append(code.upper())
+
+    print()
+    if icao_codes:
+        infos = await asyncio.gather(
+            *(_get_json(ADSBLOL_HOST, f"/api/0/airport/{code}") for code in icao_codes))
+        print(f"{'icao':4}  {'iata':4}  name")
+        for code, info in zip(icao_codes, infos):
+            iata = (info or {}).get("iata") or "?"
+            airport_name = ((info or {}).get("name") or "(unknown airport)")[:60]
+            print(f"{code:4}  {iata:4}  {airport_name}")
+    else:
+        print("no ICAO-style airport codes in the routes above")
     return 0
 
 
