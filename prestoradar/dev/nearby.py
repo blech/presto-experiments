@@ -44,9 +44,10 @@ import feed  # noqa: E402
 import fetchqueue  # noqa: E402
 import geometry  # noqa: E402
 import routes  # noqa: E402
+import traces  # noqa: E402
 from settings import (  # noqa: E402
     CENTER_LAT, CENTER_LON, RADIUS_KM, USER_AGENT, LEVEL_RATE_FPM,
-    FETCH_INTERVAL_MS, ROUTE_QUEUE_INTERVAL_MS,
+    FETCH_INTERVAL_MS, ROUTE_QUEUE_INTERVAL_MS, TRACE_QUEUE_INTERVAL_MS,
 )
 
 RADAR_HOST = "api.adsb.lol"
@@ -73,7 +74,8 @@ Row = collections.namedtuple("Row", "plane dist_nm bearing")
 # vectored downwind leg will still be misfiled.
 Config = collections.namedtuple(
     "Config",
-    "terminal_nm phase_ceil_ft heading_tol near_nm include_ground",
+    "terminal_nm phase_ceil_ft heading_tol near_nm include_ground "
+    "trail_min_points trail_endpoint_nm",
 )
 
 
@@ -84,6 +86,8 @@ def default_config():
         heading_tol=70.0,     # track vs. bearing to/from the field, degrees
         near_nm=5.0,          # "near the centre point" radius
         include_ground=False,
+        trail_min_points=3,   # below this the trail says nothing; geometry alone stands
+        trail_endpoint_nm=5.0,  # how close a departure's oldest fix must be to the field
     )
 
 
@@ -118,6 +122,27 @@ def _route_vetoes(route, codes, arriving):
     if _known(here) and here not in codes:
         return True                        # this end is a different, known airport
     return False
+
+
+def _trail_vetoes(trail, ap, cfg, arriving):
+    """Should this plane's trail (oldest->newest (e, n, alt) fixes -- see
+    traces.points_for()) keep it OUT of the given field's arrivals
+    (arriving=True) or departures? Only consulted when no resolved route
+    settled the question (see bucket()); a real flight history is still
+    better evidence than geometry alone (DATA_TRACE.md's altitude-trend /
+    monotonic-progress signals, simplified to endpoint distance).
+
+    A genuine departure starts at the field (its oldest fix within
+    trail_endpoint_nm) and moves away from it; a genuine arrival moves
+    toward it. d_old/d_new are the distance (nm) from the field to the
+    trail's oldest and newest fix.
+    """
+    (old_e, old_n, _), (new_e, new_n, _) = trail[0], trail[-1]
+    d_old = math.hypot(old_e - ap.e, old_n - ap.n) * _NM_PER_KM
+    d_new = math.hypot(new_e - ap.e, new_n - ap.n) * _NM_PER_KM
+    if arriving:
+        return d_new >= d_old              # not getting closer -> not arriving here
+    return d_old > cfg.trail_endpoint_nm or d_new <= d_old
 
 
 def bucket(planes, airports, cfg, routes_by_cs=None):
@@ -167,6 +192,7 @@ def bucket(planes, airports, cfg, routes_by_cs=None):
             continue
 
         route = routes_by_cs.get(p.callsign)
+        trail = p.trail if len(p.trail) >= cfg.trail_min_points else None
 
         for icao, ap in airports.items():
             de, dn = p.e - ap.e, p.n - ap.n
@@ -178,14 +204,22 @@ def bucket(planes, airports, cfg, routes_by_cs=None):
                 # Departing: climbing and tracking away from the field.
                 if _angle_diff(p.heading, field_to_plane) > cfg.heading_tol:
                     continue
-                if route and _route_vetoes(route, ap.codes, arriving=False):
+                # route > trail > geometry: a resolved route is trusted
+                # outright; only lacking one does the trail get a say.
+                if route:
+                    if _route_vetoes(route, ap.codes, arriving=False):
+                        continue
+                elif trail and _trail_vetoes(trail, ap, cfg, arriving=False):
                     continue
                 scored[icao]["departures"].append((dist_nm, p, field_to_plane))
             else:
                 # Landing: descending and tracking toward the field.
                 if _angle_diff(p.heading, _bearing(-de, -dn)) > cfg.heading_tol:
                     continue
-                if route and _route_vetoes(route, ap.codes, arriving=True):
+                if route:
+                    if _route_vetoes(route, ap.codes, arriving=True):
+                        continue
+                elif trail and _trail_vetoes(trail, ap, cfg, arriving=True):
                     continue
                 scored[icao]["landings"].append((dist_nm, p, field_to_plane))
 
@@ -241,10 +275,19 @@ def load_airports(idents, csv_path=OURAIRPORTS_CSV):
     )
 
 
-async def _fetch(radius_nm):
+def _make_feed(radius_nm):
     path = f"/v2/point/{CENTER_LAT}/{CENTER_LON}/{radius_nm}"
-    f = feed.Feed(RADAR_HOST, path, USER_AGENT, LEVEL_RATE_FPM, FETCH_INTERVAL_MS)
-    return await f._fetch()
+    return feed.Feed(RADAR_HOST, path, USER_AGENT, LEVEL_RATE_FPM, FETCH_INTERVAL_MS)
+
+
+def _trace_eligible(p):
+    """True if p is worth a trace-backfill fetch: new (traced is False),
+    airborne. Mirrors ui.py's _enqueue_eligible -- same skip heuristic
+    (DATA_TRACE.md / the trace-fetch-queue design's "takeoff vs. edge-entry"
+    note): an aircraft first sighted on the ground has little trace_recent
+    history to fetch yet, so it's left un-enqueued and re-checked next
+    cycle, picked up once airborne."""
+    return p.traced is False and not p.on_ground
 
 
 _ARROW = {"climb": "^", "descent": "v", "level": "-"}
@@ -335,15 +378,21 @@ def _resolved_routes(planes):
 
 async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
                render_interval, once):
+    # One persistent Feed for the whole run (not a fresh one per fetch): its
+    # hex -> Plane registry is what lets plane.trail and plane.traced survive
+    # across fetches at all (feed.py's own doc on _by_hex), which the trail
+    # veto and the trace-backfill queue both depend on.
+    feed_obj = _make_feed(radius_nm)
     state = {"planes": [], "by_cs": {}, "route_pending": 0}
     route_queue = fetchqueue.Queue(ROUTE_QUEUE_INTERVAL_MS)
+    trace_queue = fetchqueue.Queue(TRACE_QUEUE_INTERVAL_MS)
 
     async def process_route(cs):
         # Resolve against *this* cycle's live planes, not whichever one was
         # visible when cs was enqueued -- an aircraft that's left the board
         # by the time its turn comes up is simply not found here, and no
-        # fetch happens (same pattern as radar.py's Feed.resolve() for trace
-        # backfill). state["route_pending"] only ever reflects queue depth,
+        # fetch happens (same pattern feed.py's resolve() gives the trace
+        # queue). state["route_pending"] only ever reflects queue depth,
         # not fetches-in-flight, so it's decremented either way.
         try:
             plane = state["by_cs"].get(cs)
@@ -351,6 +400,14 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
                 await routes.fetch_for(plane)
         finally:
             state["route_pending"] -= 1
+
+    async def process_trace(hex_id):
+        # Same resolve-or-noop pattern as radar.py's _process_traced_hex:
+        # look the hex up in the Feed's *current* registry, not a reference
+        # captured at enqueue time, so a departed aircraft is a free no-op.
+        plane = feed_obj.resolve(hex_id)
+        if plane is not None and plane.traced == "pending":
+            await traces.backfill(plane)
 
     def current_result():
         # Re-bucket on every render, not just every fetch, so a plane leaves
@@ -360,14 +417,25 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
                       _resolved_routes(state["planes"]))
 
     async def refresh():
-        planes = await _fetch(radius_nm)
+        planes = await feed_obj._fetch()
         if planes is None:
             print("fetch failed -- see the log lines above")
             return
         state["planes"] = planes
         state["by_cs"] = {p.callsign: p for p in planes}
-        # Priority = distance from centre, nearest first -- the same "most
-        # likely to matter soon" signal the trace-backfill queue uses.
+
+        # Trace backfill: every new, airborne aircraft (not just the ones
+        # currently in a board section -- matches ui.py's own policy, and a
+        # plane not yet in a section is exactly one the trail veto could
+        # later place correctly once it grows one). Priority = dst, nearest
+        # first.
+        for p in planes:
+            if _trace_eligible(p):
+                p.traced = "pending"
+                trace_queue.enqueue(p.hex, p.dst)
+
+        # Route lookups stay scoped to what's actually on the board.
+        # Priority = distance from centre, nearest first.
         for p in _visible_planes(current_result()):
             if routes.eligible(p):
                 route_queue.enqueue(p.callsign, p.dst)
@@ -376,16 +444,18 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
     await refresh()   # first paint has data
 
     if once:
-        worker = asyncio.create_task(route_queue.run(process_route))
+        route_worker = asyncio.create_task(route_queue.run(process_route))
+        trace_worker = asyncio.create_task(trace_queue.run(process_trace))
         loop = asyncio.get_event_loop()
         deadline = loop.time() + 25.0
         while state["route_pending"] > 0 and loop.time() < deadline:
             await asyncio.sleep(0.5)
-        worker.cancel()
-        try:
-            await worker
-        except asyncio.CancelledError:
-            pass
+        for worker in (route_worker, trace_worker):
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
         render(current_result(), radius_km)
         return
 
@@ -399,7 +469,9 @@ async def _run(radius_nm, cfg, airports, radius_km, fetch_interval,
             render(current_result(), radius_km)
             await asyncio.sleep(render_interval)
 
-    await asyncio.gather(fetcher(), renderer(), route_queue.run(process_route))
+    await asyncio.gather(fetcher(), renderer(),
+                         route_queue.run(process_route),
+                         trace_queue.run(process_trace))
 
 
 def main():

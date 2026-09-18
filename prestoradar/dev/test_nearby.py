@@ -58,10 +58,11 @@ def _row(rows, callsign):
 
 class _FakePlane:
     """Just the fields nearby.bucket() reads -- e/n (km from centre), alt,
-    vstate, heading, dst / dir (range and bearing from centre), on_ground."""
+    vstate, heading, dst / dir (range and bearing from centre), on_ground,
+    trail (oldest->newest (e, n, alt) fixes, empty unless given)."""
 
     def __init__(self, callsign, e, n, alt, vstate, heading, dst,
-                 on_ground=False, direction=None):
+                 on_ground=False, direction=None, trail=None):
         self.callsign = callsign
         self.e = e
         self.n = n
@@ -71,6 +72,7 @@ class _FakePlane:
         self.dst = dst
         self.dir = direction
         self.on_ground = on_ground
+        self.trail = trail if trail is not None else []
 
 
 def main():
@@ -81,7 +83,8 @@ def main():
     se, sn = airports["KSFO"].e, airports["KSFO"].n
     oe, on = airports["KOAK"].e, airports["KOAK"].n
     cfg = nearby.Config(terminal_nm=12.0, phase_ceil_ft=8000,
-                        heading_tol=70.0, near_nm=5.0, include_ground=False)
+                        heading_tol=70.0, near_nm=5.0, include_ground=False,
+                        trail_min_points=3, trail_endpoint_nm=5.0)
 
     # A climb 3 km due north of SFO, tracking north -- straight off the field
     # and pulling away from it.
@@ -194,6 +197,53 @@ def main():
     q = nearby.bucket([skw], airports, cfg, {"SKW5583": ("?", "?")})
     _eq(_labels(q["airports"]["KOAK"]["landings"]), ["SKW5583"],
         "an unresolved ('?') route endpoint does not veto")
+
+    # --- trail veto (route > trail > geometry) ---------------------------
+    # Same OAK-departure geometry as POE672 above, but no route this time --
+    # only a trail. Its oldest fix is near SFO, ~9.6nm from OAK (> the 5nm
+    # trail_endpoint_nm), so the trail says it didn't start at OAK either.
+    far_start_trail = [(se, sn, 3000), ((se + oe) / 2, (sn + on) / 2, 5000),
+                       (oe + 0.4, on + 0.2, 7750)]
+    poe_trail = _FakePlane("POE900", oe + 0.4, on + 0.2, 7750, "climb", 60.0, 9.8,
+                           trail=far_start_trail)
+    no_route = nearby.bucket([poe_trail], airports, cfg)
+    _eq("POE900" in _labels(no_route["airports"]["KOAK"]["departures"]), False,
+        "with no route, a trail starting far from OAK vetoes the OAK departure")
+
+    # Same shape, but the trail starts *at* OAK and moves away -- confirms
+    # the departure instead of vetoing it.
+    at_field_trail = [(oe, on, 500), (oe + 0.2, on + 0.1, 3000),
+                      (oe + 0.4, on + 0.2, 7750)]
+    poe_confirm = _FakePlane("POE901", oe + 0.4, on + 0.2, 7750, "climb", 60.0, 9.8,
+                             trail=at_field_trail)
+    confirmed = nearby.bucket([poe_confirm], airports, cfg)
+    _eq("POE901" in _labels(confirmed["airports"]["KOAK"]["departures"]), True,
+        "a trail starting at the field confirms the OAK departure")
+
+    # A trail shorter than trail_min_points is not consulted -- geometry
+    # stands, same as no trail at all.
+    poe_short = _FakePlane("POE902", oe + 0.4, on + 0.2, 7750, "climb", 60.0, 9.8,
+                           trail=far_start_trail[:2])
+    short = nearby.bucket([poe_short], airports, cfg)
+    _eq("POE902" in _labels(short["airports"]["KOAK"]["departures"]), True,
+        "a trail shorter than trail_min_points doesn't veto -- geometry stands")
+
+    # Landings are symmetric: a trail moving away from the field (getting
+    # farther, not closer) vetoes a proposed OAK landing.
+    receding_trail = [(oe - 1.0, on, 3000), (oe - 2.5, on, 2700), (oe - 4.0, on, 2400)]
+    skw_trail = _FakePlane("SKW901", oe - 4.0, on, 2400, "descent", 90.0, 9.1,
+                           trail=receding_trail)
+    receding = nearby.bucket([skw_trail], airports, cfg)
+    _eq("SKW901" in _labels(receding["airports"]["KOAK"]["landings"]), False,
+        "with no route, a trail moving away from OAK vetoes the OAK landing")
+
+    # Precedence: a resolved route confirming the section is trusted even
+    # when the trail alone would have vetoed it.
+    poe_both = _FakePlane("POE903", oe + 0.4, on + 0.2, 7750, "climb", 60.0, 9.8,
+                          trail=far_start_trail)
+    trusted = nearby.bucket([poe_both], airports, cfg, {"POE903": ("OAK", "PDX")})
+    _eq("POE903" in _labels(trusted["airports"]["KOAK"]["departures"]), True,
+        "a resolved route confirming the section beats a trail that would veto it")
 
     _test_load_airports()
     _test_fmt_route()
