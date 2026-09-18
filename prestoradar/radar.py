@@ -13,7 +13,9 @@ if "/prestoradar" not in sys.path:
 
 import feed                             # sibling module: fetch/parse (feed.Feed)
 import backdrop                         # sibling module: vector cache + raster (backdrop.Backdrop)
+import fetchqueue                       # sibling module: generic paced priority queue
 import render                           # sibling module: pens + all draw_* (render.Renderer)
+import traces                           # sibling module: trace_recent fetch/parse (traces.backfill)
 import ui                               # sibling module: touch/selection/settings (ui.UI)
 
 # User-tunable configuration (centre, radius, intervals, flags, ...). Only
@@ -73,6 +75,27 @@ PX_PER_KM = 230.0 / RADIUS_KM        # outer ring sits at RADIUS_KM
 # mutable source of truth for the aircraft list, replacing the module
 # globals (_planes/_fetch_count/_fetch_ok) radar.py used to hold directly.
 _feed = feed.Feed(RADAR_HOST, RADAR_PATH, USER_AGENT, LEVEL_RATE_FPM, FETCH_INTERVAL_MS)
+
+# Trace-backfill queue (docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md):
+# one shared, paced priority queue for every aircraft's one-time trace_recent
+# backfill, draining slowly enough to stay under adsb.lol's shared courtesy
+# budget alongside the position poll above and any route lookups routes.py
+# makes on a tap.
+_trace_queue = fetchqueue.Queue(TRACE_QUEUE_INTERVAL_MS)
+
+async def _process_traced_hex(hex_id):
+    # Resolve against feed's *current* registry, not whatever Plane existed
+    # when this hex was enqueued -- an aircraft that's left the screen by
+    # the time its turn comes up simply isn't found here, so its (already
+    # garbage-collectable) old Plane object is never touched and no fetch is
+    # wasted on it. See the design spec's "Eviction & lifecycle correctness".
+    plane = _feed.resolve(hex_id)
+    if plane is None:
+        log("prefetch: dropped (departed)", hex_id)
+        return
+    if plane.traced == "pending":
+        await traces.backfill(plane)
+
 
 def log_init():
     # Open netlog's multicast socket once the network is up. Best-effort; on
@@ -170,7 +193,7 @@ _renderer.backdrop = _backdrop
 # than UI reaching into feed.py directly.
 _redraw = asyncio.Event()
 _ui = ui.UI(SETTINGS, _backdrop, _renderer, _hidden, _redraw.set,
-            HIT_RADIUS,
+            HIT_RADIUS, _trace_queue,
             SETTINGS_BTN, _SPANEL, _SP_ROW0, _SP_ROWH)
 _feed.on_update = _ui.on_feed_update
 
@@ -251,7 +274,8 @@ async def _touch_loop():
 
 
 async def _amain():
-    await asyncio.gather(_render_loop(), _feed.run(), _touch_loop())
+    await asyncio.gather(_render_loop(), _feed.run(), _touch_loop(),
+                          _trace_queue.run(_process_traced_hex))
 
 
 def main():

@@ -36,6 +36,12 @@ USER_AGENT = "presto-radar/1.0 (+https://github.com/blech/presto-experiments)"
 FETCH_INTERVAL_MS = 30_000   # adsb.lol public endpoints allow ~1 request/second
 ANIM_INTERVAL = 0.5          # seconds between dead-reckoning redraws (~2 fps)
 
+# Pace of the trace-backfill queue (fetchqueue.py): one request every this
+# many ms. 1500 leaves headroom under adsb.lol's shared ~1 req/s courtesy
+# budget alongside the position poll above and any on-tap route lookups.
+# See docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md.
+TRACE_QUEUE_INTERVAL_MS = 1500
+
 DRAW_BASEMAP = 1             # 0 to skip the coastline layer entirely
 SKIP_NETWORK = 0             # 1 = don't connect or fetch, just draw grid + basemap
 
