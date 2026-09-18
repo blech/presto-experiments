@@ -604,3 +604,43 @@ flicker. The 240x240 fallback was not needed.
 - **Attribution.** `--raster-fetch` prints the required Esri/OSM credit line but
   nothing shows it on-device -- fine for a personal desk display, would need a
   small always-on label if this were ever shared or shipped.
+
+---
+
+## 9. A shared aircraft data layer, one level below the display
+
+Raised while building `dev/nearby.py` (the textual board, `adsb-radar-nearby`).
+Not started -- deliberately deferred past that branch's own work so it doesn't
+touch `radar.py`.
+
+**The observation:** `feed.Feed` already *is* a shared, display-agnostic
+position layer -- one class, no route/trace knowledge, reused verbatim by both
+`radar.py` (Presto) and `dev/nearby.py` (desktop). But the enrichment on top of
+it -- route lookups, trace backfill, and the ground-sighted-departure signal
+`adsb-radar-nearby` adds -- is *not* shared: `radar.py`/`ui.py` wire their own
+`fetchqueue.Queue` + resolver callback for trace backfill and call
+`routes.request()` directly; `dev/nearby.py` independently wires its own
+separate pair of queues + resolvers for the same purpose. Same pattern, twice,
+by two different callers.
+
+**The idea:** pull `Feed` + the route/trace/ground-sighting queues and their
+resolver callbacks into one reusable "data layer" piece that both `radar.py`
+and `dev/nearby.py` (and any future display -- a web view for an old tablet
+was floated) become thin callers of, rather than each hand-wiring its own copy.
+`bucket()`/`dev/board.py`'s classifier already doesn't need this to happen --
+it only ever reads a `Plane`-*shaped* object (proven by the test suite's
+`_FakePlane` stand-in), so it'd run unchanged whether fed by a local `Feed` or
+by records reconstructed from a remote layer.
+
+**Why it's bigger than it sounds:** it means touching `radar.py`/`ui.py` --
+working on-device code, not just the desktop tool -- and reconciling
+`routes.request()`'s immediate, unthrottled single-tap path with the batched
+queue path both callers would then share. If the layer ever moves to a
+separate always-on process (a desktop-class machine, Presto populating it over
+the network -- also raised, previously in another context) it additionally
+needs a wire format and a transport; `lib/netlog.py` (item 1, multicast UDP +
+JSON) is the nearest existing precedent, though it was built for log
+telemetry, not aircraft snapshots.
+
+**Status:** tracked, not scoped. Wants its own brainstorm/spec before any
+code -- architectural-path work, not an extension of the nearby-board branch.
