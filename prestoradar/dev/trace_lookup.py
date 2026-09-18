@@ -57,10 +57,9 @@ async def find_plane(hex_id, callsign, radius_km):
 
 
 async def seed_trace(plane):
-    traces.request(plane)
-    while traces.get(plane.hex) == "":
-        await asyncio.sleep(0.25)
-    return traces.get(plane.hex)
+    before = len(plane.trail)
+    await traces.backfill(plane)
+    return before
 
 
 def describe(points):
@@ -89,20 +88,19 @@ async def run(args):
     print(f"live RAM trail so far: {len(plane.trail)} fix(es) "
           f"(one per feed fetch; this harness only fetched once)")
 
-    seed = await seed_trace(plane)
+    before = await seed_trace(plane)
     print()
-    if seed is None:
-        print(f"trace_recent: nothing on file for {plane.hex} "
-              f"-- radar would fall back to the RAM trail")
+    if len(plane.trail) <= before:
+        print(f"trace_recent: nothing usable on file for {plane.hex} "
+              f"-- plane.trail is unchanged, radar would keep growing it live")
     else:
-        print(f"trace_recent for {plane.hex}:")
-        describe(seed)
+        print(f"trace_recent replaced plane.trail for {plane.hex}:")
+        describe(plane.trail)
 
     chosen = traces.points_for(plane)
     print()
     print(f"points_for() would hand the renderer: "
-          f"{'None' if chosen is None else str(len(chosen)) + ' points'} "
-          f"({'network seed' if chosen is seed else 'RAM trail' if chosen is not None else 'nothing yet'})")
+          f"{'None' if chosen is None else str(len(chosen)) + ' points'}")
     return 0
 
 
