@@ -42,6 +42,14 @@ class Feed:
         # not done here.
         self._by_hex = {}
 
+    def resolve(self, hex_id):
+        """The current Plane for hex_id, or None if it isn't (or is no
+        longer) in the live feed. Used by radar.py's trace-backfill queue
+        to look up a queued aircraft only once its turn to fetch actually
+        comes up, rather than holding a direct Plane reference that could
+        outlive the aircraft's time on screen."""
+        return self._by_hex.get(hex_id)
+
     async def _fetch(self):
         """Pull the current aircraft list from adsb.lol.
 
