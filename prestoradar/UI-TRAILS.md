@@ -115,6 +115,19 @@ climb/descent, and a tricolour line competes with the blips. In **map mode**,
 theme it to a dark, saturated colour over the light raster through the
 existing `Renderer.theme()` hook.
 
+**Follow-up, observed on-device 2026-09-18 (`adsb-radar-echoes`, trace
+prefetch work):** the fade reads inconsistently depending on how many points
+are in the trail. `_trace_pen_index(seg_idx, n_segs, n_pens)` (`render.py`)
+maps pen index as `seg_idx * n_pens // n_segs`, so with the ~6-point in-RAM
+fallback trail (shown before the network `trace_recent` seed resolves) each
+segment jumps a large fraction of the pen range -- an obvious, chunky fade.
+Once the ~40-60 point network trace replaces it, the same formula spends most
+of the trail at the dimmest pen and only ramps through the rest over the last
+few segments, so it reads noticeably flatter. Not fixed here -- worth
+revisiting so the fade reads the same regardless of point count, e.g. by
+fading over a fixed *distance* or *time span* along the trail rather than a
+fixed *fraction of points*.
+
 
 ## 4. Retire the speed arrow (`draw_track_arrow`)?
 

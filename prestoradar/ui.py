@@ -7,6 +7,35 @@ from netlog import log
 WIDTH, HEIGHT = 480, 480               # fixed: this hardware's full_res display size
 
 
+def hit_test(last_drawn, tx, ty, hit_radius):
+    """Nearest entry in `last_drawn` ([(x, y, plane), ...], as stashed by
+    Renderer.draw_planes()) within `hit_radius` px of (tx, ty), or None if
+    nothing is close enough. Pulled out of handle_tap's own nearest-hit
+    search so radar.py's touch-down prefetch can reuse the exact same test
+    the eventual tap will use, rather than a second, possibly-diverging
+    copy."""
+    best, best_d = None, hit_radius * hit_radius
+    for x, y, p in last_drawn:
+        d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
+        if d < best_d:
+            best, best_d = p, d
+    return best
+
+
+def _nearest_visible(planes, hidden):
+    """The plane with the smallest `dst` (nm from centre, from the feed)
+    among `planes` not excluded by `hidden(p)`, or None if there isn't one.
+    Used to pick an idle-cycle trace-prefetch candidate -- the aircraft a
+    user's eye (and thumb) is most likely to land on next."""
+    best, best_dst = None, None
+    for p in planes:
+        if hidden(p) or p.dst is None:
+            continue
+        if best_dst is None or p.dst < best_dst:
+            best, best_dst = p, p.dst
+    return best
+
+
 def _advance_selection(selected, level, tapped, cycle_len=3):
     """Tap-cycle state machine. `tapped` is the plane under the tap, or None
     for empty space. `cycle_len` is how many stages the cycle has -- 2 in
@@ -138,6 +167,16 @@ class UI:
             h = self.selected.hex
             self.set_selected(next((q for q in fresh
                                      if q.hex == h and not self.hidden(q)), None))
+        # Trace prefetch (bounded design, adsb-radar-echoes): warm the trace
+        # cache for whichever aircraft is nearest the centre, once per feed
+        # cycle -- the aircraft a user's eye/thumb is statistically most
+        # likely to land on next. traces.request() already no-ops on a
+        # pending or TTL-fresh entry, so calling it here regardless of
+        # today's selection is cheap and never duplicates a fetch.
+        nearest = _nearest_visible(fresh, self.hidden)
+        if nearest is not None:
+            log("prefetch: nearest-to-centre", nearest.label, "dst", nearest.dst, "nm")
+            traces.request(nearest)
 
     # --- Settings overlay (PLAN 2b phase 1: in-memory toggles, no persistence) --
 
@@ -223,11 +262,7 @@ class UI:
 
         # Normal nearest-hit search FIRST, so a tap that's clearly on another
         # aircraft selects it even while something else is selected.
-        best, best_d = None, self.hit_radius * self.hit_radius
-        for x, y, p in self.renderer.last_drawn:
-            d = (x - tx) * (x - tx) + (y - ty) * (y - ty)
-            if d < best_d:
-                best, best_d = p, d
+        best = hit_test(self.renderer.last_drawn, tx, ty, self.hit_radius)
 
         # Widened target is only a FALLBACK: no normal hit landed, but the tap
         # is within ~1.6x the hit radius of the current selection -- treat it
