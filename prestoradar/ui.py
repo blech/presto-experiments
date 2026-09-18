@@ -22,12 +22,14 @@ def hit_test(last_drawn, tx, ty, hit_radius):
 
 def _enqueue_eligible(p):
     """True if p should be enqueued for a trace backfill: never attempted
-    yet, and airborne. A grounded aircraft has little or no history for
-    trace_recent to backfill (it likely just took off), so it's left
+    yet, airborne, and has a known distance from centre. A grounded
+    aircraft has little or no history for trace_recent to backfill (it
+    likely just took off); a plane with dst is None (adsb.lol sometimes
+    omits it) has no usable priority for the queue. Either way it's left
     un-enqueued and simply re-checked next cycle -- see
     docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md's "Skip
     heuristic"."""
-    return p.traced is False and not p.on_ground
+    return p.traced is False and not p.on_ground and p.dst is not None
 
 
 def _advance_selection(selected, level, tapped, cycle_len=3):

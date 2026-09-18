@@ -1,5 +1,7 @@
 import asyncio
 
+from netlog import log
+
 
 class Queue:
     """Generic priority-ordered, single-concurrency, paced work queue.
@@ -25,14 +27,19 @@ class Queue:
         (list.sort() is stable)."""
         if not self._pending:
             return None
-        self._pending.sort(key=lambda entry: entry[0])
+        self._pending.sort(key=lambda entry: (entry[0] is None, entry[0]))
         return self._pending.pop(0)[1]
 
     async def run(self, process_one):
         """Drain one entry per `interval_ms`, calling `process_one(key)`.
-        Runs forever -- start as its own asyncio task."""
+        Runs forever -- start as its own asyncio task. Guards the loop
+        body the same way radar.py's _render_loop/_touch_loop and feed.py's
+        run() already do, so one bad entry can't kill the whole gather()."""
         while True:
-            key = self._pop()
-            if key is not None:
-                await process_one(key)
+            try:
+                key = self._pop()
+                if key is not None:
+                    await process_one(key)
+            except Exception as e:  # noqa: BLE001
+                log("fetchqueue: drain error:", repr(e))
             await asyncio.sleep(self._interval_ms / 1000.0)

@@ -139,7 +139,12 @@ async def backfill(plane):
         raw = None
         gc.collect()
 
-    pts = _project(data)
+    try:
+        pts = _project(data)
+    except Exception as e:  # noqa: BLE001
+        log("trace:", h, "project failed:", repr(e))
+        _apply(plane, None)
+        return
     _apply(plane, pts)
     mem = gc.mem_free() if hasattr(gc, "mem_free") else "n/a"   # CPython has no mem_free
     log("trace:", h, "->", len(pts) if pts else 0, "points  mem", mem)

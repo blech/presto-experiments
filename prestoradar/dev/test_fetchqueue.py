@@ -58,11 +58,21 @@ def test_enqueue_after_partial_drain():
     _eq(q._pop(), "a", "then whatever was left")
 
 
+def test_pop_tolerates_none_priority():
+    from fetchqueue import Queue
+    q = Queue(interval_ms=1500)
+    q.enqueue("real", 5.0)
+    q.enqueue("nullish", None)
+    _eq(q._pop(), "real", "a real priority still sorts before a None one")
+    _eq(q._pop(), "nullish", "a None priority pops last, not a crash")
+
+
 def main():
     test_empty_pop_is_none()
     test_lowest_priority_first()
     test_ties_preserve_insertion_order()
     test_enqueue_after_partial_drain()
+    test_pop_tolerates_none_priority()
     print("fetchqueue.Queue: all assertions passed")
     return 0
 

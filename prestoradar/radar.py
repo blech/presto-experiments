@@ -81,7 +81,7 @@ _feed = feed.Feed(RADAR_HOST, RADAR_PATH, USER_AGENT, LEVEL_RATE_FPM, FETCH_INTE
 # backfill, draining slowly enough to stay under adsb.lol's shared courtesy
 # budget alongside the position poll above and any route lookups routes.py
 # makes on a tap.
-_trace_queue = fetchqueue.Queue(TRACE_QUEUE_INTERVAL_MS)
+_trace_queue = fetchqueue.Queue(getattr(_settings_module, "TRACE_QUEUE_INTERVAL_MS", 1500))
 
 async def _process_traced_hex(hex_id):
     # Resolve against feed's *current* registry, not whatever Plane existed
