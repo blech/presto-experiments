@@ -69,8 +69,8 @@ def test_carry_forward():
                     "ccddee": already_missing, "ddeeff": expired}
     fresh_by_hex = {"aabbcc": kept}
 
-    carried = _carry_forward(prev_by_hex, fresh_by_hex, now_ms=76_000,
-                              carry_forward_ms=75_000)
+    carried, dropped = _carry_forward(prev_by_hex, fresh_by_hex, now_ms=76_000,
+                                       carry_forward_ms=75_000)
 
     _eq(dropped_now.missing_since, 76_000,
         "a newly-missing plane is timestamped with now")
@@ -80,12 +80,24 @@ def test_carry_forward():
         "a plane missing longer than carry_forward_ms is not carried forward")
     _eq(kept.missing_since, None,
         "a plane present in the fresh response is left alone (from_feed() clears it)")
+    _eq(dropped, 1, "one candidate (the expired plane) fell outside the window")
+
+
+def test_carry_forward_reports_zero_dropped_when_nothing_expires():
+    from feed import _carry_forward
+
+    p = _P("aabbcc")
+    carried, dropped = _carry_forward({"aabbcc": p}, {}, now_ms=1_000,
+                                       carry_forward_ms=75_000)
+    _eq([q.hex for q in carried], ["aabbcc"], "still within the window")
+    _eq(dropped, 0, "nothing expired this cycle")
 
 
 def main():
     test_resolve()
     test_reject_snapshot()
     test_carry_forward()
+    test_carry_forward_reports_zero_dropped_when_nothing_expires()
     print("feed.py: resolve() + _reject_snapshot() + _carry_forward(): all assertions passed")
     return 0
 

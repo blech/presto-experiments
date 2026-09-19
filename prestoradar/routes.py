@@ -48,10 +48,13 @@ _MAX_ENTRIES = 75
 def _evict_oldest():
     """Drop the single oldest entry (by insertion/last-touch order) from
     both _cache and _tries together, so the two dicts never fall out of
-    sync. A no-op on an empty cache."""
+    sync. A no-op on an empty cache. Logged -- rare enough on a normal
+    session (only once _MAX_ENTRIES distinct callsigns have been tracked)
+    that it's worth a line rather than staying silent."""
     if not _cache:
         return
     oldest = next(iter(_cache))
+    log("route cache: evicting", oldest, "(at capacity,", _MAX_ENTRIES, "entries)")
     del _cache[oldest]
     _tries.pop(oldest, None)
 

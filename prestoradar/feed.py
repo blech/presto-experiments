@@ -43,15 +43,20 @@ def _carry_forward(prev_by_hex, fresh_by_hex, now_ms, carry_forward_ms=_CARRY_FO
     """Planes present in prev_by_hex but absent from fresh_by_hex this cycle,
     kept alive for up to carry_forward_ms since they were last actually seen
     (Plane.missing_since, cleared by Plane.from_feed() whenever a hex is seen
-    again). Mutates each newly-missing plane's missing_since in place; a
-    plane already past the window is left off the returned list (and so
-    drops out of the feed, same as today's behaviour with no carry-forward).
+    again). Mutates each newly-missing plane's missing_since in place.
+
+    Returns (carried, dropped): carried is the list of planes still inside
+    the window (so they drop out of the feed, same as today's behaviour with
+    no carry-forward). dropped -- how many candidates fell outside it this
+    cycle -- lets the caller log a one-line summary without a second pass
+    over prev_by_hex.
 
     ticks_diff defaults to plain subtraction, fine for a desktop test's
     plain-int timestamps; the real caller passes time.ticks_diff so a
     MicroPython ticks_ms() wraparound (matters for a display left running
     for days) is handled correctly."""
     carried = []
+    dropped = 0
     for h, p in prev_by_hex.items():
         if h in fresh_by_hex:
             continue
@@ -59,7 +64,9 @@ def _carry_forward(prev_by_hex, fresh_by_hex, now_ms, carry_forward_ms=_CARRY_FO
             p.missing_since = now_ms
         if ticks_diff(now_ms, p.missing_since) <= carry_forward_ms:
             carried.append(p)
-    return carried
+        else:
+            dropped += 1
+    return carried, dropped
 
 
 class Feed:
@@ -158,10 +165,14 @@ class Feed:
         # still within its window since last really seen (DATA_TODOS.md #4) --
         # a feed hiccup or edge-of-range flicker keeps dead-reckoning instead
         # of popping off the scope and reappearing later as a "new" contact.
-        for p in _carry_forward(self._by_hex, by_hex, time.ticks_ms(),
-                                 ticks_diff=time.ticks_diff):
+        carried, expired = _carry_forward(self._by_hex, by_hex, time.ticks_ms(),
+                                           ticks_diff=time.ticks_diff)
+        for p in carried:
             planes.append(p)
             by_hex[p.hex] = p
+        if carried or expired:
+            log("fetch: carried", len(carried), "expired", expired,
+                "(past %ds)" % (_CARRY_FORWARD_MS // 1000))
 
         # Not committed to self._by_hex here: run()'s snapshot guard may
         # still reject this whole result and keep the previous planes list,
