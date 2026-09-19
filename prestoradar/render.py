@@ -107,7 +107,9 @@ def _data_block(p):
     return (cs, "%s %dkt" % (lvl, round(p.gs or 0)), p.type or "?")
 
 
-_CARD_W, _CARD_H = 232, 220
+_CARD_W, _CARD_H = 192, 192   # square; sized for label + at most one optional
+#                               row (operator OR emergency, never both -- see
+#                               draw_card()) + the 7 fixed rows + padding
 
 
 def _card_corner(bx, by):
@@ -667,14 +669,17 @@ class Renderer:
         row = y + 8
         self._ptext(p.label, tx, row, 16, self.RADAR_TEXT_PEN, avail=avail_tx)
         row += 22
-        op = p.operator
-        if op:
-            self._ptext(op, tx, row, 16, self.PANEL_LABEL, clip=True, avail=avail_tx)
-            row += 19
+        # At most one optional row: an emergency outranks the operator name,
+        # so it takes the same slot rather than adding a second one -- the
+        # card's fixed height only budgets for one (see _CARD_H above).
         em = p.emergency
+        op = p.operator
         if em and em != "none":
             self._ptext("! " + str(em).upper(), tx, row, 16, self.EMERG_PEN,
                         avail=avail_tx)
+            row += 19
+        elif op:
+            self._ptext(op, tx, row, 16, self.PANEL_LABEL, clip=True, avail=avail_tx)
             row += 19
         td = p.type_description
         vr = p.vrate
