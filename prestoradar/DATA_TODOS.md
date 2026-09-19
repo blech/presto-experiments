@@ -49,32 +49,36 @@ own `plausible` flag (always truthy) that ruled out trusting it.
 
 ### 1. A second position source + a small failure breaker
 
+**Done.** `Feed.__init__` takes an optional `fallback=(host, path, key)` --
+`radar.py` wires it to `opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{nm}`,
+key `"aircraft"` (adsb.lol's is `"ac"`), gated by a new `settings.ADSBFI_FALLBACK`
+toggle (default on). `_fetch()` only queries it when the primary comes back
+empty -- a request/HTTP/JSON failure, or a technically-successful-but-empty
+response (the `200` + `null` "unhappy backend" case this item was written
+for) -- via a pure `_combine_sources()` decision that's careful not to
+confuse "both sources genuinely have nothing in range right now" with "both
+sources are down." A normal cycle with real primary data never touches the
+fallback: no extra request or RAM cost, as specced.
+
+A new `_consecutive_failures` counter (independent of #5's `_stale_cycles` --
+a too-small-but-real fetch is a different problem with a different remedy)
+drives `_backoff_interval()`: after 3 consecutive fully-failed cycles (both
+sources down or no fallback configured), `run()`'s sleep between fetches
+stretches from `FETCH_INTERVAL_MS` to 5 minutes, snapping back the moment
+either source succeeds. Matches `flyover-alert`'s reference
+(`threshold=4, cooldown=300`) closely enough; `velocity`'s daily 0000-UTC
+breaker was correctly judged overkill here and not built.
+
+See `dev/test_feed.py` for the pure-helper coverage (`_extract_aircraft`,
+`_combine_sources`, `_backoff_interval`); the actual dual-host network path
+is on-device-only verification, like every other network path in this
+codebase. `radar.py`'s `ADSBFI_PATH` reads `CENTER_LAT`/`CENTER_LON` off
+`_settings_module` directly rather than the star-imported bare names
+`RADAR_PATH` uses, so it adds no new `ruff` `F405` hits to radar.py's
+pre-existing count.
+
 **Borrowed from:** `flyover-alert` (adsb.lol -> adsb.fi, each behind its own
 circuit breaker).
-
-**Why:** one flaky source is currently a blank scope. `routes.py._get_json()`
-already notes adsb.lol answering `200` with `null` "when its backend is
-unhappy", and the feed has no answer to that beyond skipping the cycle. A
-prolonged adsb.lol wobble means the radar just shows nothing until it recovers.
-
-**Do:**
-
-- Add adsb.fi as a fallback: `opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{nm}`.
-  Note the results key is `aircraft`, not `ac` -- `_fetch()` needs to know which
-  key to read per source (a `(host, path_template, key)` tuple, the shape
-  `flyover-alert`'s `FEEDS` uses).
-- Try the fallback only when the primary fails, returns non-200, or parses to
-  `null` / an empty `ac`. A good cycle never touches it, so there's no extra
-  steady-state RAM or request cost.
-- Add a consecutive-failure backoff: after N failed fetches (N ~= 3), stretch
-  the interval to ~5 min until one succeeds, then snap back to
-  `FETCH_INTERVAL_MS`. This stops the device hammering a dead endpoint every
-  30 s and churning `gc` on each timeout. `flyover-alert`'s breaker
-  (`threshold=4, cooldown=300`) is the reference; `velocity`'s daily
-  0000-UTC breaker is overkill here.
-
-**Cost:** ~30 lines in `feed.py`, one host constant, a `settings.py` toggle if
-the fallback should be optional. No new memory in the common case.
 
 
 ### 2. A baked local type / registration table for the inspect panel

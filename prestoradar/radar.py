@@ -69,12 +69,24 @@ RADAR_HOST = "api.adsb.lol"
 RADAR_PATH = f"/v2/point/{CENTER_LAT}/{CENTER_LON}/{RADIUS_NM}"
 RADAR_URL = f"https://{RADAR_HOST}{RADAR_PATH}"  # kept for logging / radar_debug.py
 
+# Second position source (DATA_TODOS.md #1): same shape query, a different
+# host/path/response-key. Only ever queried when adsb.lol comes back empty
+# (feed.Feed._fetch()) -- a normal cycle never touches it.
+ADSBFI_HOST = "opendata.adsb.fi"
+# Off _settings_module directly, not the bare star-imported names RADAR_PATH
+# uses above -- avoids two more ruff F405 hits on radar.py's pre-existing
+# star-import count for no behaviour difference (same values either way).
+ADSBFI_PATH = (f"/api/v2/lat/{_settings_module.CENTER_LAT}"
+               f"/lon/{_settings_module.CENTER_LON}/dist/{RADIUS_NM}")
+ADSBFI_FALLBACK = getattr(_settings_module, "ADSBFI_FALLBACK", 1)
+
 PX_PER_KM = 230.0 / RADIUS_KM        # outer ring sits at RADIUS_KM
 
 # Fetch/parse lives in feed.py (REFACTORING.md #1); this instance is the one
 # mutable source of truth for the aircraft list, replacing the module
 # globals (_planes/_fetch_count/_fetch_ok) radar.py used to hold directly.
-_feed = feed.Feed(RADAR_HOST, RADAR_PATH, USER_AGENT, LEVEL_RATE_FPM, FETCH_INTERVAL_MS)
+_feed = feed.Feed(RADAR_HOST, RADAR_PATH, USER_AGENT, LEVEL_RATE_FPM, FETCH_INTERVAL_MS,
+                   fallback=(ADSBFI_HOST, ADSBFI_PATH, "aircraft") if ADSBFI_FALLBACK else None)
 
 # Trace-backfill queue (docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md):
 # one shared, paced priority queue for every aircraft's one-time trace_recent

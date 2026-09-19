@@ -23,6 +23,15 @@ _MAX_STALE_CYCLES = 3
 # instead of popping off the scope and reappearing later as a "new" contact.
 _CARRY_FORWARD_MS = 75_000
 
+# Second position source + failure breaker (DATA_TODOS.md #1): after this
+# many consecutive fully-failed fetches (both primary and fallback, or no
+# fallback configured), stretch the poll interval to _BREAKER_COOLDOWN_MS
+# instead of hammering a dead endpoint every fetch_interval_ms and churning
+# gc on each timeout. Snaps back to normal the moment either source
+# succeeds. Reference: flyover-alert's breaker (threshold=4, cooldown=300).
+_BREAKER_THRESHOLD = 3
+_BREAKER_COOLDOWN_MS = 300_000
+
 
 def _reject_snapshot(new_count, old_count, stale_cycles, min_retain_fraction=_MIN_RETAIN_FRACTION,
                       max_stale_cycles=_MAX_STALE_CYCLES):
@@ -69,6 +78,48 @@ def _carry_forward(prev_by_hex, fresh_by_hex, now_ms, carry_forward_ms=_CARRY_FO
     return carried, dropped
 
 
+def _extract_aircraft(data, key):
+    """The aircraft list from a parsed source response, or [] if data is
+    None or the key is missing/null. adsb.lol has been seen to answer 200
+    with a null `ac` "when its backend is unhappy" (routes.py's _get_json
+    has the same note for its own endpoints); an empty list here is the
+    trigger to try the fallback source, same as a request/parse failure."""
+    return (data.get(key) if data else None) or []
+
+
+def _combine_sources(primary_data, primary_aircraft, fallback_attempted,
+                      fallback_data, fallback_aircraft):
+    """Decide the aircraft list + overall success for one fetch cycle.
+
+    fallback_attempted is False whenever the primary already had aircraft
+    (the common case -- no second request, no extra cost) or no fallback is
+    configured; fallback_data/fallback_aircraft are only meaningful when it's
+    True.
+
+    Returns (aircraft, ok). ok is False only when neither source produced a
+    parseable response at all -- an empty aircraft list from a source that
+    DID respond (both up, genuinely nothing in range right now) is a
+    legitimate result, not a failure, and must not trip the caller's
+    consecutive-failure breaker."""
+    if not fallback_attempted:
+        return primary_aircraft, primary_data is not None
+    if fallback_data is not None:
+        return fallback_aircraft, True
+    # The fallback was tried and also failed outright -- fall back to
+    # whatever the primary gave (its own empty-but-valid result if it had
+    # one, or its own failure if it didn't).
+    return primary_aircraft, primary_data is not None
+
+
+def _backoff_interval(consecutive_failures, normal_interval_ms,
+                       threshold=_BREAKER_THRESHOLD, cooldown_ms=_BREAKER_COOLDOWN_MS):
+    """The sleep interval for run()'s next cycle: cooldown_ms once
+    consecutive_failures has reached threshold (both sources down for that
+    many cycles running), otherwise the normal interval. Snaps back the
+    moment a fetch succeeds (the caller resets consecutive_failures to 0)."""
+    return cooldown_ms if consecutive_failures >= threshold else normal_interval_ms
+
+
 class Feed:
     """Owns the fetched aircraft list and its fetch lifecycle. `planes`/
     `fetch_count`/`fetch_ok` replace the module globals radar.py used to
@@ -82,12 +133,19 @@ class Feed:
     any other UI concept, exists.
     """
 
-    def __init__(self, host, path, user_agent, level_rate_fpm, fetch_interval_ms):
+    def __init__(self, host, path, user_agent, level_rate_fpm, fetch_interval_ms,
+                 fallback=None):
         self.host = host
         self.path = path
         self.user_agent = user_agent
         self.level_rate_fpm = level_rate_fpm
         self.fetch_interval_ms = fetch_interval_ms
+        # Second position source (DATA_TODOS.md #1): None, or a
+        # (host, path, key) tuple -- adsb.fi's response key is "aircraft",
+        # not adsb.lol's "ac". Only ever queried when the primary comes back
+        # empty (failure or a genuinely empty result); a good cycle never
+        # touches it.
+        self.fallback = fallback
         self.planes = []
         self.fetch_count = 0     # completed fetch attempts, any outcome (0 == still loading)
         self.fetch_ok = False    # did the most recent attempt succeed?
@@ -104,6 +162,12 @@ class Feed:
         # Consecutive fetches rejected by the snapshot sanity guard
         # (DATA_TODOS.md #5) -- see _reject_snapshot()'s anti-lockout note.
         self._stale_cycles = 0
+        # Consecutive fully-failed fetches (neither source produced anything
+        # usable) -- drives the backoff breaker, see _backoff_interval().
+        # Distinct from _stale_cycles: a too-small-but-real fetch is a
+        # different problem with a different remedy (keep the old list, not
+        # slow down polling).
+        self._consecutive_failures = 0
 
     def resolve(self, hex_id):
         """The current Plane for hex_id, or None if it isn't (or is no
@@ -113,34 +177,62 @@ class Feed:
         outlive the aircraft's time on screen."""
         return self._by_hex.get(hex_id)
 
-    async def _fetch(self):
-        """Pull the current aircraft list from adsb.lol.
-
-        Returns a list of Plane objects (see plane.py) holding position in
-        the metric frame (e, n) and a per-second velocity (ve, vn) for dead
-        reckoning between fetches, or None if the fetch/parse failed (the
-        caller keeps animating the old list).
-        """
-        gc.collect()
+    async def _fetch_source(self, host, path):
+        """GET + JSON-parse one source. Returns the parsed body, or None on
+        any failure (network error, non-200, bad JSON) -- never raises."""
         try:
-            status, body = await net.http_get(self.host, self.path, self.user_agent)
+            status, body = await net.http_get(host, path, self.user_agent)
         except Exception as e:  # noqa: BLE001
-            log("fetch: request failed:", repr(e))
+            log("fetch: request failed:", host, repr(e))
             return None
 
-        log("fetch: HTTP", status, len(body), "bytes")
+        log("fetch: HTTP", status, len(body), "bytes", "(%s)" % host)
         if status != 200:
-            log("fetch: HTTP", status, body[:200])
+            log("fetch: HTTP", status, body[:200], "(%s)" % host)
             return None
 
         try:
-            data = json.loads(body)
+            return json.loads(body)
         except ValueError as e:
-            log("fetch: bad JSON:", repr(e), len(body), "bytes")
+            log("fetch: bad JSON:", repr(e), len(body), "bytes", "(%s)" % host)
             return None
         finally:
             body = None
             gc.collect()
+
+    async def _fetch(self):
+        """Pull the current aircraft list from adsb.lol, falling back to
+        self.fallback (adsb.fi, DATA_TODOS.md #1) only when the primary
+        comes back empty -- a request/HTTP/JSON failure, or a technically-
+        successful-but-empty response (adsb.lol has been seen to answer 200
+        with a null `ac` "when its backend is unhappy"). A normal cycle with
+        real primary data never touches the fallback: no extra request or
+        RAM cost.
+
+        Returns a list of Plane objects (see plane.py) holding position in
+        the metric frame (e, n) and a per-second velocity (ve, vn) for dead
+        reckoning between fetches, or None if nothing usable came back from
+        either source (the caller keeps animating the old list and counts
+        this towards the failure breaker, _backoff_interval()).
+        """
+        gc.collect()
+        primary_data = await self._fetch_source(self.host, self.path)
+        primary_aircraft = _extract_aircraft(primary_data, "ac")
+
+        fallback_attempted = not primary_aircraft and self.fallback is not None
+        fallback_data = fallback_aircraft = None
+        if fallback_attempted:
+            fb_host, fb_path, fb_key = self.fallback
+            log("fetch: primary empty/failed -- trying fallback", fb_host)
+            fallback_data = await self._fetch_source(fb_host, fb_path)
+            fallback_aircraft = _extract_aircraft(fallback_data, fb_key)
+            if fallback_data is not None:
+                log("fetch: fallback", fb_host, "->", len(fallback_aircraft), "aircraft")
+
+        ac_list, ok = _combine_sources(primary_data, primary_aircraft,
+                                        fallback_attempted, fallback_data, fallback_aircraft)
+        if not ok:
+            return None
 
         # Per-aircraft decode lives in Plane.from_feed() (REFACTORING.md
         # #10) -- it returns None for an entry with no position, which used
@@ -149,7 +241,7 @@ class Feed:
         # here: every aircraft the feed returns is real data.
         planes = []
         by_hex = {}
-        for aircraft in data.get("ac", []) or []:
+        for aircraft in ac_list:
             h = aircraft.get("hex") or ""
             # Reuse last fetch's Plane for this hex so its trail carries over
             # (Plane.from_feed updates it in place); a first sighting gets a
@@ -199,6 +291,16 @@ class Feed:
                 fresh = None
             self.fetch_count += 1
 
+            # Failure breaker (DATA_TODOS.md #1): tracked on _fetch()'s raw
+            # result, before the snapshot guard below can turn a technically-
+            # successful-but-small fetch into None -- that's a different
+            # problem (kept the old list) from "neither source produced
+            # anything at all," which is what should slow down polling.
+            if fresh is None:
+                self._consecutive_failures += 1
+            else:
+                self._consecutive_failures = 0
+
             # Snapshot sanity guard (DATA_TODOS.md #5): a suspiciously small
             # fetch (a partial or null-ish adsb.lol response) keeps the
             # previous list instead of blanking or gutting the scope for a
@@ -221,4 +323,9 @@ class Feed:
                     self.on_update(fresh)
                 log("fetch done:", len(self.planes), "planes",
                     time.ticks_diff(time.ticks_ms(), t), "ms  mem", gc.mem_free())
-            await asyncio.sleep_ms(self.fetch_interval_ms)
+
+            interval = _backoff_interval(self._consecutive_failures, self.fetch_interval_ms)
+            if interval != self.fetch_interval_ms:
+                log("fetch: breaker active --", self._consecutive_failures,
+                    "consecutive failures, sleeping", interval // 1000, "s")
+            await asyncio.sleep_ms(interval)

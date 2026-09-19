@@ -42,6 +42,12 @@ ANIM_INTERVAL = 0.5          # seconds between dead-reckoning redraws (~2 fps)
 # See docs/superpowers/specs/2026-09-18-trace-fetch-queue-design.md.
 TRACE_QUEUE_INTERVAL_MS = 1500
 
+# Fall back to adsb.fi (opendata.adsb.fi) when adsb.lol comes back empty --
+# a request/HTTP/JSON failure, or a technically-successful-but-empty
+# response (DATA_TODOS.md #1). 0 disables the fallback entirely; adsb.lol's
+# own failures then just keep the previous list, as before this setting.
+ADSBFI_FALLBACK = 1
+
 DRAW_BASEMAP = 1             # 0 to skip the coastline layer entirely
 SKIP_NETWORK = 0             # 1 = don't connect or fetch, just draw grid + basemap
 
