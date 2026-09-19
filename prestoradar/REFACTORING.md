@@ -618,12 +618,9 @@ carried-over data") than the display count is.
 
 Not asked for, but adjacent enough to flag:
 
-- **`routes.py`'s cache is still unbounded** (already noted as open in PLAN
-  item 2a, before the module existed) — one entry per distinct callsign
-  ever tapped, for the life of the process. Harmless over a normal
-  session, but worth a simple cap (e.g. drop the oldest entry past N) now
-  that it's contained to `routes.py`'s own `_cache` rather than letting it
-  grow forever on a display left running for days. Still open.
+- **`routes.py`'s cache is bounded.** **Done** (DATA_TODOS.md #3) — capped at
+  `_MAX_ENTRIES = 75`, oldest-key eviction plus a touch-on-read recency bump,
+  contained entirely to `routes.py`'s own `_cache`/`_tries`.
 - **`SKIP_NETWORK` runs a separate, hand-duplicated loop** (`main()`,
   1030-1039): a plain `while True: draw_scene([]); time.sleep(1)` with no
   touch handling at all, instead of the real `asyncio.gather` path with an

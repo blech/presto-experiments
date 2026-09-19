@@ -133,6 +133,7 @@ def main():
     _eq(len(r.trail), 1, "a new Plane's trail is seeded with its first fix")
     _eq(r.trail[0], (r.e, r.n, r.alt), "a trail fix is (e, n, alt)")
     _eq(r.traced, False, "a new Plane starts un-traced")
+    _eq(r.missing_since, None, "a new Plane starts with missing_since=None")
 
     ac1 = dict(ac0, lat=52.1, lon=-0.1, alt_baro=11000)
     r2 = Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)
@@ -142,14 +143,19 @@ def main():
     r.traced = True   # simulate a completed backfill
     Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)
     _eq(r.traced, True, "a repeat sighting (into=) never resets traced")
+
+    r.missing_since = 12345   # simulate a carried-forward aircraft
+    Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)
+    _eq(r.missing_since, None, "a fresh sighting clears missing_since")
     ex1, ny1 = geometry.project(52.1, -0.1)
     _close(r.trail[-1][0], ex1, "the newest trail fix is the new projected position")
 
     skipped = Plane.from_feed({"hex": "abc123"}, _LEVEL_RATE_FPM, into=r)
     _eq(skipped, None, "a no-position entry returns None even with into= set")
-    # 3, not 2: the traced-preservation from_feed() call two lines above also
-    # appended a fix, so this only checks that *this* call added nothing.
-    _eq(len(r.trail), 3, "a skipped entry leaves the trail alone")
+    # 4, not 2: the traced-preservation and missing_since-reset from_feed()
+    # calls above each also appended a fix, so this only checks that *this*
+    # call added nothing.
+    _eq(len(r.trail), 4, "a skipped entry leaves the trail alone")
 
     for _ in range(_TRAIL_MAX + 5):
         Plane.from_feed(ac1, _LEVEL_RATE_FPM, into=r)

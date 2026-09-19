@@ -248,6 +248,14 @@ class Renderer:
         self.MAP_VSTATE_PENS = dict(self.RADAR_VSTATE_PENS)
         self.MAP_VSTATE_PENS["level"] = self.MAP_TEXT_PEN
 
+        # Carried-forward (DATA_TODOS.md #4): an aircraft absent from the
+        # latest fetch but still within its carry-forward window keeps
+        # dead-reckoning, dimmed to a dull grey so it reads as "last known,
+        # not confirmed" rather than a normal live contact -- one pen per
+        # theme, overriding vstate/mono entirely (see plane_pen()).
+        self.RADAR_STALE_PEN = display.create_pen(90, 90, 90)
+        self.MAP_STALE_PEN = display.create_pen(160, 160, 160)
+
         # What's actually behind the drawing decides which pens to use --
         # keyed by self.backdrop.showing_raster (whether the raster backdrop
         # is actually showing), NOT by DISPLAY_MODE: the vector-grid fallback
@@ -255,9 +263,9 @@ class Renderer:
         # while DISPLAY_MODE == "map". See theme().
         self.THEMES = {
             "radar": {"text": self.RADAR_TEXT_PEN, "icon": self.RADAR_ICON_COLOR,
-                      "vstate": self.RADAR_VSTATE_PENS},
+                      "vstate": self.RADAR_VSTATE_PENS, "stale": self.RADAR_STALE_PEN},
             "map":   {"text": self.MAP_TEXT_PEN, "icon": self.MAP_ICON_COLOR,
-                      "vstate": self.MAP_VSTATE_PENS},
+                      "vstate": self.MAP_VSTATE_PENS, "stale": self.MAP_STALE_PEN},
         }
 
         self.PANEL_BG = display.create_pen(16, 26, 16)
@@ -502,6 +510,11 @@ class Renderer:
         # washed-out white the legend fix moved away from. Extra schemes go
         # here.
         theme = self.theme()
+        if p.missing_since is not None:
+            # Carried-forward (DATA_TODOS.md #4): dimmed regardless of
+            # COLOUR_MODE -- "last known, not confirmed" overrides both the
+            # vstate and mono looks, not just adds to them.
+            return theme["stale"]
         if self.settings.COLOUR_MODE == "alt":
             # .get(), not [p.vstate] -- see draw_legend_alt()'s comment on
             # the same lookup; feed.py only ever sets one of the three known

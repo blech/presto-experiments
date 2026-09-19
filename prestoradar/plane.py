@@ -34,7 +34,7 @@ class Plane:
     __slots__ = ("callsign", "e", "n", "ve", "vn", "heading", "gs",
                  "vstate", "cat", "hex", "reg", "type", "desc", "alt",
                  "vrate", "squawk", "emergency", "dst", "dir", "trail",
-                 "traced")
+                 "traced", "missing_since")
 
     @classmethod
     def from_feed(cls, ac, level_rate_fpm, into=None):
@@ -61,6 +61,11 @@ class Plane:
         if into is None:
             p.trail = []
             p.traced = False   # not yet attempted -- see fetchqueue.py / traces.backfill()
+        # Set unconditionally, new or reused: reaching from_feed() at all means
+        # this hex was actually in this fetch's response, so any earlier
+        # carry-forward mark (feed.py's _carry_forward, DATA_TODOS.md #4) no
+        # longer applies -- the aircraft is live again, not missing.
+        p.missing_since = None
         p.alt = ac.get("alt_baro")           # feet, or the string "ground"
         p.gs = ac.get("gs") or 0.0           # ground speed, knots
         p.callsign = (ac.get("flight") or ac.get("hex", "")).strip()

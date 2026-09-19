@@ -106,50 +106,63 @@ the on-device decode. Size is the main constraint -- keep the first cut tiny.
 
 ### 3. Bound the route cache
 
+**Done.** `routes._cache` / `_tries` are capped at `_MAX_ENTRIES = 75`,
+evicted together as a pair so they never fall out of sync. Both CPython and
+MicroPython dicts preserve insertion order, so eviction is a plain "drop the
+oldest key" (`_evict_oldest()`) rather than a separate `OrderedDict`; `get()`
+calls `_touch()` to bump a still-displayed callsign to the recently-used end,
+so a route currently on screen isn't the one that gets dropped. `request()`
+evicts, if needed, only when it's about to add a genuinely new callsign --
+re-fetching an existing one never touches eviction order. See
+`dev/test_routes.py`.
+
 **Borrowed from:** `termradar` (`CachedRouteProvider` with TTL + eviction).
-
-**Why:** PLAN.md flags `routes._cache` / `_tries` as unbounded -- one entry per
-callsign ever tapped. On a device sharing RAM with a full-res framebuffer this
-is a real, if slow, leak.
-
-**Do:** cap at ~50-100 callsigns, LRU eviction, over the existing
-`(o,d)` / `None` / `""` / `"absent"` states. A resolved route can be dropped and
-re-fetched later at no correctness cost.
-
-**Cost:** small -- an `OrderedDict` or a manual move-to-front on hit.
 
 
 ### 4. Carry-forward for dropped contacts
 
+**Done.** `Feed._fetch()` merges the fresh response into the previous
+`_by_hex` by hex instead of replacing wholesale: an aircraft absent from one
+fetch keeps dead-reckoning from its last fix (`Plane.missing_since`, set the
+first cycle it's absent, cleared by `Plane.from_feed()` the moment it
+reappears) for up to `_CARRY_FORWARD_MS` (75 s) since it was last actually
+seen, then drops. `render.py`'s `plane_pen()` dims a carried-forward
+aircraft to a dedicated `stale` theme pen, overriding vstate/mono. See
+`_carry_forward()` in `feed.py`, `dev/test_feed.py`, `dev/test_plane_pen.py`.
+
+One correctness wrinkle worth recording: `Feed._by_hex` can't be overwritten
+unconditionally inside `_fetch()` any more, because item 5's snapshot guard
+can still reject the whole result and keep the old `self.planes` -- if
+`_by_hex` had already been updated to the (rejected) small snapshot, the
+*next* cycle's carry-forward and object-reuse lookups would use a `_by_hex`
+out of step with `self.planes`. Fixed by having `_fetch()` stash the computed
+map as `self._pending_by_hex` and having `run()` commit it to `self._by_hex`
+only in the same branch that accepts `self.planes = fresh`.
+
 **Borrowed from:** `velocity` (`_merge_with_previous(max_age_s)`, a 180 s
 carry-forward window for contacts missing from a tick).
-
-**Why:** `_fetch()` replaces `self.planes` wholesale every cycle. An aircraft
-absent from a single response (feed hiccup, edge-of-range flicker) pops off the
-scope and reappears 30 s later, instead of continuing on its last known vector.
-The `(ve, vn)` needed to extrapolate it is already computed.
-
-**Do:** merge fresh into old by `hex` instead of replacing. Keep an unmatched
-plane for up to ~60-90 s, dead-reckoning from its last fix, with a `stale` /
-`age` field the renderer dims or fades. Drop it past the window.
-
-**Cost:** moderate -- an id-keyed merge in `feed.py`, a new field the renderer
-honours, and a decision on how stale reads visually.
 
 
 ### 5. Snapshot sanity guard
 
+**Done.** `Feed.run()` rejects a fetch whose aircraft count falls below
+`_MIN_RETAIN_FRACTION` (0.5) of the previous count and keeps the old list for
+that cycle, unless it's already been kept for `_MAX_STALE_CYCLES` (3) cycles
+in a row (the anti-lockout escape valve), in which case whatever comes back
+is accepted regardless of size. Pure predicate: `_reject_snapshot()` in
+`feed.py`; see `dev/test_feed.py`.
+
+In practice this now rarely fires on its own: item 4's carry-forward already
+backfills most of a partial/empty response with dimmed, still-alive contacts,
+so the merged count stays close to the previous one for a single bad cycle.
+The guard becomes the meaningful backstop only once carry-forward's own
+window starts expiring stale entries across several consecutive bad cycles --
+which is exactly when the anti-lockout limit is designed to let it through
+rather than getting stuck. Kept as a cheap, independent circuit breaker
+regardless -- the two mechanisms compose correctly, not redundantly.
+
 **Borrowed from:** `velocity` (`_SNAPSHOT_MIN_RETAIN_FRACTION` -- reject a new
 snapshot below 50% of the previous count unless the old one is already stale).
-
-**Why:** a partial or `null`-ish adsb.lol response can blank or gut the scope
-for a cycle. Cheap to reject.
-
-**Do:** if a fetch returns fewer than ~50% of the previous plane count, keep the
-old list for that cycle -- unless it's already older than a few intervals
-(anti-lockout). Pairs naturally with 1 and 4.
-
-**Cost:** a few lines in `Feed.run()`.
 
 
 ## Explicitly not doing

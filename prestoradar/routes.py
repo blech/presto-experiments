@@ -36,6 +36,32 @@ _cache = {}
 _tries = {}
 _MAX_TRIES = 4
 
+# Bound _cache/_tries so a display left running for days doesn't grow one
+# entry per distinct callsign ever tapped or tracked (DATA_TODOS.md #3).
+# Both CPython and MicroPython dicts preserve insertion order, so a plain
+# "drop the first key" eviction plus a touch-on-read bump (_touch(), called
+# from get()) is enough to behave like LRU-by-recency without a separate
+# structure.
+_MAX_ENTRIES = 75
+
+
+def _evict_oldest():
+    """Drop the single oldest entry (by insertion/last-touch order) from
+    both _cache and _tries together, so the two dicts never fall out of
+    sync. A no-op on an empty cache."""
+    if not _cache:
+        return
+    oldest = next(iter(_cache))
+    del _cache[oldest]
+    _tries.pop(oldest, None)
+
+
+def _touch(cs):
+    """Move cs to the most-recently-used end of _cache, if present. A no-op
+    if cs isn't cached."""
+    if cs in _cache:
+        _cache[cs] = _cache.pop(cs)
+
 
 def is_hex_id(cs):
     return len(cs) == 6 and all(c in "0123456789ABCDEF" for c in cs.upper())
@@ -229,6 +255,8 @@ def request(p):
         return                                  # in flight, or already resolved
     if cached is None and _tries.get(cs, 0) >= _MAX_TRIES:
         return                                  # looked up, unknown, gave up
+    if cs not in _cache and len(_cache) >= _MAX_ENTRIES:
+        _evict_oldest()
     _cache[cs] = ""                             # pending
     _tries[cs] = _tries.get(cs, 0) + 1
     lat, lon = geometry.unproject(p.e, p.n)
@@ -237,7 +265,11 @@ def request(p):
 
 def get(callsign):
     """Current cached state for callsign: an (origin, dest) tuple, None
-    (looked up, unknown), "" (pending), or "absent" (never requested)."""
+    (looked up, unknown), "" (pending), or "absent" (never requested). Bumps
+    callsign to the recently-used end of _cache -- called every panel
+    redraw for whatever's selected, so a route still on screen isn't the one
+    that gets evicted."""
+    _touch(callsign)
     return _cache.get(callsign, "absent")
 
 
