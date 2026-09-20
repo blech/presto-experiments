@@ -13,8 +13,10 @@ for _p in (os.path.join(_ROOT, "lib"), _PRESTORADAR):
 
 
 class _Plane:
-    def __init__(self, callsign):
+    def __init__(self, callsign, heading=None, gs=0):
         self.callsign = callsign
+        self.heading = heading
+        self.gs = gs
 
 
 def _eq(got, want, what):
@@ -49,6 +51,18 @@ def main():
     # A blank callsign is never placed and never blocks a later one.
     mixed = [(100, 100, _Plane("")), (108, 100, _Plane("REALCS"))]
     _eq(r._ambient_label_set(mixed), {1}, "blank callsign skipped, real one kept")
+
+    # Two blips at the exact same point would collide under the fixed
+    # (x+8, y-8) anchor -- but AAA111 heads NE (a tick is drawn, so its tag
+    # flips below the blip, TODOS.md 2026-09-19) while BBB222 has no heading
+    # (default anchor, above). The two boxes now occupy different vertical
+    # bands, so both survive the cull instead of one culling the other.
+    same_spot = [
+        (cx, cx, _Plane("AAA111", heading=45, gs=100)),
+        (cx, cx, _Plane("BBB222", heading=None, gs=0)),
+    ]
+    _eq(r._ambient_label_set(same_spot), {0, 1},
+        "heading-flipped anchor avoids a same-point collision with a default-anchor tag")
 
     print("Renderer._ambient_label_set: all assertions passed")
     return 0

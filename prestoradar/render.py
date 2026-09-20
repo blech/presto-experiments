@@ -91,6 +91,19 @@ _TAG_CH_W = 8       # eyeballed per-character advance for bitmap6 at _TAG_SCALE 
 _TAG_H = 16         # ~px tall
 
 
+def _tag_anchor_dy(tick_drawn, heading):
+    """Vertical offset (px) for a radar-mode tag/data-block anchor: -8
+    (above the blip, the long-standing default) normally; +8 (below)
+    when a direction tick is actually drawn (draw_track_arrow(), an
+    18 px line along heading_deg -- 0 = north, 90 = east, screen y grows
+    down) and it points into the same up-and-right zone the tag would
+    otherwise occupy (heading 0-90, roughly NE). Collision depends on
+    which way the aircraft is heading, not which side of the screen it's
+    on (TODOS.md 2026-09-19) -- a plane in any screen corner heading NE
+    has the same tick-vs-tag conflict."""
+    return 8 if (tick_drawn and heading is not None and 0 <= heading <= 90) else -8
+
+
 def _data_block(p):
     """Three short lines for the stage-2 on-scope ATC tag: callsign, then
     flight level + ground speed, then ICAO type. Altitude / 100 for FL
@@ -393,10 +406,12 @@ class Renderer:
         d.set_pen(self.BG_COLOR)
         d.circle(cx, cy, r - thickness)
 
-    def _label_box(self, x, y, text):
+    def _label_box(self, x, y, text, dy=-8):
         # The rect a callsign tag for `text` occupies, anchored at the blip
-        # the way _tag() draws it: top-left at (x + 8, y - 8).
-        return (x + 8, y - 8, len(text) * _TAG_CH_W, _TAG_H)
+        # the way _tag() draws it: top-left at (x + 8, y + dy). dy is
+        # -8 (above, the default) or 8 (below, when a direction tick would
+        # otherwise run through it -- _tag_anchor_dy()).
+        return (x + 8, y + dy, len(text) * _TAG_CH_W, _TAG_H)
 
     def _ambient_label_set(self, order):
         # Indices into `order` ([(x, y, plane), ...]) whose callsign tag
@@ -405,6 +420,10 @@ class Renderer:
         # O(n^2) over ~30 aircraft. Nearest-first is a stable relevance order
         # (the crosshair centre is what the display is "about"); flip the key
         # to q.alt_sort_key for lowest-altitude-first instead.
+        #
+        # Every candidate here is non-selected (only called when nothing is
+        # selected at all), so tick_drawn matches _draw_planes_radar's own
+        # condition with is_sel always False: heading known and gs > 20.
         ranked = sorted(
             range(len(order)),
             key=lambda i: (order[i][0] - 240) ** 2 + (order[i][1] - 240) ** 2)
@@ -414,7 +433,9 @@ class Renderer:
             x, y, p = order[i]
             if not p.callsign:
                 continue
-            bx, by, bw, bh = self._label_box(x, y, p.callsign)
+            tick_drawn = p.heading is not None and p.gs > 20
+            dy = _tag_anchor_dy(tick_drawn, p.heading)
+            bx, by, bw, bh = self._label_box(x, y, p.callsign, dy)
             if any(bx < ox + ow and ox < bx + bw and by < oy + oh and oy < by + bh
                    for (ox, oy, ow, oh) in placed):
                 continue
@@ -422,28 +443,34 @@ class Renderer:
             keep.add(i)
         return keep
 
-    def _tag(self, x, y, text):
+    def _tag(self, x, y, text, dy=-8):
         # One callsign tag: a 1 px dark box (so it reads over the coastline)
-        # then the text, at the standard (x + 8, y - 8) anchor.
+        # then the text, at (x + 8, y + dy) -- see _label_box()/_tag_anchor_dy().
         if not text:
             return
         d = self.display
-        tx, ty = x + 8, y - 8
+        tx, ty = x + 8, y + dy
         w = len(text) * _TAG_CH_W
         d.set_pen(self.BG_COLOR)
         d.rectangle(tx - 1, ty - 1, w + 2, _TAG_H)
         d.set_pen(self.RADAR_TEXT_PEN)
         d.text(text, tx, ty, WIDTH, _TAG_SCALE)
 
-    def _draw_data_block(self, x, y, p):
-        # Stage-2 ATC tag: three lines stacked upward from the blip, each on
-        # its own dark backing box. Anchored to the right of the blip like a
-        # plain tag.
+    def _draw_data_block(self, x, y, p, dy=-8):
+        # Stage-1 ATC tag: three lines, each on its own dark backing box,
+        # reading callsign/FL-speed/type top to bottom regardless of anchor
+        # side. dy=-8 (above, the default): bottom edge anchored at y + dy,
+        # stacking upward, so the line nearest the blip is last. dy=8
+        # (below, when a direction tick would otherwise run through it --
+        # _tag_anchor_dy()): top edge anchored at y + dy instead, stacking
+        # downward, so the line nearest the blip is first -- the reading
+        # order on screen (top to bottom) is the same either way.
         d = self.display
         lines = _data_block(p)
+        n = len(lines)
         tx = x + 8
         for j, line in enumerate(lines):
-            ty = y - 8 - (len(lines) - 1 - j) * _TAG_H
+            ty = y + dy + j * _TAG_H if dy > 0 else y + dy - (n - 1 - j) * _TAG_H
             w = len(line) * _TAG_CH_W
             d.set_pen(self.BG_COLOR)
             d.rectangle(tx - 1, ty - 1, w + 2, _TAG_H)
@@ -530,7 +557,10 @@ class Renderer:
         # that plane is tagged, and it always shows the ATC data block (stage
         # 1 of the 2-stage radar cycle; stage 2 adds the corner card, drawn
         # by draw_scene). The selected plane's tick is suppressed once its
-        # trace shows -- the trail carries direction there.
+        # trace shows -- the trail carries direction there. The tag/data-block
+        # anchor flips below the blip when a drawn tick would otherwise run
+        # through it (_tag_anchor_dy(), TODOS.md 2026-09-19) -- depends on
+        # heading, not which side of the screen the aircraft is on.
         d = self.display
         labelled = set() if selected is not None else self._ambient_label_set(order)
         for i, (x, y, p) in enumerate(order):
@@ -538,12 +568,14 @@ class Renderer:
             is_sel = p is selected
             d.set_pen(pen)
             d.circle(x, y, 3)
-            if p.heading is not None and p.gs > 20 and not (trace_active and is_sel):
+            tick_drawn = p.heading is not None and p.gs > 20 and not (trace_active and is_sel)
+            if tick_drawn:
                 self.draw_track_arrow(x, y, p.heading, pen)
+            dy = _tag_anchor_dy(tick_drawn, p.heading)
             if is_sel:
-                self._draw_data_block(x, y, p)
+                self._draw_data_block(x, y, p, dy)
             elif i in labelled:
-                self._tag(x, y, p.callsign)
+                self._tag(x, y, p.callsign, dy)
 
     def _draw_trace(self, trace, selected):
         # Polyline through the selected aircraft's recent fixes, oldest ->

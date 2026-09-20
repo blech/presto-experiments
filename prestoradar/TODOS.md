@@ -38,7 +38,17 @@ Switch to left hand side panel (swapping if plane crosses under)
   `Plane.on_ground`, falling back to today's behaviour when no basemap/
   airports are loaded. Applies to every aircraft, not just helicopters.
 * swap mode to show panel on tap??
-* label on right overlaps direction indicator - add to label layout algorithm swapping side?
+* ~~label on right overlaps direction indicator - add to label layout
+  algorithm swapping side?~~ Done -- turned out to depend on heading, not
+  screen side (`radar-20260919-1945/46.png`, ASA554): a direction tick
+  drawn in the same up-and-right zone as the fixed `(x+8, y-8)` tag anchor
+  is what collides, regardless of where the blip is on screen.
+  `render._tag_anchor_dy()` flips the anchor below the blip when a tick is
+  drawn heading roughly NE (0-90 deg); applies to both the ambient callsign
+  tag and the tap-cycle's stage-1 ATC data block (which also reverses its
+  3-line stacking direction so the top-to-bottom reading order stays the
+  same either way). The ambient label cull (`_ambient_label_set`) uses the
+  same flipped box so its overlap test matches what's actually drawn.
 * refactor direct http fetch on Presto to requests-like signature for better code sharing between CPython and MicroPython
 
 ## UI questions
