@@ -44,7 +44,11 @@ Switch to left hand side panel (swapping if plane crosses under)
   drawn in the same up-and-right zone as the fixed `(x+8, y-8)` tag anchor
   is what collides, regardless of where the blip is on screen.
   `render._tag_anchor_dy()` flips the anchor below the blip when a tick is
-  drawn heading roughly NE (0-90 deg); applies to both the ambient callsign
+  drawn heading 0-150 deg (initially tried 0-90 "NE only", but that missed
+  LOT37 heading ~100 deg on-device -- `radar-20260919-2005.png`; the
+  geometry (18px tick, 8px box offset, +-8px box height) actually collides
+  to ~134 deg, so 150 adds a deliberate margin past that). Applies to both
+  the ambient callsign
   tag and the tap-cycle's stage-1 ATC data block (which also reverses its
   3-line stacking direction so the top-to-bottom reading order stays the
   same either way). The ambient label cull (`_ambient_label_set`) uses the

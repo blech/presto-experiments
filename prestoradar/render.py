@@ -96,12 +96,18 @@ def _tag_anchor_dy(tick_drawn, heading):
     (above the blip, the long-standing default) normally; +8 (below)
     when a direction tick is actually drawn (draw_track_arrow(), an
     18 px line along heading_deg -- 0 = north, 90 = east, screen y grows
-    down) and it points into the same up-and-right zone the tag would
-    otherwise occupy (heading 0-90, roughly NE). Collision depends on
-    which way the aircraft is heading, not which side of the screen it's
-    on (TODOS.md 2026-09-19) -- a plane in any screen corner heading NE
-    has the same tick-vs-tag conflict."""
-    return 8 if (tick_drawn and heading is not None and 0 <= heading <= 90) else -8
+    down) and it points into the same zone the tag would otherwise
+    occupy. Collision depends on which way the aircraft is heading, not
+    which side of the screen it's on (TODOS.md 2026-09-19) -- a plane in
+    any screen corner heading into this arc has the same tick-vs-tag
+    conflict.
+
+    0-150 deg, not just 0-90 (NE): the tag box starts 8px right of the
+    blip and is 16px tall (+-8px), so the 18px tick's path still clips it
+    for headings well past due east -- confirmed on-device at 90 deg
+    (radar-20260919-2005.png, LOT37) and worked out analytically to
+    persist to about 134 deg. 150 adds a deliberate margin past that."""
+    return 8 if (tick_drawn and heading is not None and 0 <= heading <= 150) else -8
 
 
 def _data_block(p):
