@@ -161,7 +161,111 @@ def test_backoff_interval():
         "well past the threshold -> still the cooldown, not escalating further")
 
 
+class _StubNet:
+    """Stands in for feed.net.http_get: hands back a canned (status, body)
+    per host, records the order hosts were asked, and raises for a host
+    mapped to an Exception -- no network."""
+
+    def __init__(self, by_host):
+        self.by_host = by_host
+        self.calls = []
+
+    async def http_get(self, host, path, user_agent, **kw):
+        self.calls.append(host)
+        r = self.by_host[host]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+def _ac(hex, **kw):
+    import settings
+    d = {"hex": hex, "flight": hex.upper(), "lat": settings.CENTER_LAT,
+         "lon": settings.CENTER_LON, "alt_baro": 5000, "gs": 200.0, "track": 90.0}
+    d.update(kw)
+    return d
+
+
+def _run_fetch(by_host, fallback=None):
+    """Drive Feed._fetch() on CPython with feed.net.http_get stubbed out.
+    Returns (planes_or_None, feed, stub)."""
+    import asyncio
+    import feed as feed_mod
+    stub = _StubNet(by_host)
+    orig = feed_mod.net.http_get
+    feed_mod.net.http_get = stub.http_get
+    try:
+        f = feed_mod.Feed("primary", "/p", "agent/1.0", 200, 30_000, fallback=fallback)
+        planes = asyncio.run(f._fetch())
+    finally:
+        feed_mod.net.http_get = orig
+    return planes, f, stub
+
+
+def _body(obj):
+    import json
+    return (200, json.dumps(obj).encode())
+
+
+def test_fetch_runs_on_cpython_and_decodes_planes():
+    # Regression: _fetch() once called time.ticks_ms() (MicroPython-only),
+    # which broke every dev/ harness that calls it on CPython.
+    planes, f, _ = _run_fetch({"primary": _body(
+        {"ac": [_ac("abc123"), {"hex": "nopos1"}]})})   # 2nd entry has no position
+    _eq([p.hex for p in planes], ["abc123"], "decoded; the no-position entry is skipped")
+    _eq(list(f._pending_by_hex), ["abc123"], "the pending registry matches")
+
+
+def test_fetch_skips_fallback_when_primary_has_aircraft():
+    planes, _, stub = _run_fetch(
+        {"primary": _body({"ac": [_ac("abc123")]}),
+         "fb": _body({"aircraft": [_ac("def456")]})},
+        fallback=("fb", "/f", "aircraft"))
+    _eq([p.hex for p in planes], ["abc123"], "primary's aircraft used")
+    _eq(stub.calls, ["primary"], "a good primary cycle never touches the fallback")
+
+
+def test_fetch_falls_back_when_primary_is_empty():
+    planes, _, stub = _run_fetch(
+        {"primary": _body({"ac": None}),   # adsb.lol's 200-with-null backend hiccup
+         "fb": _body({"aircraft": [_ac("def456")]})},
+        fallback=("fb", "/f", "aircraft"))
+    _eq([p.hex for p in planes], ["def456"], "the fallback's key ('aircraft') is read")
+    _eq(stub.calls, ["primary", "fb"], "primary first, then the fallback")
+
+
+def test_fetch_falls_back_when_primary_raises():
+    planes, _, stub = _run_fetch(
+        {"primary": OSError("boom"), "fb": _body({"aircraft": [_ac("def456")]})},
+        fallback=("fb", "/f", "aircraft"))
+    _eq([p.hex for p in planes], ["def456"], "a network error on the primary falls back")
+
+
+def test_fetch_returns_none_when_every_source_fails():
+    planes, _, stub = _run_fetch(
+        {"primary": (503, b"nope"), "fb": OSError("boom")},
+        fallback=("fb", "/f", "aircraft"))
+    _eq(planes, None, "neither source usable -> None (counts towards the breaker)")
+
+
+def test_fetch_returns_none_on_bad_json_without_fallback():
+    planes, _, _ = _run_fetch({"primary": (200, b"not json {")})
+    _eq(planes, None, "unparseable body -> None")
+
+
+def test_fetch_empty_but_responsive_is_a_real_empty_result():
+    planes, _, _ = _run_fetch({"primary": _body({"ac": []})})
+    _eq(planes, [], "nothing in range is [] (a result), not None (a failure)")
+
+
 def main():
+    test_fetch_runs_on_cpython_and_decodes_planes()
+    test_fetch_skips_fallback_when_primary_has_aircraft()
+    test_fetch_falls_back_when_primary_is_empty()
+    test_fetch_falls_back_when_primary_raises()
+    test_fetch_returns_none_when_every_source_fails()
+    test_fetch_returns_none_on_bad_json_without_fallback()
+    test_fetch_empty_but_responsive_is_a_real_empty_result()
     test_resolve()
     test_reject_snapshot()
     test_carry_forward()

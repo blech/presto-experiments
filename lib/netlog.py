@@ -22,11 +22,18 @@ import json
 import socket
 
 try:
-    from time import ticks_ms as _ticks_ms          # MicroPython
+    from time import ticks_ms as _ticks_ms, ticks_diff   # MicroPython
 except ImportError:                                  # CPython, for desktop tests
     from time import monotonic as _monotonic
     def _ticks_ms():
         return int(_monotonic() * 1000)
+    def ticks_diff(a, b):
+        return a - b
+
+# Public alias: modules that time things (prestoradar's feed.py / traces.py)
+# also run on CPython in the dev/ harnesses, where `time.ticks_ms` doesn't
+# exist -- import this pair from here instead of from `time`.
+ticks_ms = _ticks_ms
 
 GROUP = "239.255.255.250"
 PORT = 32301

@@ -2,10 +2,9 @@ import asyncio
 import gc
 import json
 import sys
-import time
 
 import net
-from netlog import log
+from netlog import log, ticks_diff, ticks_ms
 from plane import Plane
 
 # Snapshot sanity guard (DATA_TODOS.md #5): a fetch returning fewer than this
@@ -61,7 +60,7 @@ def _carry_forward(prev_by_hex, fresh_by_hex, now_ms, carry_forward_ms=_CARRY_FO
     over prev_by_hex.
 
     ticks_diff defaults to plain subtraction, fine for a desktop test's
-    plain-int timestamps; the real caller passes time.ticks_diff so a
+    plain-int timestamps; the real caller passes ticks_diff so a
     MicroPython ticks_ms() wraparound (matters for a display left running
     for days) is handled correctly."""
     carried = []
@@ -257,8 +256,8 @@ class Feed:
         # still within its window since last really seen (DATA_TODOS.md #4) --
         # a feed hiccup or edge-of-range flicker keeps dead-reckoning instead
         # of popping off the scope and reappearing later as a "new" contact.
-        carried, expired = _carry_forward(self._by_hex, by_hex, time.ticks_ms(),
-                                           ticks_diff=time.ticks_diff)
+        carried, expired = _carry_forward(self._by_hex, by_hex, ticks_ms(),
+                                           ticks_diff=ticks_diff)
         for p in carried:
             planes.append(p)
             by_hex[p.hex] = p
@@ -281,7 +280,7 @@ class Feed:
     async def run(self):
         while True:
             log("fetch...")
-            t = time.ticks_ms()
+            t = ticks_ms()
             try:
                 fresh = await self._fetch()
             except Exception as e:  # noqa: BLE001
@@ -322,7 +321,7 @@ class Feed:
                 if self.on_update:
                     self.on_update(fresh)
                 log("fetch done:", len(self.planes), "planes",
-                    time.ticks_diff(time.ticks_ms(), t), "ms  mem", gc.mem_free())
+                    ticks_diff(ticks_ms(), t), "ms  mem", gc.mem_free())
 
             interval = _backoff_interval(self._consecutive_failures, self.fetch_interval_ms)
             if interval != self.fetch_interval_ms:
