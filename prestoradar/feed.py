@@ -190,14 +190,23 @@ class Feed:
             log("fetch: HTTP", status, body[:200], "(%s)" % host)
             return None
 
+        # Parse and gc are timed separately: everything from here to
+        # _fetch()'s decode loop is one synchronous stretch that blocks the
+        # whole event loop (no touch polling, no redraw), so how long each
+        # piece takes decides what's worth fixing. Logged as one line below.
+        t0 = ticks_ms()
         try:
-            return json.loads(body)
+            data = json.loads(body)
         except ValueError as e:
             log("fetch: bad JSON:", repr(e), len(body), "bytes", "(%s)" % host)
-            return None
-        finally:
-            body = None
-            gc.collect()
+            data = None
+        t_parse = ticks_diff(ticks_ms(), t0)
+        body = None
+        t1 = ticks_ms()
+        gc.collect()
+        log("fetch: parse", t_parse, "ms, gc", ticks_diff(ticks_ms(), t1), "ms",
+            "(%s)" % host)
+        return data
 
     async def _fetch(self):
         """Pull the current aircraft list from adsb.lol, falling back to
@@ -238,6 +247,7 @@ class Feed:
         # to be a `continue` here. HIDE_ON_GROUND is still a draw-time
         # filter in radar.py's _hidden() (REFACTORING.md #5), not applied
         # here: every aircraft the feed returns is real data.
+        t_decode = ticks_ms()
         planes = []
         by_hex = {}
         for aircraft in ac_list:
@@ -264,6 +274,8 @@ class Feed:
         if carried or expired:
             log("fetch: carried", len(carried), "expired", expired,
                 "(past %ds)" % (_CARRY_FORWARD_MS // 1000))
+        log("fetch: decode", len(ac_list), "aircraft +", len(carried), "carried,",
+            ticks_diff(ticks_ms(), t_decode), "ms")
 
         # Not committed to self._by_hex here: run()'s snapshot guard may
         # still reject this whole result and keep the previous planes list,

@@ -28,7 +28,7 @@ import io
 import geometry
 import net
 import settings
-from netlog import log
+from netlog import log, ticks_diff, ticks_ms
 
 # deflate is a MicroPython firmware module (confirmed present, see
 # dev/trace_gzip_test.py); on the CPython dev harness fall back to zlib with
@@ -103,6 +103,8 @@ async def backfill(plane):
         _apply(plane, None)
         return
 
+    t_sync = ticks_ms()   # everything below is one synchronous stretch: it blocks
+    #                       the whole event loop (touch polling, redraw) until it ends
     if status != 200:
         # 404 = adsb.lol has no recent trace for this aircraft; anything else
         # is a transient. Either way fall back to the RAM trail.
@@ -147,7 +149,8 @@ async def backfill(plane):
         return
     _apply(plane, pts)
     mem = gc.mem_free() if hasattr(gc, "mem_free") else "n/a"   # CPython has no mem_free
-    log("trace:", h, "->", len(pts) if pts else 0, "points  mem", mem)
+    log("trace:", h, "->", len(pts) if pts else 0, "points  mem", mem,
+        " sync", ticks_diff(ticks_ms(), t_sync), "ms")
 
 
 def _project(data):

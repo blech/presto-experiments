@@ -222,7 +222,20 @@ _ui = ui.UI(SETTINGS, _backdrop, _renderer, _hidden, _redraw.set,
 _feed.on_update = _ui.on_feed_update
 
 
+# Tap-latency diagnostics (TODOS.md "Sporadic tap latency"). The touch loop
+# asks for a 50 ms sleep and a frame draw adds ~100 ms, so a gap between polls
+# well beyond that means something blocked the whole event loop (a JSON parse,
+# a TLS handshake, gc, ...): LAG_LOG_MS is the gap above which it's logged.
+# _tap_at is the tick of the last dispatched tap until the frame showing it has
+# been drawn, which is when "tap->drawn" is logged. Together with the poll gap
+# on each "touch: down" line: the tap happened at most `poll gap` ms before it
+# was noticed, and was on screen `tap->drawn` ms after that.
+LAG_LOG_MS = 200
+_tap_at = None
+
+
 async def _render_loop():
+    global _tap_at
     # Dead-reckon each aircraft along its last velocity and redraw every
     # ANIM_INTERVAL. Runs uninterrupted while _feed.run() is awaiting the
     # network, so a fetch no longer freezes the animation.
@@ -244,6 +257,9 @@ async def _render_loop():
             if frame <= 3 or frame % 20 == 0:
                 log("frame", frame, "draw", time.ticks_diff(time.ticks_ms(), t),
                     "ms  basemap", _renderer.basemap_ms, "ms")
+            if _tap_at is not None:
+                log("tap->drawn", time.ticks_diff(time.ticks_ms(), _tap_at), "ms")
+                _tap_at = None
 
             # Only after this frame's own draw -- see maybe_rebuild_backdrop()'s
             # docstring for why the ordering matters (REFACTORING.md #4).
@@ -275,18 +291,27 @@ async def _touch_loop():
     # legitimate quick second tap. Shortened rather than removed outright:
     # worth confirming on-device that no spurious double-fires come back
     # before cutting it further (REFACTORING.md #4).
+    global _tap_at
     was = False
     last_ms = 0
+    last_poll = time.ticks_ms()
     while True:
         try:
+            now_poll = time.ticks_ms()
+            gap = time.ticks_diff(now_poll, last_poll)
+            last_poll = now_poll
+            if gap > LAG_LOG_MS:
+                log("loop lag:", gap, "ms since the last touch poll")
             presto.touch.poll()
             touched = presto.touch.state
             if touched and not was:
-                log("touch: down at", presto.touch.x, presto.touch.y)
+                log("touch: down at", presto.touch.x, presto.touch.y,
+                    "poll gap", gap, "ms")
                 now = time.ticks_ms()
                 since = time.ticks_diff(now, last_ms)
                 if since > 80:   # debounce
                     last_ms = now
+                    _tap_at = now
                     log("touch: debounce passed, dispatching")
                     _ui.handle_tap(presto.touch.x, presto.touch.y)
                 else:

@@ -55,7 +55,58 @@ def test_points_for():
     _eq(points_for(_P(trail=[])), None, "an empty trail -> None")
 
 
+def _run_backfill(response, plane):
+    """Drive traces.backfill() on CPython with net.http_get stubbed."""
+    import asyncio
+    import traces
+
+    async def fake_get(host, path, user_agent, **kw):
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    orig = traces.net.http_get
+    traces.net.http_get = fake_get
+    try:
+        asyncio.run(traces.backfill(plane))
+    finally:
+        traces.net.http_get = orig
+
+
+class _HexPlane(_P):
+    def __init__(self, trail):
+        _P.__init__(self, trail)
+        self.hex = "ABC123"
+
+
+def test_backfill_splices_a_gzipped_trace():
+    import gzip
+    import json
+    import settings
+
+    trace = {"timestamp": 1000.0, "trace": [
+        [i * 3, settings.CENTER_LAT + i * 0.001, settings.CENTER_LON, 5000 + i * 10,
+         200, 90, 0, 0, None] for i in range(10)]}
+    p = _HexPlane(trail=[(0.0, 0.0, 5000)])
+    _run_backfill((200, gzip.compress(json.dumps(trace).encode())), p)
+    _eq(len(p.trail), 10, "the 10 trace points replace the 1 live fix")
+    _eq(p.traced, True, "traced is set")
+
+
+def test_backfill_failure_leaves_the_trail_and_marks_traced():
+    p = _HexPlane(trail=[(0.0, 0.0, 5000)])
+    _run_backfill((404, b""), p)
+    _eq(p.trail, [(0.0, 0.0, 5000)], "a 404 leaves the trail alone")
+    _eq(p.traced, True, "still marked traced -- never retried")
+
+    p2 = _HexPlane(trail=[(0.0, 0.0, 5000)])
+    _run_backfill(OSError("boom"), p2)
+    _eq(p2.traced, True, "a network error is also terminal")
+
+
 def main():
+    test_backfill_splices_a_gzipped_trace()
+    test_backfill_failure_leaves_the_trail_and_marks_traced()
     test_apply_replaces_on_a_good_result()
     test_apply_leaves_trail_on_a_short_or_missing_result()
     test_points_for()
