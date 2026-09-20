@@ -106,16 +106,16 @@ def _angle_diff(a, b):
 
 def _near_displayed_airport(lat, lon):
     """True if (lat, lon) is within NEAR_AIRPORT_KM of one of the airports
-    this radar displays (basemap_data.AIRPORTS -- projected east/north km
-    from the centre, same frame as geometry.project()). False, never True,
-    if no basemap loaded -- see the import above. Used to waive _plausible()'s
-    heading check: an aircraft can be legitimately right on top of its
-    destination while pointed the wrong way, mid-turn."""
-    if basemap_data is None:
-        return False
+    this radar displays. False, never True, if no basemap loaded -- see the
+    import above and geometry.near_airport()'s own fallback. Used to waive
+    _plausible()'s heading check: an aircraft can be legitimately right on
+    top of its destination while pointed the wrong way, mid-turn.
+
+    Thin wrapper over geometry.near_airport() -- the shared airport-vicinity
+    primitive radar.py's ground-detection refinement also uses, with its own
+    much tighter radius (TODOS.md 2026-09-19)."""
     e, n = geometry.project(lat, lon)
-    return any(math.sqrt((e - ax) ** 2 + (n - ay) ** 2) <= NEAR_AIRPORT_KM
-               for _code, ax, ay in basemap_data.AIRPORTS)
+    return geometry.near_airport(e, n, basemap_data, NEAR_AIRPORT_KM)
 
 
 def _leg_fit(pos_lat, pos_lon, track, a_lat, a_lon, b_lat, b_lon):

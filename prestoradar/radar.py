@@ -14,6 +14,7 @@ if "/prestoradar" not in sys.path:
 import feed                             # sibling module: fetch/parse (feed.Feed)
 import backdrop                         # sibling module: vector cache + raster (backdrop.Backdrop)
 import fetchqueue                       # sibling module: generic paced priority queue
+import geometry                         # sibling module: pure position math (geometry.ground_hidden)
 import render                           # sibling module: pens + all draw_* (render.Renderer)
 import traces                           # sibling module: trace_recent fetch/parse (traces.backfill)
 import ui                               # sibling module: touch/selection/settings (ui.UI)
@@ -166,6 +167,15 @@ _SP_ROW0 = _SPANEL[1] + 44                            # top y of the first value
 _SP_ROWH = 30
 _SP_VALDX = 120                                       # value column, px from label x
 
+# How close to a displayed airport "on the ground" must be to trust the
+# feed's alt/gs-based guess (Plane.on_ground) -- a hovering helicopter, or
+# any stray alt=0/gs=0 report, can be far from every airport (TODOS.md
+# 2026-09-19). Much tighter than routes.py's NEAR_AIRPORT_KM (30), which
+# waives a route-plausibility heading check on approach/departure, not
+# "is this actually at the airport."
+GROUND_AIRPORT_KM = 3
+
+
 def _hidden(p):
     # Applied at draw time, not fetch time, so toggling HIDE_ON_GROUND takes
     # effect on the next redraw (<= ANIM_INTERVAL) instead of the next fetch
@@ -173,8 +183,10 @@ def _hidden(p):
     # with (REFACTORING.md #5). Lives here, not render.py or ui.py: it's used
     # by both (Renderer's draw-time filter, UI's selection re-pointing) and
     # neither owns the underlying settings check -- Plane.on_ground is just
-    # the data half.
-    return SETTINGS.HIDE_ON_GROUND and p.on_ground
+    # the data half. The airport-proximity refinement itself is pure position
+    # math (geometry.ground_hidden), tested in dev/test_geometry.py.
+    return geometry.ground_hidden(p.on_ground, SETTINGS.HIDE_ON_GROUND,
+                                   p.e, p.n, basemap_data, GROUND_AIRPORT_KM)
 
 # All pens and every draw_* routine live in render.py; the vector cache and
 # raster backdrop live in backdrop.py (REFACTORING.md #1). Renderer needs

@@ -93,6 +93,32 @@ def test_request_evicts_before_adding_past_capacity():
     _eq(routes._cache.get("NEWCS1"), "", "the new callsign is now pending")
 
 
+class _Basemap:
+    def __init__(self, airports):
+        self.AIRPORTS = airports
+
+
+def test_near_displayed_airport_delegates_to_geometry():
+    # _near_displayed_airport() is now a thin wrapper over the shared
+    # geometry.near_airport() primitive -- this locks in the delegation
+    # (radius, projection) rather than re-testing near_airport() itself
+    # (see dev/test_geometry.py for that).
+    import routes
+    orig_basemap = routes.basemap_data
+    try:
+        routes.basemap_data = _Basemap([("SFO", 0.0, 0.0)])
+        lat, lon = 37.74, -122.42   # settings_example.py's CENTER_LAT/LON -- e=n=0
+        _eq(routes._near_displayed_airport(lat, lon), True,
+            "the radar centre projects to (0, 0), on top of the airport mark")
+        _eq(routes._near_displayed_airport(lat + 5, lon), False,
+            "5 degrees of latitude is far outside NEAR_AIRPORT_KM (30 km)")
+
+        routes.basemap_data = None
+        _eq(routes._near_displayed_airport(lat, lon), False, "no basemap -> False")
+    finally:
+        routes.basemap_data = orig_basemap
+
+
 def main():
     test_evict_oldest_pops_the_first_inserted()
     test_evict_oldest_on_empty_cache_is_a_noop()
@@ -100,7 +126,8 @@ def main():
     test_touch_of_a_missing_key_is_a_noop()
     test_get_touches_the_key()
     test_request_evicts_before_adding_past_capacity()
-    print("routes.py: cache cap + touch: all assertions passed")
+    test_near_displayed_airport_delegates_to_geometry()
+    print("routes.py: cache cap + touch + near_displayed_airport: all assertions passed")
     return 0
 
 

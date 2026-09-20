@@ -30,7 +30,13 @@ Switch to left hand side panel (swapping if plane crosses under)
 
 ### 2026-09-19
 
-* "on ground" incorrectly catches helicopter at FL0 _not_ at airport. Filter by location, too?
+* ~~"on ground" incorrectly catches helicopter at FL0 _not_ at airport.
+  Filter by location, too?~~ Done -- `geometry.ground_hidden()` (shared with
+  `routes.py`'s existing, much looser 30 km route-plausibility check via the
+  new `geometry.near_airport()` primitive) now also requires being within
+  `radar.py`'s `GROUND_AIRPORT_KM` (3) of a displayed airport before trusting
+  `Plane.on_ground`, falling back to today's behaviour when no basemap/
+  airports are loaded. Applies to every aircraft, not just helicopters.
 * swap mode to show panel on tap??
 * label on right overlaps direction indicator - add to label layout algorithm swapping side?
 * refactor direct http fetch on Presto to requests-like signature for better code sharing between CPython and MicroPython
