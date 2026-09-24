@@ -18,6 +18,8 @@ IMAGE_URL_ROOT = "https://epic.gsfc.nasa.gov/archive/natural"
 FONT_PATH = '/ocrb.af'
 FONT_SIZE = 24
 
+SHOW_INFO_AT_START = False
+
 
 class EpicViewer():
     def __init__(self):
@@ -31,9 +33,10 @@ class EpicViewer():
 
         self.epic_data = []
         self.image_list = []
-        self.show_info = True
+        self.show_info = SHOW_INFO_AT_START
 
-        self.set_up_pen()
+        self.current_index = 0
+
         self.set_up_text()
 
 
@@ -42,14 +45,18 @@ class EpicViewer():
 
 
     def wipe(self):
-        pen = self.display.create_pen(0, 0, 0)
-        self.display.set_pen(pen)
+        self.black_pen()
 
         self.display.clear()
         self.presto.update()
 
-        pen = self.display.create_pen(255, 255, 255)
-        self.display.set_pen(pen)
+
+    def refresh_images(self):
+        self.display_text("Fetching image list", clear=True, refresh=True)
+        self.get_image_list()
+
+        self.display_text("Fetching images", clear=True, refresh=True)
+        self.fetch_images()
 
 
     def get_image_list(self):
@@ -64,16 +71,24 @@ class EpicViewer():
     def fetch_images(self):
         print("Saving images from list")
 
-        for image in self.epic_data:
+        y = 80
+
+        for idx, image in enumerate(self.epic_data):
             filename = image['image']
             capture_time = image['date']
             date, time = capture_time.split(' ')
             year, month, day = date.split('-')
 
             # pass image in to save function
-            self.cache_image(filename, year, month, day)
+            image_path, fetched = self.cache_image(filename, year, month, day)
+            if fetched:
+                self.display_image(image_path, idx)
+            else:
+                y += 30
+                self.display_text(capture_time, 16, y)
+                self.presto.update()
 
-            self.image_list.append(f"epic_images/{filename}.jpg")
+            self.image_list.append(image_path)
 
 
     def cache_image(self, filename, year, month, day):
@@ -83,7 +98,7 @@ class EpicViewer():
 
         try:
             os.stat(image_path)
-            return True
+            return image_path, False
         except OSError:
             pass
 
@@ -93,56 +108,156 @@ class EpicViewer():
             f.write(resp.content)
 
         print("... file written")
-        self.display_image(image_path)
 
-        return True
+        return image_path, True
 
 
     def display_images(self):
         while True:
             for idx, image_path in enumerate(self.image_list):
+                now = time.ticks_ms()
+                until =  time.ticks_add(now, DISPLAY_REFRESH*1000)
                 self.display_image(image_path, idx)
-                time.sleep(DISPLAY_REFRESH)
+                self.handle_touch_until(until)
+
+
+    def handle_touch_until(self, until):
+        was = False
+        now = last = time.ticks_ms()
+        last_ms = 0
+
+        while time.ticks_diff(until, now) > 0:
+            try:
+                gap = time.ticks_diff(now, last)
+                last = now
+
+                self.presto.touch.poll()
+                touched = self.presto.touch.state
+
+                if touched and not was:
+                    print("touch: down at", self.presto.touch.x, self.presto.touch.y,
+                        "poll gap", gap, "ms")
+
+                    now = time.ticks_ms()
+                    since = time.ticks_diff(now, last_ms)
+                    if since > 40:   # debounce
+                        last_ms = now
+                        print("touch: debounce passed, dispatching")
+                        self.handle_touch(self.presto.touch)
+                    else:
+                        print("touch: debounced,", since, "ms since last accepted tap")
+                was = touched
+            except Exception as e:  # noqa: BLE001
+                print("TOUCH ERROR:", repr(e))
+            time.sleep_ms(20)
+            now = time.ticks_ms()
+
+
+    def handle_touch(self, touch):
+        idx = self.current_index
+
+        if self.show_info:
+            self.show_info = False
+            self.wipe_info(idx)
+        else:
+            self.show_info = True
+            self.display_info(idx, with_update=True)
 
 
     def display_image(self, image_path, idx):
+        self.current_index = idx
+
         j = jpegdec.JPEG(self.display)
 
         j.open_file(image_path)
         j.decode(-30, -30, jpegdec.JPEG_SCALE_HALF)
 
         if self.show_info:
-            image_data = self.epic_data[idx]
+            self.display_info(idx)
+        self.presto.update()
 
-            # date
-            date = image_data['date']
 
-            # latlong
-            lat = image_data['centroid_coordinates']['lat']
-            lon = image_data['centroid_coordinates']['lon']
+    def display_info(self, idx, with_update=False):
+        image_data = self.epic_data[idx]
 
-            lat = f"{lat}N" if lat >= 0 else f"{abs(lat)}S"
-            lon = f"{lon}E" if lon >= 0 else f"{abs(lon)}W"
+        metrics = self._get_text_metrics(image_data)
 
-            location = f"{lat} {lon}"
+        self.white_pen()
 
-            pen = self.display.create_pen(255, 255, 255)
-            self.display.set_pen(pen)
+        self.vector.text(metrics['date'], metrics['dx'], 6+int(metrics['dh']))
+        self.vector.text(metrics['loc'], metrics['lx'], 480-int(metrics['lh']))
 
-            _, _, dw, dh = self.vector.measure_text(date, x=0, y=0, angle=None)
-            _, _, lw, lh = self.vector.measure_text(location, x=0, y=0, angle=None)
-            dx = int((480-dw)/2)
-            lx = int((480-lw)/2)
+        if with_update:
+            self.presto.update()
 
-            self.vector.text(date, dx, 4+int(dh))
-            self.vector.text(location, lx, 480-int(lh))
+
+    def _get_text_metrics(self, image_data):
+        # date
+        date = image_data['date']
+
+        # latlong
+        lat = image_data['centroid_coordinates']['lat']
+        lon = image_data['centroid_coordinates']['lon']
+
+        lat = f"{lat}N" if lat >= 0 else f"{abs(lat)}S"
+        lon = f"{lon}E" if lon >= 0 else f"{abs(lon)}W"
+
+        location = f"{lat} {lon}"
+
+        _, _, dw, dh = self.vector.measure_text(date, x=0, y=0, angle=None)
+        _, _, lw, lh = self.vector.measure_text(location, x=0, y=0, angle=None)
+        dx = int((480-dw)/2)
+        lx = int((480-lw)/2)
+
+        return {
+            'date': date,
+            'dx': dx,
+            'dh': dh,
+            'dw': dw,
+            'loc': location,
+            'lx': lx,
+            'lh': lh,
+            'lw': lw,
+        }
+
+
+    def wipe_info(self, idx):
+        image_data = self.epic_data[idx]
+
+        metrics = self._get_text_metrics(image_data)
+
+        # blank out means black pen
+        self.black_pen()
+
+        dx = int(metrics['dx'])
+        dy = 6
+        dw = int(metrics['dw'])
+        dh = int(metrics['dh'])
+        self.display.rectangle(dx-1, dy-1, dw+2, dh+2)
+
+        lx = int(metrics['lx'])
+        ly = 480 - 2*int(metrics['lh'])
+        lw = int(metrics['lw'])
+        lh = int(metrics['lh'])
+        self.display.rectangle(lx-1, ly-1, lw+2, lh+2)
 
         self.presto.update()
 
 
-    def set_up_pen(self):
-        # set up pen - since we only use a single colour, only do this once
+    # Used to refresh the current image without needing to know what it is
+    def redisplay_image(self):
+        idx = self.current_index
+        image_path = self.image_list[idx]
+        self.display_image(image_path, idx)
+
+
+    def white_pen(self):
         pen = self.display.create_pen(255, 255, 255)
+        self.display.set_pen(pen)
+
+
+    def black_pen(self):
+        pen = self.display.create_pen(0, 0, 0)
         self.display.set_pen(pen)
 
 
@@ -155,6 +270,8 @@ class EpicViewer():
     def display_text(self, text, x=16, y=40, clear=False, refresh=False):
         if clear:
             self.wipe()
+            self.white_pen()
+
         self.vector.text(text, x, y)
         if refresh:
             self.presto.update()
@@ -164,9 +281,9 @@ def main():
     ev = EpicViewer()
     ev.display_text("Connecting", refresh=True)
     ev.connect()
-    ev.display_text("Fetching initial images", clear=True, refresh=True)
-    ev.get_image_list()
-    ev.fetch_images()
+
+    ev.refresh_images()
+
     ev.display_images()
 
 
