@@ -2,9 +2,11 @@ import json
 import os
 import time
 
-from presto import Presto
 import jpegdec
 import urequests
+
+from presto import Presto
+from picovector import PicoVector
 
 
 DISPLAY_REFRESH = 20 # seconds
@@ -12,6 +14,10 @@ IMAGE_REFRESH = 120 # minutes
 
 API_URL = "https://epic.gsfc.nasa.gov/api/natural"
 IMAGE_URL_ROOT = "https://epic.gsfc.nasa.gov/archive/natural"
+
+FONT_PATH = '/ocrb.af'
+FONT_SIZE = 32
+
 
 
 def setup():
@@ -82,9 +88,23 @@ def display_image(presto, display, image_path):
     presto.update()
 
 
+def display_text(presto, display, text, x=16, y=40):
+    vector = PicoVector(presto.display)
+
+    vector.set_font(FONT_PATH, FONT_SIZE)
+    vector.set_font_word_spacing(120)
+    vector.set_font_letter_spacing(90)
+
+    pen = display.create_pen(255, 255, 255)
+    display.set_pen(pen)
+    vector.text(text, 16, 32) # baseline?
+    presto.update()
+
+
 def main():
     presto, display = setup()
     presto.connect()
+    display_text(presto, display, "Fetching initial images")
     images = get_image_list()
     image_paths = fetch_images(presto, display, images)
 
@@ -95,74 +115,3 @@ def main():
 
 
 main()
-
-#
-#
-#
-# Traceback (most recent call last):
-#   File "<stdin>", line 1, in <module>
-# AttributeError: 'module' object has no attribute 'open_file'
-# img = j.open_file('epic_images/00.jpg')
-# j.decode(0, 0, jpegdec.JPEG_SCALE_FULL)
-# True
-# display.update()
-#
-# display.update
-# <bound_method>
-# display.update()
-# display = picographics.PicoGraphics(display=picographics.DISPLAY_PICO_EXPLORER)
-# Traceback (most recent call last):
-#   File "<stdin>", line 1, in <module>
-# NameError: name 'picographics' isn't defined
-# import presto;
-# display.clear()
-# display = presto.display
-# display.clear()
-# display.update()
-# BLACK = display.create_pen(0, 0, 0)
-# display.clear()
-# display.update()
-# presto.update()
-# img = j.open_file('epic_images/00.jpg')
-# j.decode(0, 0, jpegdec.JPEG_SCALE_FULL)
-# True
-# presto.update()
-# display.update()
-# presto.update()
-# j = jpegdec.JPEG(display)
-# img = j.open_file('epic_images/00.jpg')
-# j.decode(0, 0, jpegdec.JPEG_SCALE_FULL)
-# True
-# display.update()
-# presto.update()
-#
-# presto.connect()
-# True
-# data = json.loads(resp.content)
-# date = data[-1]['date']
-# image_name = data[-1]['image']
-# date, image_name
-# ('2026-09-20 22:36:17', 'epic_1b_20260920224105')
-# d, t = date.split(' ')
-# y, m, d = d.split('-')
-# y, m, d
-# ('2026', '09', '20')
-# imageurl = f"https://epic.gsfc.nasa.gov/archive/natural/{y}/{m}/{d}/jpg/{image_name}.jpg"
-# resp = urequests.get(imageurl)
-# resp.status_code
-# 200
-# j.open_ram(resp.content)
-# Traceback (most recent call last):
-#   File "<stdin>", line 1, in <module>
-# AttributeError: 'jpegdec' object has no attribute 'open_ram'
-# j.open_RAM(resp.content)
-# True
-# j.decode(0, 0, jpegdec.JPEG_SCALE_HALF)
-# Trueame}.jpg"
-# presto.update()
-# display.update()
-# presto.update()
-# True
-# presto.update()
-# with open(f"epic_images/{image_name}.jpg", "wb") as f:
-# ...     f.write(resp.content)
