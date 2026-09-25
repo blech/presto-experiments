@@ -1,3 +1,12 @@
+# NAME Epic Viewer
+# DESC EPIC viewer - see Earth
+# ICON photo-library
+
+
+"""
+Fetch and display DSCOVER EPIC images of Earth
+"""
+
 import json
 import os
 import time
@@ -16,7 +25,7 @@ API_URL = "https://epic.gsfc.nasa.gov/api/natural"
 IMAGE_URL_ROOT = "https://epic.gsfc.nasa.gov/archive/natural"
 
 FONT_PATH = '/ocrb.af'
-FONT_SIZE = 24
+FONT_SIZE = 20
 
 SHOW_INFO_AT_START = False
 
@@ -84,7 +93,7 @@ class EpicViewer():
             if fetched:
                 self.display_image(image_path, idx)
             else:
-                y += 30
+                y += FONT_SIZE * 1.25
                 self.display_text(capture_time, 16, y)
                 self.presto.update()
 
